@@ -1,0 +1,176 @@
+export type Role = 'resident' | 'porteiro' | 'sindico' | 'admin';
+
+export interface Profile {
+  id: string;
+  full_name: string;
+  phone: string;
+  condominium_id: string;
+  role: Role;
+  email?: string;
+  unit?: string;
+  unit_type?: string;
+  unidade?: string;
+  unit_number_val?: string;
+  block?: string;
+  tower?: string;
+  complement?: string;
+  active: boolean;
+  must_change_password?: boolean;
+  created_by?: string;
+  updated_by?: string;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface AuditLog {
+  id: string;
+  user_id: string;
+  condominium_id: string;
+  action: string;
+  entity_type: string;
+  entity_id: string;
+  old_value?: any;
+  new_value?: any;
+  created_at: string;
+}
+
+export interface Morador {
+  id: string;
+  nome: string;
+  unidade: string;
+  unit_type?: string;
+  block?: string;
+  bloco?: string;
+  lote?: string;
+  street?: string;
+  telefone: string;
+  ativo: boolean;
+  observacoes?: string;
+  created_at: string;
+  condominium_id?: string;
+}
+
+export interface ScoredResident {
+  resident: Morador;
+  score: number;
+}
+
+export interface Condominium {
+  id: string;
+  name: string;
+  address: string;
+  created_at: string;
+}
+
+export interface Package {
+  id: string;
+  condominium_id: string;
+  recipient_id?: string;
+  recipient_name?: string;
+  recipient_name_raw: string;
+  unit_number_raw: string;
+  unit?: string;
+  unit_type?: string;
+  unit_number?: string;
+  unit_number_val?: string;
+  block?: string;
+  tower?: string;
+  complement?: string;
+  carrier: string;
+  tracking_code?: string;
+  status: 'received' | 'notified' | 'delivered';
+  photo_url?: string;
+  received_at: string;
+  delivered_at?: string;
+  received_by: string;
+  registered_by?: string;
+  created_by?: string;
+  delivered_by?: string;
+  delivered_to_name?: string;
+  notes?: string;
+  whatsapp_status?: 'pending' | 'sent' | 'failed' | 'error' | 'delivered' | 'read' | 'not_configured' | 'pending_configuration' | 'no_recipient';
+  last_notification_at?: string;
+  pickup_token?: string;
+  pickup_qr_code?: 'active' | 'used' | 'expired';
+  qr_code_generated_at?: string;
+  pickup_code?: string;
+  retrieved_at?: string;
+  retrieved_by_user_id?: string;
+  delivery_method?: 'qr_code' | 'manual' | 'photo' | 'code';
+  delivery_photo_url?: string;
+  whatsapp_message?: string;
+  created_at: string;
+  unit_label?: string;
+  porter?: { full_name: string }; // Joined data
+  deliverer?: { full_name: string }; // Joined data
+  registrar?: { full_name: string }; // Joined data
+  morador?: { 
+    nome: string; 
+    unidade: string;
+    unit_type?: string;
+    unit_number?: string;
+    block?: string;
+    street?: string;
+  }; // Joined data
+}
+
+export interface RetrievalLog {
+  id: string;
+  package_id: string;
+  porter_id: string;
+  condominium_id: string;
+  delivery_method: 'qr_code' | 'manual';
+  token_used?: string;
+  status: 'success' | 'failed';
+  error_message?: string;
+  created_at: string;
+}
+
+export interface Notification {
+  id: string;
+  user_id: string;
+  condominium_id: string;
+  message: string;
+  status: 'sent' | 'failed';
+  created_at: string;
+  delivery_channel: 'whatsapp';
+  recipient_phone?: string;
+}
+
+export interface MessageLog {
+  id: string;
+  condominium_id: string;
+  telefone: string;
+  status: string;
+  erro_api?: string;
+  data_envio: string;
+}
+
+export interface WhatsAppConversation {
+  id: string;
+  condominium_id: string;
+  phone: string;
+  message: string;
+  direction: 'inbound' | 'outbound';
+  created_at: string;
+}
+
+export interface CondominiumSettings {
+  id: string;
+  condominium_id: string;
+  notification_template: string;
+  reminder_48h_enabled: boolean;
+  reminder_72h_enabled: boolean;
+  contact_phone?: string;
+}
+
+export interface ResidentAccessToken {
+  id: string;
+  resident_id: string;
+  condominium_id: string;
+  token: string;
+  expires_at: string;
+  created_at: string;
+  last_accessed_at?: string;
+  active: boolean;
+}
