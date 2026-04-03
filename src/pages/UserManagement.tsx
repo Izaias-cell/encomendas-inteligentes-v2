@@ -114,39 +114,67 @@ export default function UserManagement({ user }: UserManagementProps) {
       if (!session) throw new Error('Sessão não encontrada');
 
       if (editingUser) {
-        const response = await fetch(`/api/admin/users/${editingUser.id}`, {
-          method: 'PATCH',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${session.access_token}`
-          },
-          body: JSON.stringify({
-            full_name: formData.full_name,
-            phone: formData.phone,
-            role: formData.role,
-            condominium_id: formData.condominium_id,
-            active: formData.active
-          })
-        });
+  const { data: updatedProfile, error } = await supabase
+    .from('profiles')
+    .update({
+      full_name: formData.full_name,
+      phone: formData.phone,
+      role: formData.role,
+      active: formData.active,
+      updated_at: new Date().toISOString()
+    })
+    .eq('id', editingUser.id)
+    .select()
+    .single();
 
-        if (!response.ok) {
-          const err = await response.json();
-          throw new Error(err.error || 'Erro ao atualizar usuário');
-        }
+  if (error) throw error;
 
-        const { profile: updatedProfile } = await response.json();
+  await logAction(
+    user.id,
+    user.condominium_id,
+    'UPDATE_USER',
+    'profiles',
+    editingUser.id,
+    editingUser,
+    updatedProfile
+  );
 
-        await logAction(
-          user.id,
-          user.condominium_id,
-          'UPDATE_USER',
-          'profiles',
-          editingUser.id,
-          editingUser,
-          updatedProfile
-        );
+  toast.success('Usuário atualizado com sucesso!');
+}
 
-        toast.success('Usuário atualizado com sucesso!');
+
+          
+    
+            
+          
+          
+        
+            
+            
+            
+            
+          
+          
+      
+
+        
+        
+          
+        
+
+        
+
+    
+        
+        
+          
+      
+          
+          
+          
+      
+
+        
       } else {
         // Create new user with temporary password
         const tempPassword = Math.random().toString(36).slice(-8);
