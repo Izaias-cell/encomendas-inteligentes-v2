@@ -113,7 +113,7 @@ export default function UserManagement({ user }: UserManagementProps) {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) throw new Error('Sessão não encontrada');
 
-      if (editingUser) {
+      if (editingUser && editingUser.id) {
   const { data: updatedProfile, error } = await supabase
     .from('profiles')
     .update({
