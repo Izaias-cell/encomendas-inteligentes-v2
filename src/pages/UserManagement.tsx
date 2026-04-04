@@ -175,7 +175,7 @@ export default function UserManagement({ user }: UserManagementProps) {
       
 
         
-      } else {
+       else {
         // Create new user with temporary password
         const tempPassword = Math.random().toString(36).slice(-8);
         
