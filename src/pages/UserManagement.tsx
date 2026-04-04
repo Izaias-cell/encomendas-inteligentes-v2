@@ -268,43 +268,28 @@ export default function UserManagement({ user }: UserManagementProps) {
     }
   };
 
-  const toggleStatus = async (u: Profile) => {
-    try {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) throw new Error('Sessão não encontrada');
 
-      const newStatus = !u.active;
-      
-      const response = await fetch(`/api/admin/users/${u.id}`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session.access_token}`
-        },
-        body: JSON.stringify({ active: newStatus })
-      });
+    const toggleStatus = async (u: Profile) => {
+  try {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) throw new Error('Sessão não encontrada');
 
-      if (!response.ok) {
-        const err = await response.json();
-        throw new Error(err.error || 'Erro ao alterar status');
-      }
+    const newStatus = !u.active;
 
-      await logAction(
-        user.id,
-        user.condominium_id,
-        newStatus ? 'ACTIVATE_USER' : 'DEACTIVATE_USER',
-        'profiles',
-        u.id,
-        { active: u.active },
-        { active: newStatus }
-      );
+    const { error } = await supabase
+      .from('profiles')
+      .update({ active: newStatus })
+      .eq('id', u.id);
 
-      toast.success(`Usuário ${newStatus ? 'ativado' : 'inativado'} com sucesso!`);
-      fetchData();
+    if (error) throw error;
+
+toast.success(`Usuário ${newStatus ? 'ativado' : 'inativado'} com sucesso!`);
+fetchData();
+    
     } catch (error: any) {
-      toast.error('Erro ao alterar status: ' + error.message);
-    }
-  };
+    toast.error('Erro ao alterar status: ' + error.message);
+  }
+};
 
   const handleDeleteUser = async (u: Profile) => {
     if (!confirm(`Tem certeza que deseja excluir este usuário? (${u.full_name})`)) return;
@@ -312,18 +297,12 @@ export default function UserManagement({ user }: UserManagementProps) {
     try {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) throw new Error('Sessão não encontrada');
+const { error } = await supabase
+  .from('profiles')
+  .delete()
+  .eq('id', u.id);
 
-      const response = await fetch(`/api/admin/users/${u.id}`, {
-        method: 'DELETE',
-        headers: {
-          'Authorization': `Bearer ${session.access_token}`
-        }
-      });
-
-      if (!response.ok) {
-        const err = await response.json();
-        throw new Error(err.error || 'Erro ao excluir usuário');
-      }
+if (error) throw error;
 
       await logAction(
         user.id,
