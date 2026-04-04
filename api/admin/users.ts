@@ -25,21 +25,26 @@ export default async function handler(req, res) {
     if (createError) throw createError
 
     // Criar profile
-    const { error: profileError } = await supabaseAdmin
-      .from('profiles')
-      .insert({
-        id: authData.user.id,
-        full_name,
-        email,
-        phone,
-        role,
-        condominium_id,
-        active: true
-      })
+const { data: profile, error: profileError } = await supabaseAdmin
+  .from('profiles')
+  .insert([{
+    id: authData.user.id,
+    full_name,
+    email,
+    phone,
+    role,
+    condominium_id,
+    active: true
+  }])
+  .select()
+  .single();
 
-    if (profileError) throw profileError
+if (profileError) throw profileError;
 
-    return res.status(200).json({ success: true })
+return res.status(200).json({
+  user: authData.user,
+  profile
+});
 
   } catch (err) {
     return res.status(500).json({ error: err.message })
