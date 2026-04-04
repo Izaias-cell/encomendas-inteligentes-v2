@@ -202,15 +202,7 @@ export default function UserManagement({ user }: UserManagementProps) {
 
         const { profile: newProfile } = await response.json();
 
-        await logAction(
-          user.id,
-          user.condominium_id,
-          'CREATE_USER',
-          'profiles',
-          newProfile.id,
-          null,
-          newProfile
-        );
+        
 
         toast.success(`Usuário criado com sucesso! Senha temporária: ${tempPassword}`, {
           duration: 10000,
