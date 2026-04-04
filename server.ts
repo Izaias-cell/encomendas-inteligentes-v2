@@ -700,14 +700,13 @@ ${portalLink || `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=$
       }
     }
 
-    try {
-      // 1. Create user in Supabase Auth
-      const { data: authData, error: createError } = await supabaseAdmin.auth.admin.createUser({
-        email,
-        password,
-        email_confirm: true,
-        user_metadata: { full_name, role }
-      });
+    const { data: authData, error: createError } =
+  await supabaseAdmin.auth.admin.createUser({
+    email,
+    password,
+    email_confirm: true,
+    user_metadata: { full_name, role }
+  });
 
       if (createError) throw createError;
 
