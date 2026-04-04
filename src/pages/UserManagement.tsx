@@ -179,31 +179,28 @@ export default function UserManagement({ user }: UserManagementProps) {
         // Create new user with temporary password
         const tempPassword = Math.random().toString(36).slice(-8);
         console.log('CRIAR USUÁRIO INICIADO');
-        const response = await fetch('/api/admin/users', {
-         method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${session.access_token}`
-          },
-          body: JSON.stringify({
-            email: formData.email,
-            password: tempPassword,
-            full_name: formData.full_name,
-            phone: formData.phone,
-            role: formData.role,
-            condominium_id: formData.condominium_id
-          })
-        });
-console.log('STATUS RESPONSE:', response.status);
-
-const data = await response.json();
-console.log('RESPOSTA API:', data);
-        if (!response.ok) {
-  throw new Error(data.error || 'Erro ao criar usuário');
-}
         
 
-        const { profile: newProfile } = data;
+const { data, error } = await supabase.functions.invoke('create-user', {
+  body: {
+    email: formData.email,
+    password: tempPassword,
+    full_name: formData.full_name,
+    phone: formData.phone,
+    role: formData.role,
+    condominium_id: formData.condominium_id
+  }
+});
+
+if (error) {
+  throw new Error(error.message || 'Erro ao criar usuário');
+}
+
+if (data?.error) {
+  throw new Error(data.error);
+}
+
+const { profile: newProfile } = data;
 
         
 
