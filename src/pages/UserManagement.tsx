@@ -203,7 +203,7 @@ console.log('RESPOSTA API:', data);
 }
         
 
-        const { profile: newProfile } = await response.json();
+        const { profile: newProfile } = data;
 
         
 
