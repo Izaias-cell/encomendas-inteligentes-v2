@@ -178,9 +178,9 @@ export default function UserManagement({ user }: UserManagementProps) {
        else {
         // Create new user with temporary password
         const tempPassword = Math.random().toString(36).slice(-8);
-        
+        console.log('CRIAR USUÁRIO INICIADO');
         const response = await fetch('/api/admin/users', {
-          method: 'POST',
+         method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${session.access_token}`
@@ -194,11 +194,14 @@ export default function UserManagement({ user }: UserManagementProps) {
             condominium_id: formData.condominium_id
           })
         });
+console.log('STATUS RESPONSE:', response.status);
 
+const data = await response.json();
+console.log('RESPOSTA API:', data);
         if (!response.ok) {
-          const err = await response.json();
-          throw new Error(err.error || 'Erro ao criar usuário');
-        }
+  throw new Error(data.error || 'Erro ao criar usuário');
+}
+        
 
         const { profile: newProfile } = await response.json();
 
