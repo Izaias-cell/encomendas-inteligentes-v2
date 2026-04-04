@@ -157,20 +157,7 @@ export default function UserManagement({ user }: UserManagementProps) {
           
       
 
-   if (error) throw error;
-
-      await logAction(
-        user.id,
-        user.condominium_id,
-        'UPDATE_USER',
-        'profiles',
-        editingUser.id,
-        editingUser,
-        updatedProfile
-      );
-
-      toast.success('Usuário atualizado com sucesso!');
-    }     
+      
         
           
         
