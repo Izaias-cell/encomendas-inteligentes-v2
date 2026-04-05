@@ -29,7 +29,17 @@ export default function Retirada() {
 
       const { data, error } = await supabase
         .from('packages')
-        .select('id, pickup_token, pickup_code, status, recipient_name_raw, unit_number_raw')
+        .select(`
+  id,
+  pickup_token,
+  pickup_code,
+  status,
+  recipient_name_raw,
+  unit_number_raw,
+  recipient:recipient_id (
+    unit_number
+  )
+`)
         .eq('pickup_token', token)
         .single();
 
