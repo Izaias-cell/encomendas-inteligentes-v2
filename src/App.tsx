@@ -26,7 +26,7 @@ import PackageList from './pages/PackageList';
 import PackageNew from './pages/PackageNew';
 import Portaria from './pages/Portaria';
 import ChangePassword from './pages/ChangePassword';
-
+import Retirada from './pages/Retirada';
 // --- Types ---
 import { Role, Profile, Package as PackageType, ScoredResident } from './types';
 import SyndicPanel from './components/SyndicPanel';
@@ -2128,7 +2128,7 @@ export default function App() {
   return (
     <Routes>
       <Route path="/portal/:token" element={<ResidentPortal />} />
-      <Route path="/retirada/:code" element={<ResidentPortal />} />
+      <Route path="/retirada" element={<Retirada />} />j
       <Route path="/change-password" element={user ? <ChangePassword /> : <Navigate to="/" />} />
       <Route path="/select-condominium" element={
         user ? (
@@ -2150,7 +2150,7 @@ const AppLayout = ({ user, loading, setUser, handleLogout }: any) => {
 
   useEffect(() => {
     // Role-based initial redirection
-    const allowedPaths = ['/select-condominium', '/condominiums/new', '/change-password'];
+    const allowedPaths = ['/select-condominium', '/condominiums/new', '/change-password', '/retirada'];
     if (!loading && user && !user.condominium_id && !allowedPaths.includes(location.pathname)) {
       navigate('/select-condominium');
       return;
