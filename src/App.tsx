@@ -2156,13 +2156,20 @@ const AppLayout = ({ user, loading, setUser, handleLogout }: any) => {
       return;
     }
 
-    if (!loading && user && user.condominium_id && (location.pathname === '/' || location.pathname === '/dashboard')) {
-      if (user.role === 'porteiro') {
-        navigate('/portaria');
-      } else if ((user.role === 'admin' || user.role === 'sindico') && location.pathname === '/') {
-        navigate('/dashboard');
-      }
+    if (
+  !loading &&
+  user &&
+  user.condominium_id &&
+  location.pathname !== '/retirada' &&
+  (location.pathname === '/' || location.pathname === '/dashboard')
+) {
+  if (user.role === 'porteiro') {
+    navigate('/portaria');
+  } else if (user.role === 'admin' || user.role === 'sindico') {
+    navigate('/dashboard');
+  }
     }
+ 
   }, [user, loading, navigate, location.pathname]);
 
   if (loading) return (
