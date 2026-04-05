@@ -69,11 +69,13 @@ export default function Retirada() {
   }
 
   const statusLabel =
-    packageData.status === 'delivered'
-      ? 'Já retirada'
-      : packageData.status === 'pending'
-      ? 'Aguardando retirada'
-      : packageData.status || 'Aguardando retirada';
+  packageData.status === 'delivered'
+    ? 'Já retirada'
+    : packageData.status === 'received'
+    ? 'Disponível para retirada'
+    : packageData.status === 'pending'
+    ? 'Aguardando retirada'
+    : 'Aguardando retirada';
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-zinc-50 p-6">
