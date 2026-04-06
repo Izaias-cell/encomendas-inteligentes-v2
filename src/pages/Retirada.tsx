@@ -99,7 +99,10 @@ export default function Retirada() {
         <div className="mb-6">
           <p className="text-sm text-zinc-500">Unidade</p>
           <p className="text-base font-medium text-zinc-800">
-  {packageData.recipient?.unit_number || {packageData.unit_number_raw?.trim() ? packageData.unit_number_raw : 'Não informada'}
+  {packageData.recipient?.unit_number 
+  || (packageData.unit_number_raw?.trim() 
+      ? packageData.unit_number_raw 
+      : 'Não informada')}
 </p>
         </div>
 
