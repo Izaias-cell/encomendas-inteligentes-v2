@@ -43,10 +43,12 @@ alert(`TOKEN URL: ${token}`);
         
 
     if (error) {
-  setError('Erro ao buscar encomenda');
+  console.log('SUPABASE ERROR:', error);
+  setError(`Erro ao buscar encomenda: ${error.message}`);
   setLoading(false);
   return;
-}
+    }
+
 
 if (!data || data.length === 0) {
   console.log('DADOS VAZIOS:', data);
