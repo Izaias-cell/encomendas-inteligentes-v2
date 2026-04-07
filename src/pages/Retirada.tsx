@@ -42,15 +42,15 @@ export default function Retirada() {
 
 `)
         .eq('pickup_token', token)
-        .single();
+        
 
-      if (error || !data) {
-        setError('Acesso inválido ou expirado');
-        setLoading(false);
-        return;
-      }
-
-      setPackageData(data);
+      if (error || !data || data.length === 0) {
+  setError('Acesso inválido ou expirado');
+  setLoading(false);
+  return;
+}
+const firstPackage = data[0];
+      setPackageData(firstPackage);
       setLoading(false);
     };
 
