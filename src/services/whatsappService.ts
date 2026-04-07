@@ -8,6 +8,7 @@ export interface WhatsAppVariables {
   rua_logradouro?: string;
   bloco_torre?: string;
   codigo_retirada: string;
+  pickup_token: string;
   data_recebimento: string;
   hora_recebimento: string;
   nome_condominio: string;
@@ -43,7 +44,8 @@ export const formatUnit = (resident: Morador): string => {
  * Assembles the WhatsApp message from variables following the "Encomendas Inteligentes" standard
  */
 export const assembleWhatsAppMessage = (vars: WhatsAppVariables): string => {
-  const linkRetirada = `${window.location.origin}/retirada/${vars.codigo_retirada}`;
+  const baseUrl = 'https://encomendas-inteligentes-v2.vercel.app';
+const linkRetirada = `${baseUrl}/retirada?token=${vars.pickup_token}`;
   
   // Limpeza rigorosa da observação (Tipo da encomenda)
   const cleanObs = vars.observacao ? vars.observacao
@@ -54,7 +56,7 @@ export const assembleWhatsAppMessage = (vars: WhatsAppVariables): string => {
     .trim() : 'Encomenda';
 
   const lines = [
-    `${vars.saudacao}, ${vars.nome_morador}!`,
+    `${vars.saudacao}, ${var8s.nome_morador}!`,
     '',
     `Sua encomenda chegou na portaria.`,
     '',
@@ -81,9 +83,10 @@ export const assembleWhatsAppMessage = (vars: WhatsAppVariables): string => {
  */
 export const prepareWhatsAppNotification = (
   resident: Morador,
-  condoName: string,
-  pickupCode: string,
-  observation?: string
+condoName: string,
+pickupCode: string,
+pickupToken: string,
+observation?: string
 ): string | null => {
   // Do not notify inactive residents
   if (!resident.ativo) return null;
@@ -99,6 +102,7 @@ export const prepareWhatsAppNotification = (
     unidade: formatUnit(resident),
     bloco_torre: blocoTorre,
     codigo_retirada: pickupCode,
+    pickup_token: pickupToken,
     data_recebimento: now.toLocaleDateString('pt-BR'),
     hora_recebimento: now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
     nome_condominio: condoName,
