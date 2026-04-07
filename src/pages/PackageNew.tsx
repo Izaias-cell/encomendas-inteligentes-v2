@@ -454,6 +454,7 @@ export default function PackageNew({ user }: PackageNewProps) {
         recipient_id: selectedResident.id,
         recipient_name_raw: recipientName || selectedResident.nome,
         unit_number: unitNumber || selectedResident.unidade || '',
+        unit_number_raw: unitNumber || selectedResident.unidade || '',
         unit_type: unitType || selectedResident.unit_type || '',
         unit_number_val: selectedResident.unidade,
         block: selectedResident.block || selectedResident.bloco,
