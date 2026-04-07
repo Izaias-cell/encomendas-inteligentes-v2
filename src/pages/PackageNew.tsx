@@ -488,7 +488,7 @@ whatsapp_message: null,
         setLoading(false);
         return;
       }
-prepareWhatsAppNotification(
+const whatsappMessage = prepareWhatsAppNotification(
   selectedResident,
   condoName || 'Condomínio',
   pickup_code,
