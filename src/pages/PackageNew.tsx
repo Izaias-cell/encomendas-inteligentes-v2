@@ -488,12 +488,12 @@ whatsapp_message: null,
         setLoading(false);
         return;
       }
-const whatsappMessage = prepareWhatsAppMessage(
+prepareWhatsAppNotification(
   selectedResident,
   condoName || 'Condomínio',
   pickup_code,
-  notes,
-  pickup_token
+  pickup_token,
+  notes
 );
 
 if (newPackage) {
