@@ -29,16 +29,9 @@ alert(`TOKEN URL: ${token}`);
 
       const { data, error } = await supabase
         .from('packages')
-        .select(`
-  id,
-  pickup_token,
-  pickup_code,
-  status,
-  recipient_name_raw,
-  unit_number_raw,
+        .select('id,pickup_token,pickup_code,status,recipient_name_raw,unit_number_raw')
 
 
-`)
         .eq('pickup_token', token)
         
 
