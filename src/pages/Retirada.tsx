@@ -36,9 +36,7 @@ alert(`TOKEN URL: ${token}`);
   status,
   recipient_name_raw,
   unit_number_raw,
-  recipient:recipient_id (
-    unit_number
-  )
+
 
 `)
         .eq('pickup_token', token)
@@ -96,17 +94,16 @@ const firstPackage = data[0];
         <div className="mb-4">
           <p className="text-sm text-zinc-500">Morador</p>
           <p className="text-lg font-semibold text-zinc-900">
-            {packageData.recipient_name_raw || 'Morador'}
+            {packageData.recipient_name_raw || 'Morad⁸or'}
           </p>
         </div>
 
         <div className="mb-6">
           <p className="text-sm text-zinc-500">Unidade</p>
           <p className="text-base font-medium text-zinc-800">
-  {packageData.recipient?.unit_number 
-  || (packageData.unit_number_raw?.trim() 
-      ? packageData.unit_number_raw 
-      : 'Não informada')}
+  {packageData.unit_number_raw?.trim()
+  ? packageData.unit_number_raw
+  : 'Não informada'}
 </p>
         </div>
 
