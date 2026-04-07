@@ -42,11 +42,19 @@ alert(`TOKEN URL: ${token}`);
         .eq('pickup_token', token)
         
 
-      if (error || !data || data.length === 0) {
+    if (error) {
+  setError('Erro ao buscar encomenda');
+  setLoading(false);
+  return;
+}
+
+if (!data || data.length === 0) {
+  console.log('DADOS VAZIOS:', data);
   setError('Acesso inválido ou expirado');
   setLoading(false);
   return;
 }
+
 const firstPackage = data[0];
       setPackageData(firstPackage);
       setLoading(false);
