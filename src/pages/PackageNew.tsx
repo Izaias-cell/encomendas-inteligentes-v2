@@ -446,12 +446,7 @@ export default function PackageNew({ user }: PackageNewProps) {
       const { data: { user: authUser } } = await supabase.auth.getUser();
 
       // 1. Preparar mensagem de WhatsApp
-      const whatsappMessage = prepareWhatsAppNotification(
-        selectedResident,
-        condoName || 'Condomínio',
-        pickupCode,
-        notes
-      );
+      
 
       // 2. Salvar a encomenda no Supabase
       const packageData = {
@@ -477,8 +472,8 @@ export default function PackageNew({ user }: PackageNewProps) {
         pickup_qr_code: 'active',
         qr_code_generated_at: new Date().toISOString(),
         status: 'received',
-        whatsapp_status: whatsappMessage ? 'pending' : 'no_recipient',
-        whatsapp_message: whatsappMessage
+        whatsapp_status: null,
+whatsapp_message: null,
       };
 
       const { data: newPackage, error: insertError } = await supabase
@@ -493,7 +488,23 @@ export default function PackageNew({ user }: PackageNewProps) {
         setLoading(false);
         return;
       }
+const whatsappMessage = prepareWhatsAppMessage(
+  selectedResident,
+  condoName || 'Condomínio',
+  pickup_code,
+  notes,
+  pickup_token
+);
 
+if (newPackage) {
+  await supabase
+    .from('packages')
+    .update({
+      whatsapp_status: whatsappMessage ? 'pending' : null,
+      whatsapp_message: whatsappMessage
+    })
+    .eq('id', newPackage.id);
+}
       if (!newPackage) {
         toast.error('Erro ao recuperar encomenda salva');
         setLoading(false);
