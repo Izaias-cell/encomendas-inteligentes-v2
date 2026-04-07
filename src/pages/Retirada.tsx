@@ -13,8 +13,8 @@ type PackageData = {
 
 export default function Retirada() {
   const [searchParams] = useSearchParams();
-  const token = searchParams.get('token');
-
+  const token = searchParams.get('token')?.trim();
+alert(`TOKEN URL: ${token}`);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [packageData, setPackageData] = useState<PackageData | null>(null);
