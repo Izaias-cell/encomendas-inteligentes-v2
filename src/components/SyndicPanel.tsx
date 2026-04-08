@@ -1737,7 +1737,7 @@ const SettingsPanel = ({ user, systemStatus }: any) => {
 
 // --- Main Syndic Panel Component ---
 
-export default function SyndicPanel({ user, onLogout }: { user: Profile, onLogout: () => void }) {
+export default function SyndicPanel({ user, onLogout }: { user: Profile; onLogout: () => void }) {
   const [loading, setLoading] = useState(true);
   const [packages, setPackages] = useState<PackageType[]>([]);
   const [residents, setResidents] = useState<Profile[]>([]);
