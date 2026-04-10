@@ -1,6 +1,6 @@
 {
-  "name": "Portaria Inteligente",
-  "description": "SaaS para gestão de encomendas em condomínios com leitura de etiquetas por IA e notificações via WhatsApp.",
+  "name": "Portaria Pro - Controle de Acesso",
+  "description": "Sistema ultra-rápido de controle de acesso para portarias de condomínio, focado em agilidade e facilidade de uso.",
   "requestFramePermissions": [
     "camera"
   ]

@@ -23,7 +23,7 @@ import {
   MessageCircle
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import { Profile, Morador } from '../types';
+import { Profile, Morador, CondominiumSettings } from '../types';
 import toast from 'react-hot-toast';
 import { logAction } from '../services/auditService';
 import { analyzePackageLabel } from '../services/geminiService';
@@ -75,8 +75,23 @@ export default function PackageNew({ user }: PackageNewProps) {
   const [showSuccessModal, setShowSuccessModal] = useState(false);
   const [lastSavedPackage, setLastSavedPackage] = useState<any>(null);
   const [currentMessage, setCurrentMessage] = useState('');
+  const [condoSettings, setCondoSettings] = useState<CondominiumSettings | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  // Fetch settings on mount
+  useEffect(() => {
+    const fetchSettings = async () => {
+      if (!user?.condominium_id) return;
+      const { data } = await supabase
+        .from('condominium_settings')
+        .select('*')
+        .eq('condominium_id', user.condominium_id)
+        .maybeSingle();
+      if (data) setCondoSettings(data);
+    };
+    fetchSettings();
+  }, [user?.condominium_id]);
 
   // Auto-trigger camera on mount
   useEffect(() => {
@@ -196,8 +211,20 @@ export default function PackageNew({ user }: PackageNewProps) {
     setLoading(true);
     
     try {
+      let finalBase64 = base64;
+
+      // Se o modo leve estiver ativado, comprimimos a imagem antes do upload e análise
+      if (condoSettings?.light_mode_enabled) {
+        try {
+          const { compressImage } = await import('../lib/imageUtils');
+          finalBase64 = await compressImage(base64, 800, 0.6);
+        } catch (err) {
+          console.warn('Falha ao comprimir imagem:', err);
+        }
+      }
+
       // 1. Convert base64 to blob for upload
-      const res = await fetch(base64);
+      const res = await fetch(finalBase64);
       const blob = await res.blob();
       const file = new File([blob], "package.jpg", { type: "image/jpeg" });
 
@@ -206,7 +233,7 @@ export default function PackageNew({ user }: PackageNewProps) {
       const filePath = `package-photos/${fileName}`;
 
       // Set photoUrl to base64 as a fallback for preview and if upload fails
-      setPhotoUrl(base64);
+      setPhotoUrl(finalBase64);
 
       try {
         const { error: uploadError } = await supabase.storage
@@ -263,10 +290,17 @@ export default function PackageNew({ user }: PackageNewProps) {
             
             setMatchingResidents(filteredMatches);
             
-            // Auto-select ONLY if extremely high confidence (e.g., 180+)
-            // This usually means exact name match + unit match
-            if (filteredMatches.length > 0 && filteredMatches[0].score >= 180) {
-              handleSelectResident(filteredMatches[0].resident);
+            if (filteredMatches.length > 0) {
+              // Auto-select if:
+              // 1. Extremely high confidence (exact name + unit)
+              // 2. ONLY ONE match found with high confidence (>= 120)
+              const topMatch = filteredMatches[0];
+              const isExtremelyHigh = topMatch.score >= 180;
+              const isOnlyMatchWithHighConfidence = filteredMatches.length === 1 && topMatch.score >= 120;
+              
+              if (isExtremelyHigh || isOnlyMatchWithHighConfidence) {
+                handleSelectResident(topMatch.resident);
+              }
             }
           }
         }
@@ -350,32 +384,47 @@ export default function PackageNew({ user }: PackageNewProps) {
     setStep('analyzing');
     setLoading(true);
     try {
-      // 1. Upload to Supabase (Opcional - não trava o fluxo se o bucket não existir)
-      const fileExt = file.name.split('.').pop();
-      const fileName = `${Math.random()}.${fileExt}`;
-      const filePath = `package-photos/${fileName}`;
-
-      try {
-        const { error: uploadError } = await supabase.storage
-          .from('packages')
-          .upload(filePath, file);
-
-        if (!uploadError) {
-          const { data: { publicUrl } } = supabase.storage
-            .from('packages')
-            .getPublicUrl(filePath);
-          setPhotoUrl(publicUrl);
-        } else {
-          console.warn("Erro no upload (bucket pode não existir):", uploadError.message);
-        }
-      } catch (storageErr) {
-        console.warn("Storage error:", storageErr);
-      }
-
-      // 2. Analyze with Gemini
       const reader = new FileReader();
       reader.onloadend = async () => {
-        const base64 = reader.result as string;
+        let base64 = reader.result as string;
+
+        // Se o modo leve estiver ativado, comprimimos a imagem
+        if (condoSettings?.light_mode_enabled) {
+          try {
+            const { compressImage } = await import('../lib/imageUtils');
+            base64 = await compressImage(base64, 800, 0.6);
+          } catch (err) {
+            console.warn('Falha ao comprimir imagem:', err);
+          }
+        }
+
+        setPhotoUrl(base64);
+
+        // 1. Upload to Supabase
+        const res = await fetch(base64);
+        const blob = await res.blob();
+        const uploadFile = new File([blob], file.name, { type: file.type });
+        
+        const fileExt = file.name.split('.').pop();
+        const fileName = `${Math.random()}.${fileExt}`;
+        const filePath = `package-photos/${fileName}`;
+
+        try {
+          const { error: uploadError } = await supabase.storage
+            .from('packages')
+            .upload(filePath, uploadFile);
+
+          if (!uploadError) {
+            const { data: { publicUrl } } = supabase.storage
+              .from('packages')
+              .getPublicUrl(filePath);
+            setPhotoUrl(publicUrl);
+          }
+        } catch (storageErr) {
+          console.warn("Storage error:", storageErr);
+        }
+
+        // 2. Analyze with Gemini
         try {
           const residentList = allCondoResidents.map(r => `${r.nome} - ${r.unidade}`);
           const data = await analyzePackageLabel(base64, residentList);
@@ -409,9 +458,17 @@ export default function PackageNew({ user }: PackageNewProps) {
                   .filter(m => m.score >= 50)
                   .slice(0, 3);
                 setMatchingResidents(filteredMatches);
-                // Auto-select ONLY if extremely high confidence
-                if (filteredMatches.length > 0 && filteredMatches[0].score >= 180) {
-                  handleSelectResident(filteredMatches[0].resident);
+                if (filteredMatches.length > 0) {
+                  // Auto-select if:
+                  // 1. Extremely high confidence
+                  // 2. ONLY ONE match found with high confidence (>= 120)
+                  const topMatch = filteredMatches[0];
+                  const isExtremelyHigh = topMatch.score >= 180;
+                  const isOnlyMatchWithHighConfidence = filteredMatches.length === 1 && topMatch.score >= 120;
+                  
+                  if (isExtremelyHigh || isOnlyMatchWithHighConfidence) {
+                    handleSelectResident(topMatch.resident);
+                  }
                 }
               }
             }
@@ -445,8 +502,45 @@ export default function PackageNew({ user }: PackageNewProps) {
       // Obter o usuário logado para capturar o ID se disponível (opcional)
       const { data: { user: authUser } } = await supabase.auth.getUser();
 
-      // 1. Preparar mensagem de WhatsApp
+      // 0. Verificar se o morador já tem encomendas pendentes para agrupar
+      const { data: existingPackages } = await supabase
+        .from('packages')
+        .select('id, pickup_code, pickup_token')
+        .eq('recipient_id', selectedResident.id)
+        .eq('status', 'received')
+        .order('received_at', { ascending: false });
+
+      const hasExisting = existingPackages && existingPackages.length > 0;
       
+      // Tenta encontrar um token e código já existentes no grupo
+      const existingToken = existingPackages?.find(p => p.pickup_token)?.pickup_token;
+      const existingCode = existingPackages?.find(p => p.pickup_code)?.pickup_code;
+
+      const finalPickupCode = existingCode || pickupCode;
+      const finalPickupToken = existingToken || (Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15));
+      const totalPackages = (existingPackages?.length || 0) + 1;
+
+      // Se houver encomendas existentes, garantir que todas tenham o mesmo token e código
+      if (hasExisting) {
+        await supabase
+          .from('packages')
+          .update({ 
+            pickup_code: finalPickupCode, 
+            pickup_token: finalPickupToken 
+          })
+          .eq('recipient_id', selectedResident.id)
+          .eq('status', 'received');
+      }
+
+      // 1. Preparar mensagem de WhatsApp
+      const whatsappMessage = prepareWhatsAppNotification(
+        selectedResident,
+        condoName || 'Condomínio',
+        finalPickupCode,
+        notes,
+        finalPickupToken,
+        totalPackages
+      );
 
       // 2. Salvar a encomenda no Supabase
       const packageData = {
@@ -454,7 +548,6 @@ export default function PackageNew({ user }: PackageNewProps) {
         recipient_id: selectedResident.id,
         recipient_name_raw: recipientName || selectedResident.nome,
         unit_number: unitNumber || selectedResident.unidade || '',
-        unit_number_raw: unitNumber || selectedResident.unidade || '',
         unit_type: unitType || selectedResident.unit_type || '',
         unit_number_val: selectedResident.unidade,
         block: selectedResident.block || selectedResident.bloco,
@@ -468,13 +561,13 @@ export default function PackageNew({ user }: PackageNewProps) {
         received_at: new Date().toISOString(),
         created_by: user.id,
         ...(authUser?.id ? { registered_by: authUser.id } : {}),
-        pickup_code: pickup_code,
-        pickup_token: pickup_token,
+        pickup_code: finalPickupCode,
+        pickup_token: finalPickupToken,
         pickup_qr_code: 'active',
         qr_code_generated_at: new Date().toISOString(),
         status: 'received',
-        whatsapp_status: null,
-whatsapp_message: null,
+        whatsapp_status: whatsappMessage ? 'pendente' : 'no_recipient',
+        whatsapp_message: whatsappMessage
       };
 
       const { data: newPackage, error: insertError } = await supabase
@@ -489,54 +582,18 @@ whatsapp_message: null,
         setLoading(false);
         return;
       }
-const whatsappMessage = prepareWhatsAppNotification(
-  selectedResident,
-  condoName || 'Condomínio',
-  pickup_code,
-  pickup_token,
-  notes
-);
 
-if (newPackage) {
-  await supabase
-    .from('packages')
-    .update({
-      whatsapp_status: whatsappMessage ? 'pending' : null,
-      whatsapp_message: whatsappMessage
-    })
-    .eq('id', newPackage.id);
-}
       if (!newPackage) {
         toast.error('Erro ao recuperar encomenda salva');
         setLoading(false);
         return;
       }
 
-      // 3. Abrir WhatsApp via wa.me (Link Direto)
-      // Tenta abrir o WhatsApp imediatamente após o sucesso do insert
+      // 3. Notificação via WhatsApp (Fluxo em Lote)
+      // O status já foi definido como 'pending' no insert inicial.
+      // O envio será feito em lote pelo painel da portaria.
       if (selectedResident.telefone && whatsappMessage) {
         setCurrentMessage(whatsappMessage);
-        const phone = selectedResident.telefone.replace(/\D/g, '');
-        const formattedPhone = phone.startsWith('55') ? phone : `55${phone}`;
-        const encodedMessage = encodeURIComponent(whatsappMessage);
-        const whatsappUrl = `https://wa.me/${formattedPhone}?text=${encodedMessage}`;
-        
-        // Tenta abrir o WhatsApp automaticamente
-        try {
-          window.open(whatsappUrl, '_blank');
-        } catch (popupErr) {
-          console.warn('Popup bloqueado pelo navegador:', popupErr);
-          toast('WhatsApp bloqueado. Use o botão no modal de sucesso.', { icon: 'ℹ️' });
-        }
-        
-        // Atualizar status no banco como 'pending' (aguardando envio manual)
-        await supabase
-          .from('packages')
-          .update({ 
-            whatsapp_status: 'pending',
-            last_notification_at: new Date().toISOString()
-          })
-          .eq('id', newPackage.id);
       }
 
       // Log action

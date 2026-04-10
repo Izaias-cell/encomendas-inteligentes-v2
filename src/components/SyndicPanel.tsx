@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { 
-  LayoutDashboard, Package, Users, BarChart3, Bell, Settings, 
+  LayoutDashboard, Package, Users, BarChart3, Bell, Settings, Building,
   Search, Filter, Download, MoreVertical, CheckCircle, XCircle, 
   Clock, Phone, Home, Calendar, ArrowUpRight, ArrowDownRight,
-  AlertCircle, RefreshCw, Trash2, Edit2, Eye, UserPlus,
+  AlertCircle, RefreshCw, Trash2, Edit2, Eye, UserPlus, Power,
   TrendingUp, Truck, Mail, MessageSquare, User, LogOut, QrCode,
-  Shield, FileText, History, Camera, ArrowLeft
+  Shield, FileText, History, Camera, ArrowLeft, Plus, Smartphone, Zap
 } from 'lucide-react';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, 
@@ -21,6 +21,8 @@ import { Profile, Package as PackageType, Notification, MessageLog, WhatsAppConv
 import { toast } from 'react-hot-toast';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import { motion } from 'motion/react';
+import { testZApiConnection } from '../services/whatsappService';
 
 
 
@@ -32,6 +34,19 @@ import UserManagement from '../pages/UserManagement';
 import AuditLogs from '../pages/AuditLogs';
 
 // --- Shared UI Components ---
+
+const getDeliveryMethodLabel = (method?: string) => {
+  switch (method) {
+    case 'manual': return 'MANUAL';
+    case 'qr_code': return 'QR CODE';
+    case 'code':
+    case 'CÓDIGO':
+    case 'pickup_code': return 'CÓDIGO';
+    case 'photo':
+    case 'foto': return 'RETIRADA COM FOTO';
+    default: return '-';
+  }
+};
 
 const Card = ({ children, className = '' }: any) => (
   <div className={`bg-white rounded-2xl border border-zinc-100 shadow-sm p-6 ${className}`}>
@@ -166,7 +181,10 @@ const Dashboard = ({ user, residents = [], logs = [], systemStatus }: any) => {
         failedWhatsApp: (logs || []).filter((l: any) => l.status_envio === 'erro' || l.status === 'failed').length,
         residentsCount: (residents || []).length,
         qrRetrievals: pkgs.filter((p: any) => p.delivery_method === 'qr_code').length,
-        manualRetrievals: pkgs.filter((p: any) => p.delivery_method === 'manual' || (p.status === 'delivered' && !p.delivery_method)).length,
+        manualRetrievals: pkgs.filter((p: any) => 
+          p.status === 'delivered' && 
+          p.delivery_method !== 'qr_code'
+        ).length,
         lastPackage: pkgs[0]
       };
 
@@ -322,56 +340,58 @@ const Dashboard = ({ user, residents = [], logs = [], systemStatus }: any) => {
           </div>
         </Card>
 
-        <Card>
-          <h3 className="font-bold text-zinc-900 mb-6">Status de Notificações</h3>
-          <div className="space-y-4">
-            <div className="flex items-center justify-between p-3 bg-emerald-50 rounded-2xl">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 bg-emerald-100 rounded-xl flex items-center justify-center text-emerald-600">
-                  <CheckCircle className="w-5 h-5" />
-                </div>
-                <div>
-                  <p className="text-xs font-bold text-emerald-700 uppercase">Sucesso</p>
-                  <p className="text-lg font-bold text-emerald-900">{stats.notificationsSent}</p>
-                </div>
-              </div>
-              <ArrowUpRight className="w-5 h-5 text-emerald-400" />
-            </div>
-
-            <div className="flex items-center justify-between p-3 bg-red-50 rounded-2xl">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 bg-red-100 rounded-xl flex items-center justify-center text-red-600">
-                  <AlertCircle className="w-5 h-5" />
-                </div>
-                <div>
-                  <p className="text-xs font-bold text-red-700 uppercase">Falhas</p>
-                  <p className="text-lg font-bold text-red-900">{stats.failedWhatsApp}</p>
-                </div>
-              </div>
-              <ArrowDownRight className="w-5 h-5 text-red-400" />
-            </div>
-
-            <div className="pt-4 border-t border-zinc-100">
-              <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-widest mb-3">Última Encomenda</h4>
-              {stats.lastPackage ? (
+        {user.role !== 'sindico' && (
+          <Card>
+            <h3 className="font-bold text-zinc-900 mb-6">Status de Notificações</h3>
+            <div className="space-y-4">
+              <div className="flex items-center justify-between p-3 bg-emerald-50 rounded-2xl">
                 <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 bg-zinc-100 rounded-xl flex items-center justify-center text-zinc-500">
-                    <Package className="w-5 h-5" />
+                  <div className="w-10 h-10 bg-emerald-100 rounded-xl flex items-center justify-center text-emerald-600">
+                    <CheckCircle className="w-5 h-5" />
                   </div>
                   <div>
-                    <p className="text-sm font-bold text-zinc-900">{stats.lastPackage.recipient_name}</p>
-                    <p className="text-xs text-zinc-500">
-                      {formatPackageUnit(stats.lastPackage)} • {formatSafeDateTime(stats.lastPackage.received_at)}
-                    </p>
-                    <p className="text-[10px] text-zinc-400 mt-0.5">Por: {stats.lastPackage.porter?.full_name || 'Portaria'}</p>
+                    <p className="text-xs font-bold text-emerald-700 uppercase">Sucesso</p>
+                    <p className="text-lg font-bold text-emerald-900">{stats.notificationsSent}</p>
                   </div>
                 </div>
-              ) : (
-                <p className="text-sm text-zinc-400 italic">Nenhuma registrada</p>
-              )}
+                <ArrowUpRight className="w-5 h-5 text-emerald-400" />
+              </div>
+
+              <div className="flex items-center justify-between p-3 bg-red-50 rounded-2xl">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 bg-red-100 rounded-xl flex items-center justify-center text-red-600">
+                    <AlertCircle className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <p className="text-xs font-bold text-red-700 uppercase">Falhas</p>
+                    <p className="text-lg font-bold text-red-900">{stats.failedWhatsApp}</p>
+                  </div>
+                </div>
+                <ArrowDownRight className="w-5 h-5 text-red-400" />
+              </div>
+
+              <div className="pt-4 border-t border-zinc-100">
+                <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-widest mb-3">Última Encomenda</h4>
+                {stats.lastPackage ? (
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 bg-zinc-100 rounded-xl flex items-center justify-center text-zinc-500">
+                      <Package className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <p className="text-sm font-bold text-zinc-900">{stats.lastPackage.recipient_name}</p>
+                      <p className="text-xs text-zinc-500">
+                        {formatPackageUnit(stats.lastPackage)} • {formatSafeDateTime(stats.lastPackage.received_at)}
+                      </p>
+                      <p className="text-[10px] text-zinc-400 mt-0.5">Por: {stats.lastPackage.porter?.full_name || 'Portaria'}</p>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-sm text-zinc-400 italic">Nenhuma registrada</p>
+                )}
+              </div>
             </div>
-          </div>
-        </Card>
+          </Card>
+        )}
       </div>
     </div>
   );
@@ -433,7 +453,7 @@ const PackagesList = ({ user }: any) => {
     }
   };
 
-  const handleConfirmDelivery = async (method: 'manual' | 'qr_code' | 'photo' | 'code' = 'manual') => {
+  const handleConfirmDelivery = async (method: 'manual' | 'qr_code' | 'photo' | 'code' | 'CÓDIGO' = 'manual') => {
     if (!pkgForDelivery) return;
     
     const hasCodeInput = confirmationCode.trim().length > 0;
@@ -455,8 +475,10 @@ const PackagesList = ({ user }: any) => {
         finalPhotoUrl = await uploadDeliveryPhoto(deliveryPhoto);
         finalMethod = 'photo';
       } else if (finalMethod === 'manual' && (pkgForDelivery.pickup_code || confirmationCode)) {
-        // Se for manual mas tiver código de retirada, salva como 'code'
-        finalMethod = 'code';
+        // Se for manual mas tiver código de retirada, salva como 'CÓDIGO'
+        finalMethod = 'CÓDIGO';
+      } else if (finalMethod === 'code') {
+        finalMethod = 'CÓDIGO';
       }
 
       const { data: { user: authUser } } = await supabase.auth.getUser();
@@ -474,6 +496,16 @@ const PackagesList = ({ user }: any) => {
       
       if (error) throw error;
       setIsDeliverySuccess(true);
+      
+      // Update local state
+      setPackages(prev => prev.map(p => p.package_id === pkgForDelivery.package_id ? { 
+        ...p, 
+        status: 'delivered', 
+        delivered_at: new Date().toISOString(),
+        delivery_method: finalMethod,
+        delivery_photo_url: finalPhotoUrl
+      } : p));
+
       fetchPackages();
       
       // Auto close after 2 seconds
@@ -501,7 +533,14 @@ const PackagesList = ({ user }: any) => {
       // Fetch all packages to ensure consistency with Dashboard stats
       const { data, error } = await supabase
         .from('packages')
-        .select('*, package_id:id, recipient_name:recipient_name_raw, unit_label:unit_number')
+        .select(`
+          *, 
+          package_id:id, 
+          recipient_name:recipient_name_raw, 
+          unit_label:unit_number,
+          registrar:profiles!packages_created_by_fkey(full_name),
+          deliverer:profiles!packages_delivered_by_fkey(full_name)
+        `)
         .eq('condominium_id', user.condominium_id)
         .order('received_at', { ascending: false });
 
@@ -537,18 +576,6 @@ const PackagesList = ({ user }: any) => {
   useEffect(() => {
     fetchPackages();
   }, [filterStatus, user.condominium_id]);
-
-  const getDeliveryMethodLabel = (method?: string) => {
-    switch (method) {
-      case 'manual': return 'MANUAL';
-      case 'qr_code': return 'QR CODE';
-      case 'code':
-      case 'pickup_code': return 'CÓDIGO';
-      case 'photo':
-      case 'foto': return 'RETIRADA COM FOTO';
-      default: return '-';
-    }
-  };
 
   const filtered = packages.filter((p: any) => {
     const searchLower = searchTerm.toLowerCase();
@@ -669,21 +696,21 @@ const PackagesList = ({ user }: any) => {
     const tableColumn = [
       "Morador",
       "Unidade",
-      "Tipo",
       "Recebimento",
       "Retirada",
-      "Status",
-      "Método"
+      "Registrado por",
+      "Entregue por",
+      "Forma"
     ];
 
     const tableRows = filtered.map(pkg => [
       pkg.recipient_name || "",
       formatPackageUnit(pkg) || "",
-      pkg.notes || "Encomenda",
-      formatSafeDate(pkg.received_at) || "",
-      pkg.delivered_at ? formatSafeDate(pkg.delivered_at) : "-",
-      pkg.status === 'delivered' ? 'Retirada' : 'Pendente',
-      getDeliveryMethodLabel(pkg.delivery_method)
+      formatSafeDateTime(pkg.received_at) || "",
+      pkg.delivered_at ? formatSafeDateTime(pkg.delivered_at) : "Pendente",
+      pkg.registrar?.full_name || pkg.porter_name || "-",
+      pkg.delivered_at ? (pkg.deliverer?.full_name || "-") : "-",
+      pkg.delivered_at ? getDeliveryMethodLabel(pkg.delivery_method) : "-"
     ]);
 
     autoTable(doc, {
@@ -759,7 +786,7 @@ const PackagesList = ({ user }: any) => {
             className="ml-auto flex items-center gap-2"
           >
             <Download className="w-4 h-4" />
-            Exportar histórico
+            Exportar
           </Button>
           <Button 
             variant="outline" 
@@ -1152,13 +1179,243 @@ const PackagesList = ({ user }: any) => {
   );
 };
 
+// --- History Component ---
+
+const HistoryTab = ({ user }: any) => {
+  const [searchTerm, setSearchTerm] = useState('');
+  const [packages, setPackages] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [dateRange, setDateRange] = useState({ start: '', end: '' });
+
+  const fetchPackages = async () => {
+    setLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from('packages')
+        .select(`
+          *, 
+          registrar:profiles!packages_created_by_fkey(full_name),
+          deliverer:profiles!packages_delivered_by_fkey(full_name)
+        `)
+        .eq('condominium_id', user.condominium_id)
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+      setPackages(data || []);
+    } catch (err) {
+      console.error('Erro ao buscar histórico:', err);
+      toast.error("Erro ao carregar histórico");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchPackages();
+  }, [user.condominium_id]);
+
+  const filtered = packages.filter(pkg => {
+    const matchesSearch = 
+      pkg.recipient_name_raw?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      pkg.unit_number?.includes(searchTerm);
+    
+    if (!matchesSearch) return false;
+
+    if (dateRange.start) {
+      const start = startOfDay(new Date(dateRange.start));
+      if (new Date(pkg.created_at) < start) return false;
+    }
+    if (dateRange.end) {
+      const end = endOfDay(new Date(dateRange.end));
+      if (new Date(pkg.created_at) > end) return false;
+    }
+
+    return true;
+  });
+
+  const handleExportCSV = () => {
+    if (filtered.length === 0) {
+      toast.error("Nenhuma encomenda para exportar");
+      return;
+    }
+
+    const headers = [
+      "Morador",
+      "Unidade",
+      "Status",
+      "Data Recebimento",
+      "Data Retirada",
+      "Forma de Retirada"
+    ];
+
+    const rows = filtered.map(pkg => [
+      pkg.recipient_name_raw || "",
+      formatPackageUnit(pkg) || "",
+      pkg.status === 'delivered' ? 'Retirada' : 'Pendente',
+      formatSafeDateTime(pkg.received_at) || "",
+      pkg.delivered_at ? formatSafeDateTime(pkg.delivered_at) : "Pendente",
+      getDeliveryMethodLabel(pkg.delivery_method)
+    ]);
+
+    const csvContent = [
+      headers.join(","),
+      ...rows.map(row => row.map(cell => `"${cell}"`).join(","))
+    ].join("\n");
+
+    const blob = new Blob(["\ufeff" + csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    link.setAttribute("href", url);
+    link.setAttribute("download", `historico_encomendas_${formatDate(new Date(), 'yyyy-MM-dd')}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const handleExportPDF = () => {
+    if (filtered.length === 0) {
+      toast.error("Nenhuma encomenda para exportar");
+      return;
+    }
+
+    const doc = new jsPDF();
+    
+    doc.setFontSize(18);
+    doc.text('Relatório de Histórico de Encomendas', 14, 22);
+    
+    doc.setFontSize(11);
+    doc.setTextColor(100);
+    doc.text(`Gerado em: ${formatSafeDateTime(new Date().toISOString())}`, 14, 30);
+    doc.text(`Total de registros: ${filtered.length}`, 14, 36);
+
+    const tableData = filtered.map(pkg => [
+      pkg.recipient_name_raw || "",
+      formatPackageUnit(pkg) || "",
+      formatSafeDateTime(pkg.received_at) || "",
+      pkg.delivered_at ? formatSafeDateTime(pkg.delivered_at) : "Pendente",
+      pkg.registrar?.full_name || pkg.porter_name || "-",
+      pkg.delivered_at ? (pkg.deliverer?.full_name || "-") : "-",
+      pkg.delivered_at ? getDeliveryMethodLabel(pkg.delivery_method) : "-"
+    ]);
+
+    autoTable(doc, {
+      startY: 45,
+      head: [['Morador', 'Unidade', 'Recebimento', 'Retirada', 'Registrado por', 'Entregue por', 'Forma']],
+      body: tableData,
+      styles: { fontSize: 8, cellPadding: 2 },
+      headStyles: { fillColor: [16, 185, 129], textColor: 255 },
+      alternateRowStyles: { fillColor: [249, 250, 251] },
+      margin: { top: 45 },
+    });
+
+    doc.save(`relatorio_historico_${formatDate(new Date(), 'yyyy-MM-dd')}.pdf`);
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+        <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
+          <div className="relative flex-1 md:w-64">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
+            <Input 
+              value={searchTerm}
+              onChange={(e: any) => setSearchTerm(e.target.value)}
+              placeholder="Buscar morador ou unidade..."
+              className="pl-10"
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <Input 
+              type="date"
+              value={dateRange.start}
+              onChange={(e: any) => setDateRange(prev => ({ ...prev, start: e.target.value }))}
+              className="w-auto"
+            />
+            <span className="text-zinc-400">até</span>
+            <Input 
+              type="date"
+              value={dateRange.end}
+              onChange={(e: any) => setDateRange(prev => ({ ...prev, end: e.target.value }))}
+              className="w-auto"
+            />
+          </div>
+        </div>
+        <div className="flex gap-2 w-full md:w-auto">
+          <Button variant="outline" onClick={handleExportCSV} className="flex-1 md:flex-none">
+            <Download className="w-4 h-4" /> CSV/Excel
+          </Button>
+          <Button variant="outline" onClick={handleExportPDF} className="flex-1 md:flex-none">
+            <FileText className="w-4 h-4" /> PDF
+          </Button>
+        </div>
+      </div>
+
+      <Card className="overflow-hidden p-0">
+        <div className="overflow-x-auto">
+          <table className="w-full">
+            <thead>
+              <tr className="bg-zinc-50 border-b border-zinc-100">
+                <th className="px-6 py-4 text-left text-xs font-bold text-zinc-400 uppercase tracking-widest">Morador</th>
+                <th className="px-6 py-4 text-left text-xs font-bold text-zinc-400 uppercase tracking-widest">Unidade</th>
+                <th className="px-6 py-4 text-left text-xs font-bold text-zinc-400 uppercase tracking-widest">Status</th>
+                <th className="px-6 py-4 text-left text-xs font-bold text-zinc-400 uppercase tracking-widest">Recebimento</th>
+                <th className="px-6 py-4 text-left text-xs font-bold text-zinc-400 uppercase tracking-widest">Retirada</th>
+                <th className="px-6 py-4 text-left text-xs font-bold text-zinc-400 uppercase tracking-widest">Método</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-zinc-50">
+              {loading ? (
+                <tr>
+                  <td colSpan={6} className="px-6 py-12 text-center">
+                    <RefreshCw className="w-8 h-8 animate-spin text-emerald-600 mx-auto" />
+                  </td>
+                </tr>
+              ) : filtered.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="px-6 py-12 text-center text-zinc-500 italic">
+                    Nenhuma encomenda encontrada no histórico
+                  </td>
+                </tr>
+              ) : (
+                filtered.map((pkg) => (
+                  <tr key={pkg.id} className="hover:bg-zinc-50/50 transition-colors">
+                    <td className="px-6 py-4">
+                      <p className="text-sm font-bold text-zinc-900">{pkg.recipient_name_raw}</p>
+                    </td>
+                    <td className="px-6 py-4">
+                      <p className="text-sm text-zinc-600">{formatPackageUnit(pkg)}</p>
+                    </td>
+                    <td className="px-6 py-4">
+                      <Badge variant={pkg.status === 'delivered' ? 'emerald' : 'amber'}>
+                        {pkg.status === 'delivered' ? 'Retirada' : 'Pendente'}
+                      </Badge>
+                    </td>
+                    <td className="px-6 py-4">
+                      <p className="text-sm text-zinc-600">{formatSafeDateTime(pkg.received_at)}</p>
+                    </td>
+                    <td className="px-6 py-4">
+                      <p className="text-sm text-zinc-600">{pkg.delivered_at ? formatSafeDateTime(pkg.delivered_at) : '-'}</p>
+                    </td>
+                    <td className="px-6 py-4">
+                      <p className="text-xs font-medium text-zinc-500">{getDeliveryMethodLabel(pkg.delivery_method)}</p>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
+  );
+};
+
 const ResidentsList = ({ user, residents = [], onUpdate }: any) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [editingResident, setEditingResident] = useState<any>(null);
-  const [isConfirmOpen, setIsConfirmOpen] = useState(false);
-  const [residentToDeactivate, setResidentToDeactivate] = useState<any>(null);
   const [formData, setFormData] = useState({
     nome: '',
     unidade: '',
@@ -1170,7 +1427,10 @@ const ResidentsList = ({ user, residents = [], onUpdate }: any) => {
     street: ''
   });
 
+  const [activeResidentMenu, setActiveResidentMenu] = useState<string | null>(null);
+
   const filtered = (residents || []).filter((r: any) => 
+    r.ativo !== false &&
     (r.nome?.toLowerCase().includes(searchTerm.toLowerCase()) ||
     r.unidade?.includes(searchTerm))
   );
@@ -1204,33 +1464,60 @@ const ResidentsList = ({ user, residents = [], onUpdate }: any) => {
     }
   };
 
-  const handleDelete = (id: string, currentStatus: boolean) => {
-    setResidentToDeactivate({ id, currentStatus });
-    setIsConfirmOpen(true);
-  };
-
-  const confirmDeactivation = async () => {
-    if (!residentToDeactivate) return;
+  const toggleResidentStatus = async (resident: any) => {
     setLoading(true);
     try {
-      const { error } = await supabase
+      const newStatus = !resident.ativo;
+      
+      // Update moradores table
+      const { error: moradorError } = await supabase
         .from('moradores')
-        .update({ ativo: !residentToDeactivate.currentStatus })
-        .eq('id', residentToDeactivate.id);
+        .update({ ativo: newStatus })
+        .eq('id', resident.id);
 
-      if (!error) {
-        toast.success(`Morador ${residentToDeactivate.currentStatus ? 'desativado' : 'reativado'}`);
-        onUpdate();
-      } else {
-        toast.error("Erro ao alterar status");
-      }
+      if (moradorError) throw moradorError;
+
+      // Also update profiles table if it exists
+      await supabase
+        .from('profiles')
+        .update({ active: newStatus })
+        .eq('id', resident.id);
+
+      toast.success(`Morador ${newStatus ? 'ativado' : 'desativado'} com sucesso!`);
+      
+      // Log action
+      await supabase.from('audit_logs').insert([{
+        user_id: user.id,
+        action: newStatus ? 'activate_resident' : 'deactivate_resident',
+        resource_type: 'resident',
+        resource_id: resident.id,
+        details: { nome: resident.nome, unidade: resident.unidade },
+        condominium_id: user.condominium_id
+      }]);
+
+      onUpdate();
     } catch (err: any) {
-      toast.error(err.message || "Erro inesperado");
+      toast.error(err.message || "Erro ao alterar status");
     } finally {
       setLoading(false);
-      setIsConfirmOpen(false);
-      setResidentToDeactivate(null);
+      setActiveResidentMenu(null);
     }
+  };
+
+  const handleEdit = (res: any) => {
+    setEditingResident(res); 
+    setFormData({ 
+      nome: res.nome, 
+      unidade: res.unidade, 
+      telefone: res.telefone, 
+      ativo: res.ativo ?? true, 
+      unit_type: res.unit_type || '', 
+      block: res.block || res.bloco || '', 
+      lote: res.lote || '',
+      street: res.street || '' 
+    }); 
+    setIsModalOpen(true);
+    setActiveResidentMenu(null);
   };
 
   return (
@@ -1274,42 +1561,43 @@ const ResidentsList = ({ user, residents = [], onUpdate }: any) => {
                       {res.ativo ? 'Ativo' : 'Inativo'}
                     </span>
                   </td>
-                  <td className="px-6 py-4 text-right">
-                    <div className="flex justify-end gap-2">
-                      <Button 
-                        variant="ghost" 
-                        size="sm" 
-                        onClick={() => { 
-                          setEditingResident(res); 
-                          setFormData({ 
-                            nome: res.nome, 
-                            unidade: res.unidade, 
-                            telefone: res.telefone, 
-                            ativo: res.ativo ?? true, 
-                            unit_type: res.unit_type || '', 
-                            block: res.block || res.bloco || '', 
-                            lote: res.lote || '',
-                            street: res.street || '' 
-                          }); 
-                          setIsModalOpen(true); 
-                        }}
-                        title="Editar"
+                  <td className="px-6 py-4 text-right relative">
+                    <div className="flex justify-end">
+                      <button
+                        onClick={() => setActiveResidentMenu(activeResidentMenu === res.id ? null : res.id)}
+                        className="p-2 hover:bg-zinc-100 rounded-lg text-zinc-400 hover:text-zinc-600 transition-all"
                       >
-                        <Edit2 className="w-4 h-4" />
-                      </Button>
-                      {(user.role === 'sindico' || user.role === 'admin') && (
-                        <Button 
-                          variant="ghost" 
-                          size="sm" 
-                          className={res.ativo ? "text-red-500 hover:bg-red-50" : "text-emerald-500 hover:bg-emerald-50"} 
-                          onClick={() => handleDelete(res.id, res.ativo ?? true)}
-                          title={res.ativo ? "Desativar" : "Reativar"}
-                        >
-                          {res.ativo ? <Trash2 className="w-4 h-4" /> : <RefreshCw className="w-4 h-4" />}
-                          <span className="ml-1 text-[10px] font-bold uppercase">
-                            {res.ativo ? 'Inativar' : 'Ativar'}
-                          </span>
-                        </Button>
+                        <MoreVertical className="w-5 h-5" />
+                      </button>
+
+                      {activeResidentMenu === res.id && (
+                        <>
+                          <div 
+                            className="fixed inset-0 z-10" 
+                            onClick={() => setActiveResidentMenu(null)}
+                          />
+                          <div className="absolute right-6 top-12 w-48 bg-white rounded-xl shadow-xl border border-zinc-100 py-2 z-20 animate-in fade-in zoom-in-95 duration-100">
+                            <button
+                              onClick={() => handleEdit(res)}
+                              className="w-full px-4 py-2 text-left text-sm text-zinc-600 hover:bg-zinc-50 flex items-center gap-2"
+                            >
+                              <Edit2 className="w-4 h-4" />
+                              Editar Morador
+                            </button>
+                            
+                            {(user.role === 'admin' || user.role === 'sindico') && (
+                              <>
+                                <button
+                                  onClick={() => toggleResidentStatus(res)}
+                                  className={`w-full px-4 py-2 text-left text-sm flex items-center gap-2 hover:bg-zinc-50 ${res.ativo ? 'text-amber-600' : 'text-emerald-600'}`}
+                                >
+                                  <Power className="w-4 h-4" />
+                                  {res.ativo ? 'Desativar Morador' : 'Ativar Morador'}
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        </>
                       )}
                     </div>
                   </td>
@@ -1416,40 +1704,79 @@ const ResidentsList = ({ user, residents = [], onUpdate }: any) => {
           </Button>
         </form>
       </Modal>
+    </div>
+  );
+};
 
-      <Modal
-        isOpen={isConfirmOpen}
-        onClose={() => setIsConfirmOpen(false)}
-        title={residentToDeactivate?.currentStatus ? "Desativar Morador" : "Reativar Morador"}
-      >
-        <div className="space-y-6 text-center">
-          <div className={`w-16 h-16 mx-auto rounded-full flex items-center justify-center ${residentToDeactivate?.currentStatus ? 'bg-red-100 text-red-600' : 'bg-emerald-100 text-emerald-600'}`}>
-            {residentToDeactivate?.currentStatus ? <Trash2 className="w-8 h-8" /> : <RefreshCw className="w-8 h-8" />}
-          </div>
-          <div>
-            <p className="text-zinc-600">
-              Deseja {residentToDeactivate?.currentStatus ? 'desativar' : 'reativar'} este morador?
-            </p>
-            {!residentToDeactivate?.currentStatus && (
-              <p className="text-xs text-zinc-400 mt-2">Ele voltará a aparecer nas buscas da portaria.</p>
-            )}
-            {residentToDeactivate?.currentStatus && (
-              <p className="text-xs text-zinc-400 mt-2">Ele não aparecerá mais nas buscas da portaria, mas o histórico será mantido.</p>
-            )}
-          </div>
-          <div className="flex gap-3">
-            <Button variant="outline" className="flex-1" onClick={() => setIsConfirmOpen(false)}>Cancelar</Button>
-            <Button 
-              variant={residentToDeactivate?.currentStatus ? "danger" : "primary"} 
-              className="flex-1" 
-              onClick={confirmDeactivation}
-              loading={loading}
-            >
-              Confirmar
-            </Button>
-          </div>
+const InactiveResidentsList = ({ residents = [] }: any) => {
+  const [searchTerm, setSearchTerm] = useState('');
+
+  const filtered = (residents || []).filter((r: any) => 
+    r.ativo === false &&
+    (r.nome?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    r.unidade?.includes(searchTerm))
+  );
+
+  return (
+    <div className="space-y-4">
+      <div className="flex justify-between items-center">
+        <div className="relative w-full max-w-xs">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
+          <input 
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            className="w-full pl-10 pr-4 py-2.5 rounded-2xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 bg-white" 
+            placeholder="Buscar morador desativado..." 
+          />
         </div>
-      </Modal>
+        <div className="flex items-center gap-2 text-zinc-400 text-xs font-medium bg-zinc-100 px-4 py-2 rounded-xl border border-zinc-200">
+          <AlertCircle className="w-4 h-4" />
+          Modo Somente Visualização
+        </div>
+      </div>
+
+      <Card className="p-0 overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="bg-zinc-50 border-b border-zinc-100">
+                <th className="px-6 py-4 text-xs font-bold text-zinc-400 uppercase tracking-widest">Nome</th>
+                <th className="px-6 py-4 text-xs font-bold text-zinc-400 uppercase tracking-widest">Unidade</th>
+                <th className="px-6 py-4 text-xs font-bold text-zinc-400 uppercase tracking-widest">Telefone</th>
+                <th className="px-6 py-4 text-xs font-bold text-zinc-400 uppercase tracking-widest">Tipo</th>
+                <th className="px-6 py-4 text-xs font-bold text-zinc-400 uppercase tracking-widest">Bloco/Torre</th>
+                <th className="px-6 py-4 text-xs font-bold text-zinc-400 uppercase tracking-widest">Lote/Quadra</th>
+                <th className="px-6 py-4 text-xs font-bold text-zinc-400 uppercase tracking-widest">Status</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-zinc-50">
+              {filtered.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="px-6 py-12 text-center text-zinc-400 italic">
+                    Nenhum morador desativado encontrado.
+                  </td>
+                </tr>
+              ) : (
+                filtered.map((res: any) => (
+                  <tr key={res.id} className="hover:bg-zinc-50 transition-colors opacity-75">
+                    <td className="px-6 py-4 font-bold text-zinc-900">{res.nome}</td>
+                    <td className="px-6 py-4 text-sm text-zinc-600">{formatResidentAddress(res)}</td>
+                    <td className="px-6 py-4 text-sm text-zinc-600">{res.telefone || '---'}</td>
+                    <td className="px-6 py-4 text-sm text-zinc-600">{res.unit_type || '---'}</td>
+                    <td className="px-6 py-4 text-sm text-zinc-600">{res.block || res.bloco || '---'}</td>
+                    <td className="px-6 py-4 text-sm text-zinc-600">{res.lote || '---'}</td>
+                    <td className="px-6 py-4">
+                      <span className="px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider bg-zinc-200 text-zinc-600">
+                        DESATIVADO
+                      </span>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Card>
     </div>
   );
 };
@@ -1601,16 +1928,25 @@ const NotificationsPanel = ({ logs = [], onUpdate }: any) => {
 
 // --- Settings Component ---
 
-const SettingsPanel = ({ user, systemStatus }: any) => {
+const SettingsPanel = ({ user, systemStatus, onUpdateUser }: any) => {
   const [condo, setCondo] = useState<any>(null);
   const [settings, setSettings] = useState<CondominiumSettings | null>(null);
   const [loading, setLoading] = useState(false);
+  const [testingConnection, setTestingConnection] = useState(false);
+  const [showNewCondoModal, setShowNewCondoModal] = useState(false);
+  const [newCondoName, setNewCondoName] = useState('');
+  const [newCondoAddress, setNewCondoAddress] = useState('');
+  const [creatingCondo, setCreatingCondo] = useState(false);
+  const [showClearDataModal, setShowClearDataModal] = useState(false);
+  const [clearingData, setClearingData] = useState(false);
+  const navigate = useNavigate();
 
   useEffect(() => {
     fetchData();
-  }, []);
+  }, [user.condominium_id]);
 
   const fetchData = async () => {
+    if (!user.condominium_id) return;
     const { data: condoData } = await supabase.from('condominiums').select('*').eq('id', user.condominium_id).single();
     setCondo(condoData);
 
@@ -1625,8 +1961,31 @@ const SettingsPanel = ({ user, systemStatus }: any) => {
         notification_template: '📦 Nova encomenda recebida\n\nOlá, {{name}}\n\nUma encomenda chegou para sua unidade {{unit}}.\n\nVocê já pode retirar na portaria.',
         reminder_48h_enabled: true,
         reminder_72h_enabled: true,
-        contact_phone: ''
+        light_mode_enabled: true,
+        contact_phone: '',
+        whatsapp_mode: 'manual_assistido'
       });
+    }
+  };
+
+  const handleTestConnection = async () => {
+    if (!settings?.api_url || !settings?.api_token) {
+      toast.error("Preencha a URL e o Token da API");
+      return;
+    }
+
+    setTestingConnection(true);
+    try {
+      const result = await testZApiConnection(settings.api_url, settings.api_token);
+      if (result.success) {
+        toast.success("Conexão com Z-API realizada com sucesso!");
+      } else {
+        toast.error(`Falha ao conectar com a Z-API: ${result.error}`);
+      }
+    } catch (err) {
+      toast.error("Erro ao testar conexão");
+    } finally {
+      setTestingConnection(false);
     }
   };
 
@@ -1652,24 +2011,108 @@ const SettingsPanel = ({ user, systemStatus }: any) => {
     }
   };
 
+  const handleCreateCondo = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setCreatingCondo(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) throw new Error('Sessão não encontrada');
+
+      const response = await fetch('/api/condominiums/create', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session.access_token}`
+        },
+        body: JSON.stringify({ name: newCondoName, address: newCondoAddress })
+      });
+
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Erro ao criar condomínio');
+
+      toast.success('Condomínio criado com sucesso!');
+      setShowNewCondoModal(false);
+      setNewCondoName('');
+      setNewCondoAddress('');
+      onUpdateUser(result.profile);
+      navigate('/dashboard');
+    } catch (err: any) {
+      toast.error(err.message);
+    } finally {
+      setCreatingCondo(false);
+    }
+  };
+
+  const handleClearTestData = async () => {
+    setClearingData(true);
+    try {
+      // Identificar registros de teste: nome contendo "teste", "demo", "test"
+      const { data: testPackages, error: fetchError } = await supabase
+        .from('packages')
+        .select('id')
+        .eq('condominium_id', user.condominium_id)
+        .or('recipient_name_raw.ilike.%teste%,recipient_name_raw.ilike.%demo%,recipient_name_raw.ilike.%test%,notes.ilike.%teste%,notes.ilike.%demo%,notes.ilike.%test%');
+
+      if (fetchError) throw fetchError;
+
+      if (!testPackages || testPackages.length === 0) {
+        toast.success("Nenhum registro de teste encontrado.");
+        setShowClearDataModal(false);
+        return;
+      }
+
+      const testIds = testPackages.map(p => p.id);
+
+      // 1. Apagar logs de retirada relacionados
+      await supabase
+        .from('retrieval_logs')
+        .delete()
+        .in('package_id', testIds);
+
+      // 2. Apagar os pacotes
+      const { error: deleteError } = await supabase
+        .from('packages')
+        .delete()
+        .in('id', testIds);
+
+      if (deleteError) throw deleteError;
+
+      toast.success(`${testIds.length} registros de teste removidos com sucesso!`);
+      setShowClearDataModal(false);
+    } catch (err: any) {
+      toast.error("Erro ao limpar dados: " + err.message);
+    } finally {
+      setClearingData(false);
+    }
+  };
+
   if (!condo || !settings) return <div className="flex justify-center p-12"><RefreshCw className="w-8 h-8 animate-spin text-emerald-600" /></div>;
 
   return (
-    <Card className="max-w-2xl mx-auto">
-      {systemStatus && !systemStatus?.whatsapp?.configured && (
-        <div className="mb-6 p-4 bg-amber-50 border border-amber-100 rounded-2xl flex items-center gap-3">
-          <Phone className="w-5 h-5 text-amber-600" />
-          <p className="text-xs text-amber-800 font-medium">
-            O WhatsApp ainda não foi configurado no servidor. As mensagens abaixo são apenas modelos para quando o serviço for ativado.
-          </p>
-        </div>
-      )}
-      <form onSubmit={handleSave} className="space-y-6">
+    <div className="max-w-2xl mx-auto space-y-6">
+      <Card>
+        {systemStatus && !systemStatus?.whatsapp?.configured && (
+          <div className="mb-6 p-4 bg-amber-50 border border-amber-100 rounded-2xl flex items-center gap-3">
+            <Phone className="w-5 h-5 text-amber-600" />
+            <p className="text-xs text-amber-800 font-medium">
+              O WhatsApp ainda não foi configurado no servidor. As mensagens abaixo são apenas modelos para quando o serviço for ativado.
+            </p>
+          </div>
+        )}
+        <form onSubmit={handleSave} className="space-y-6">
         <div className="space-y-4">
-          <h3 className="font-bold text-zinc-900 flex items-center gap-2">
-            <Home className="w-5 h-5 text-emerald-600" />
-            Dados do Condomínio
-          </h3>
+          <div className="flex items-center justify-between">
+            <h3 className="font-bold text-zinc-900 flex items-center gap-2">
+              <Home className="w-5 h-5 text-emerald-600" />
+              Dados do Condomínio
+            </h3>
+            {user.role === 'admin' && (
+              <Button type="button" onClick={() => setShowNewCondoModal(true)} variant="outline" size="sm">
+                <Plus className="w-4 h-4" />
+                NOVO CONDOMÍNIO
+              </Button>
+            )}
+          </div>
           <div className="grid grid-cols-1 gap-4">
             <div>
               <label className="block text-sm font-medium text-zinc-700 mb-1">Nome do Condomínio</label>
@@ -1687,6 +2130,109 @@ const SettingsPanel = ({ user, systemStatus }: any) => {
                 className="w-full px-4 py-2 rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500"
               />
             </div>
+          </div>
+        </div>
+
+        <div className="space-y-4 pt-6 border-t border-zinc-100">
+          <h3 className="font-bold text-zinc-900 flex items-center gap-2">
+            <Smartphone className="w-5 h-5 text-emerald-600" />
+            Configuração de WhatsApp / Z-API
+          </h3>
+          <div className="grid grid-cols-1 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-zinc-700 mb-1">Modo de Envio</label>
+              <select 
+                disabled={user.role !== 'admin'}
+                value={settings.whatsapp_mode || 'manual_assistido'}
+                onChange={(e) => setSettings({...settings, whatsapp_mode: e.target.value as any})}
+                className="w-full px-4 py-2 rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 bg-white disabled:opacity-50"
+              >
+                <option value="manual_assistido">Manual assistido (Padrão)</option>
+                <option value="api_automatica">Z-API automática (Opcional)</option>
+              </select>
+              <p className="text-[10px] text-zinc-400 mt-1 uppercase font-bold">
+                {settings.whatsapp_mode === 'api_automatica' 
+                  ? 'As mensagens serão enviadas automaticamente via Z-API.' 
+                  : 'O sistema gerará links para envio manual assistido.'}
+              </p>
+            </div>
+
+            {settings.whatsapp_mode === 'api_automatica' && (
+              <motion.div 
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: 'auto' }}
+                className="space-y-4 pt-2"
+              >
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-zinc-700 mb-1">Provedor</label>
+                    <input 
+                      readOnly={user.role !== 'admin'}
+                      value={settings.whatsapp_provider || ''}
+                      onChange={(e) => setSettings({...settings, whatsapp_provider: e.target.value})}
+                      placeholder="Ex: Z-API"
+                      className="w-full px-4 py-2 rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 read-only:bg-zinc-50"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-zinc-700 mb-1">ID da Instância</label>
+                    <input 
+                      readOnly={user.role !== 'admin'}
+                      value={settings.instance_id || ''}
+                      onChange={(e) => setSettings({...settings, instance_id: e.target.value})}
+                      placeholder="Ex: 3F0CA22..."
+                      className="w-full px-4 py-2 rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 read-only:bg-zinc-50"
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-zinc-700 mb-1">Telefone Remetente</label>
+                    <input 
+                      readOnly={user.role !== 'admin'}
+                      value={settings.sender_phone || ''}
+                      onChange={(e) => setSettings({...settings, sender_phone: e.target.value})}
+                      placeholder="Ex: 5511999999999"
+                      className="w-full px-4 py-2 rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 read-only:bg-zinc-50"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700 mb-1">URL da Z-API (Endpoint de Envio)</label>
+                  <input 
+                    readOnly={user.role !== 'admin'}
+                    value={settings.api_url || ''}
+                    onChange={(e) => setSettings({...settings, api_url: e.target.value})}
+                    placeholder="https://api.z-api.io/instances/ID/token/TOKEN/send-text"
+                    className="w-full px-4 py-2 rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 read-only:bg-zinc-50"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700 mb-1">Token da Z-API (Client-Token)</label>
+                  <input 
+                    readOnly={user.role !== 'admin'}
+                    type="password"
+                    value={settings.api_token || ''}
+                    onChange={(e) => setSettings({...settings, api_token: e.target.value})}
+                    placeholder="Seu token de segurança"
+                    className="w-full px-4 py-2 rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 read-only:bg-zinc-50"
+                  />
+                </div>
+                
+                {user.role === 'admin' && (
+                  <Button 
+                    type="button" 
+                    variant="outline" 
+                    className="w-full gap-2"
+                    onClick={handleTestConnection}
+                    loading={testingConnection}
+                  >
+                    <Zap className="w-4 h-4" />
+                    Testar conexão Z-API
+                  </Button>
+                )}
+              </motion.div>
+            )}
           </div>
         </div>
 
@@ -1727,17 +2273,142 @@ const SettingsPanel = ({ user, systemStatus }: any) => {
           </div>
         </div>
 
+        <div className="space-y-4 pt-6 border-t border-zinc-100">
+          <h3 className="font-bold text-zinc-900 flex items-center gap-2">
+            <Zap className="w-5 h-5 text-amber-500" />
+            Performance & Sistema
+          </h3>
+          <div className="flex flex-col gap-3">
+            <label className="flex items-center gap-3 cursor-pointer group">
+              <input 
+                type="checkbox" 
+                checked={settings.light_mode_enabled}
+                onChange={(e) => setSettings({...settings, light_mode_enabled: e.target.checked})}
+                className="w-5 h-5 rounded-lg border-zinc-300 text-emerald-600 focus:ring-emerald-500" 
+              />
+              <div>
+                <span className="text-sm text-zinc-700 group-hover:text-zinc-900 transition-colors font-bold">Modo Leve (Recomendado para celulares simples)</span>
+                <p className="text-[10px] text-zinc-400 uppercase font-bold">Reduz animações, limita carregamento de listas e otimiza fotos para maior rapidez.</p>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        {user.role === 'admin' && (
+          <div className="space-y-4 pt-6 border-t border-zinc-100">
+            <h3 className="font-bold text-zinc-900 flex items-center gap-2">
+              <Trash2 className="w-5 h-5 text-red-500" />
+              Limpeza de Dados
+            </h3>
+            <div className="bg-red-50 border border-red-100 p-4 rounded-2xl">
+              <p className="text-sm text-red-800 mb-4">
+                Use esta função para remover encomendas e históricos identificados como teste (contendo "teste", "demo" ou "test" no nome ou observações).
+              </p>
+              <Button 
+                type="button" 
+                variant="danger" 
+                className="w-full"
+                onClick={() => setShowClearDataModal(true)}
+              >
+                Limpar registros de teste
+              </Button>
+            </div>
+          </div>
+        )}
+
         <Button type="submit" className="w-full py-3" loading={loading}>
           Salvar Configurações
         </Button>
       </form>
-    </Card>
+      </Card>
+
+      <Modal 
+        isOpen={showNewCondoModal} 
+        onClose={() => setShowNewCondoModal(false)}
+        title="Novo Condomínio"
+      >
+        <form onSubmit={handleCreateCondo} className="space-y-4">
+          <div className="flex items-center gap-3 mb-4 p-4 bg-emerald-50 rounded-2xl border border-emerald-100">
+            <Building className="w-6 h-6 text-emerald-600" />
+            <p className="text-xs text-emerald-800 font-medium">
+              Ao criar um novo condomínio, você será vinculado a ele automaticamente.
+            </p>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-zinc-700 mb-1">Nome do Condomínio</label>
+            <Input 
+              required
+              value={newCondoName}
+              onChange={(e: any) => setNewCondoName(e.target.value)}
+              placeholder="Ex: Edifício Solar"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-zinc-700 mb-1">Endereço</label>
+            <Input 
+              required
+              value={newCondoAddress}
+              onChange={(e: any) => setNewCondoAddress(e.target.value)}
+              placeholder="Rua, Número, Bairro, Cidade"
+            />
+          </div>
+          <div className="flex gap-3 pt-4">
+            <Button type="button" variant="outline" className="flex-1" onClick={() => setShowNewCondoModal(false)}>
+              Cancelar
+            </Button>
+            <Button type="submit" className="flex-1" loading={creatingCondo}>
+              Criar Condomínio
+            </Button>
+          </div>
+        </form>
+      </Modal>
+
+      <Modal
+        isOpen={showClearDataModal}
+        onClose={() => setShowClearDataModal(false)}
+        title="Confirmar Limpeza"
+      >
+        <div className="space-y-6">
+          <div className="flex items-center gap-4 p-4 bg-red-50 rounded-2xl border border-red-100">
+            <AlertCircle className="w-8 h-8 text-red-600 shrink-0" />
+            <p className="text-sm text-red-800 font-bold">
+              ATENÇÃO: Esta ação irá apagar registros de teste do sistema. Deseja continuar?
+            </p>
+          </div>
+          
+          <p className="text-sm text-zinc-500">
+            Serão removidas todas as encomendas e logs de retirada que contenham os termos "teste", "demo" ou "test" no nome do destinatário ou nas observações. Esta ação não pode ser desfeita.
+          </p>
+
+          <div className="flex gap-3">
+            <Button 
+              type="button" 
+              variant="outline" 
+              className="flex-1" 
+              onClick={() => setShowClearDataModal(false)}
+              disabled={clearingData}
+            >
+              Cancelar
+            </Button>
+            <Button 
+              type="button" 
+              variant="danger" 
+              className="flex-1" 
+              onClick={handleClearTestData}
+              loading={clearingData}
+            >
+              Confirmar
+            </Button>
+          </div>
+        </div>
+      </Modal>
+    </div>
   );
 };
 
 // --- Main Syndic Panel Component ---
 
-export default function SyndicPanel({ user, onLogout }: { user: Profile; onLogout: () => void }) {
+export default function SyndicPanel({ user, onLogout, onUpdateUser }: { user: Profile, onLogout: () => void, onUpdateUser: (user: Profile) => void }) {
   const [loading, setLoading] = useState(true);
   const [packages, setPackages] = useState<PackageType[]>([]);
   const [residents, setResidents] = useState<Profile[]>([]);
@@ -1751,13 +2422,15 @@ export default function SyndicPanel({ user, onLogout }: { user: Profile; onLogou
   const getActiveTab = () => {
     const path = location.pathname;
     if (path.includes('/packages')) return 'packages';
+    if (path.includes('/history')) return 'history';
+    if (path.includes('/residents-inactive')) return 'residents-inactive';
     if (path.includes('/residents')) return 'residents';
     if (path.includes('/reports')) return 'reports';
-    if (path.includes('/notifications')) return 'notifications';
-    if (path.includes('/settings')) return 'settings';
-    if (path.includes('/profiles')) return 'profiles';
+    if (path.includes('/notifications') && user.role === 'admin') return 'notifications';
+    if (path.includes('/settings') && user.role === 'admin') return 'settings';
+    if (path.includes('/profiles') && user.role === 'admin') return 'profiles';
     if (path.includes('/users')) return 'users';
-    if (path.includes('/audit')) return 'audit';
+    if (path.includes('/audit') && user.role === 'admin') return 'audit';
     return 'dashboard';
   };
 
@@ -1817,11 +2490,9 @@ export default function SyndicPanel({ user, onLogout }: { user: Profile; onLogou
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { id: 'packages', label: 'Encomendas', icon: Package },
     { id: 'residents', label: 'Moradores', icon: Users },
-    { id: 'reports', label: 'Relatórios', icon: FileText },
-    { id: 'notifications', label: 'Notificações', icon: Bell },
-    { id: 'settings', label: 'Configurações', icon: Settings },
+    { id: 'residents-inactive', label: 'Moradores Desativados', icon: XCircle },
     ...(user.role === 'admin' ? [
-      { id: 'profiles', label: 'Perfis', icon: UserPlus },
+      { id: 'settings', label: 'Configurações', icon: Settings },
       { id: 'users', label: 'Usuários', icon: Shield },
       { id: 'audit', label: 'Auditoria', icon: History }
     ] : user.role === 'sindico' ? [
@@ -1842,14 +2513,16 @@ export default function SyndicPanel({ user, onLogout }: { user: Profile; onLogou
         <div className="p-6 border-b border-zinc-50">
           <div className="flex items-center justify-between mb-4">
             {user.role === 'admin' && (
-              <button 
-                onClick={() => navigate('/portaria')}
-                className="p-2 hover:bg-zinc-100 rounded-xl text-zinc-500 transition-all flex items-center gap-2"
-                title="Alternar para Portaria"
-              >
-                <ArrowLeft className="w-5 h-5" />
-                <span className="text-[10px] font-bold uppercase">Portaria</span>
-              </button>
+              <div className="flex items-center gap-2">
+                <button 
+                  onClick={() => navigate('/portaria')}
+                  className="p-2 hover:bg-zinc-100 rounded-xl text-zinc-500 transition-all flex items-center gap-2"
+                  title="Alternar para Portaria"
+                >
+                  <ArrowLeft className="w-5 h-5" />
+                  <span className="text-[10px] font-bold uppercase">Portaria</span>
+                </button>
+              </div>
             )}
           </div>
           <div className="flex items-center gap-3 mb-1 cursor-pointer" onClick={() => navigate('/dashboard')}>
@@ -1909,13 +2582,32 @@ export default function SyndicPanel({ user, onLogout }: { user: Profile; onLogou
             <Route path="/dashboard" element={<Dashboard user={user} residents={residents} logs={logs} systemStatus={systemStatus} />} />
             <Route path="/packages" element={<PackagesList user={user} />} />
             <Route path="/residents" element={<ResidentsList user={user} residents={residents} onUpdate={fetchInitialData} />} />
-            <Route path="/reports" element={<Reports packages={packages} />} />
-            <Route path="/notifications" element={<NotificationsPanel logs={logs} onUpdate={fetchInitialData} />} />
-            <Route path="/settings" element={<SettingsPanel user={user} systemStatus={systemStatus} />} />
-            <Route path="/profiles" element={<ProfileList user={user} />} />
-            <Route path="/profiles/new" element={<ProfileNew user={user} />} />
+            <Route path="/residents-inactive" element={<InactiveResidentsList residents={residents} />} />
+            
+            {/* Admin Only Routes */}
+            {user.role === 'admin' ? (
+              <>
+                <Route path="/history" element={<HistoryTab user={user} />} />
+                <Route path="/reports" element={<Reports packages={packages} />} />
+                <Route path="/notifications" element={<NotificationsPanel logs={logs} onUpdate={fetchInitialData} />} />
+                <Route path="/settings" element={<SettingsPanel user={user} systemStatus={systemStatus} onUpdateUser={onUpdateUser} />} />
+                <Route path="/profiles" element={<ProfileList user={user} />} />
+                <Route path="/profiles/new" element={<ProfileNew user={user} />} />
+                <Route path="/audit" element={<AuditLogs user={user} />} />
+              </>
+            ) : (
+              <>
+                <Route path="/history" element={<Navigate to="/dashboard" replace />} />
+                <Route path="/reports" element={<Navigate to="/dashboard" replace />} />
+                <Route path="/notifications" element={<Navigate to="/dashboard" replace />} />
+                <Route path="/settings" element={<Navigate to="/dashboard" replace />} />
+                <Route path="/profiles" element={<Navigate to="/dashboard" replace />} />
+                <Route path="/profiles/new" element={<Navigate to="/dashboard" replace />} />
+                <Route path="/audit" element={<Navigate to="/dashboard" replace />} />
+              </>
+            )}
+
             <Route path="/users" element={<UserManagement user={user} />} />
-            <Route path="/audit" element={<AuditLogs user={user} />} />
             <Route path="/condominiums/new" element={<CondominiumNew user={user} onUpdateUser={() => {}} />} />
             <Route path="/" element={<Navigate to="/dashboard" />} />
             <Route path="*" element={<Navigate to="/dashboard" />} />

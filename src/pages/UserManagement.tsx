@@ -4,7 +4,7 @@ import { supabase } from '../lib/supabase';
 import { Profile, Role, Condominium } from '../types';
 import { 
   Shield, Plus, Loader2, Search, User, Phone, 
-  Building2, Power, Key, Edit2, Filter, X, Trash2
+  Building2, Power, Key, Edit2, Filter, X, Trash2, MoreVertical
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { logAction } from '../services/auditService';
@@ -17,10 +17,12 @@ export default function UserManagement({ user }: UserManagementProps) {
   const [users, setUsers] = useState<Profile[]>([]);
   const [condos, setCondos] = useState<Condominium[]>([]);
   const [loading, setLoading] = useState(true);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [showModal, setShowModal] = useState(false);
   const [editingUser, setEditingUser] = useState<Profile | null>(null);
   const [modalLoading, setModalLoading] = useState(false);
+  const [activeMenu, setActiveMenu] = useState<string | null>(null);
 
   // Form state
   const [formData, setFormData] = useState({
@@ -36,7 +38,7 @@ export default function UserManagement({ user }: UserManagementProps) {
 
   useEffect(() => {
     if (user.role !== 'admin' && user.role !== 'sindico') {
-      navigate('/dashboard');
+      navigate('/portaria');
       return;
     }
     fetchData();
@@ -113,96 +115,77 @@ export default function UserManagement({ user }: UserManagementProps) {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) throw new Error('Sessão não encontrada');
 
-      if (editingUser && editingUser.id) {
-  const { data: updatedProfile, error } = await supabase
-    .from('profiles')
-    .update({
-      full_name: formData.full_name,
-      phone: formData.phone,
-      role: formData.role,
-      active: formData.active,
-      updated_at: new Date().toISOString()
-    })
-    .eq('id', editingUser.id)
-    .select()
-    .single();
+      if (editingUser) {
+        // Update existing user profile via backend API to ensure consistency and bypass RLS if needed
+        const response = await fetch(`/api/admin/users/${editingUser.id}`, {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${session.access_token}`
+          },
+          body: JSON.stringify({
+            full_name: formData.full_name,
+            phone: formData.phone,
+            role: formData.role,
+            condominium_id: formData.condominium_id,
+            active: formData.active
+          })
+        });
 
-  if (error) throw error;
+        if (!response.ok) {
+          const err = await response.json();
+          throw new Error(err.error || 'Erro ao atualizar usuário');
+        }
 
-  await logAction(
-    user.id,
-    user.condominium_id,
-    'UPDATE_USER',
-    'profiles',
-    editingUser.id,
-    editingUser,
-    updatedProfile
-  );
+        const { profile: updatedProfile } = await response.json();
 
-  toast.success('Usuário atualizado com sucesso!');
-}
+        await logAction(
+          user.id,
+          user.condominium_id,
+          'UPDATE_USER',
+          'profiles',
+          editingUser.id,
+          editingUser,
+          updatedProfile
+        );
 
-
-          
-    
-            
-          
-          
-        
-            
-            
-            
-            
-          
-          
-      
-
-      
-        
-          
-        
-
-        
-
-    
-        
-        
-          
-      
-          
-          
-          
-      
-
-        
-       else {
+        toast.success('Usuário atualizado com sucesso! ✅');
+      } else {
         // Create new user with temporary password
         const tempPassword = Math.random().toString(36).slice(-8);
-        console.log('CRIAR USUÁRIO INICIADO');
         
+        const response = await fetch('/api/admin/users', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${session.access_token}`
+          },
+          body: JSON.stringify({
+            email: formData.email,
+            password: tempPassword,
+            full_name: formData.full_name,
+            phone: formData.phone,
+            role: formData.role,
+            condominium_id: formData.condominium_id
+          })
+        });
 
-const { data, error } = await supabase.functions.invoke('create-user', {
-  body: {
-    email: formData.email,
-    password: tempPassword,
-    full_name: formData.full_name,
-    phone: formData.phone,
-    role: formData.role,
-    condominium_id: formData.condominium_id
-  }
-});
+        if (!response.ok) {
+          const err = await response.json();
+          throw new Error(err.error || 'Erro ao criar usuário');
+        }
 
-if (error) {
-  throw new Error(error.message || 'Erro ao criar usuário');
-}
+        const { profile: newProfile } = await response.json();
 
-if (data?.error) {
-  throw new Error(data.error);
-}
-
-const { profile: newProfile } = data;
-
-        
+        await logAction(
+          user.id,
+          user.condominium_id,
+          'CREATE_USER',
+          'profiles',
+          newProfile.id,
+          null,
+          newProfile
+        );
 
         toast.success(`Usuário criado com sucesso! Senha temporária: ${tempPassword}`, {
           duration: 10000,
@@ -251,50 +234,81 @@ const { profile: newProfile } = data;
         { must_change_password: true }
       );
 
-      toast.success(`Senha resetada com sucesso! Nova senha temporária: ${newPassword}`, {
+      toast.success(`Senha resetada com sucesso! Nova senha temporária: ${newPassword} ✅`, {
         duration: 10000,
         icon: '🔑'
       });
     } catch (error: any) {
-      toast.error('Erro ao resetar senha: ' + error.message);
+      console.error("Erro ao resetar senha:", error);
+      toast.error('Erro ao resetar senha: ' + error.message + ' ❌');
     }
   };
 
-
-    const toggleStatus = async (u: Profile) => {
-  try {
-    const { data: { session } } = await supabase.auth.getSession();
-    if (!session) throw new Error('Sessão não encontrada');
-
-    const newStatus = !u.active;
-
-    const { error } = await supabase
-      .from('profiles')
-      .update({ active: newStatus })
-      .eq('id', u.id);
-
-    if (error) throw error;
-
-toast.success(`Usuário ${newStatus ? 'ativado' : 'inativado'} com sucesso!`);
-fetchData();
-    
-    } catch (error: any) {
-    toast.error('Erro ao alterar status: ' + error.message);
-  }
-};
-
-  const handleDeleteUser = async (u: Profile) => {
-    if (!confirm(`Tem certeza que deseja excluir este usuário? (${u.full_name})`)) return;
-
+  const toggleStatus = async (u: Profile) => {
     try {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) throw new Error('Sessão não encontrada');
-const { error } = await supabase
-  .from('profiles')
-  .delete()
-  .eq('id', u.id);
 
-if (error) throw error;
+      const newStatus = !u.active;
+      
+      const response = await fetch(`/api/admin/users/${u.id}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session.access_token}`
+        },
+        body: JSON.stringify({ active: newStatus })
+      });
+
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.error || 'Erro ao alterar status');
+      }
+
+      await logAction(
+        user.id,
+        user.condominium_id,
+        newStatus ? 'ACTIVATE_USER' : 'DEACTIVATE_USER',
+        'profiles',
+        u.id,
+        { active: u.active },
+        { active: newStatus }
+      );
+
+      toast.success(`Usuário ${newStatus ? 'ativado' : 'inativado'} com sucesso! ✅`);
+      fetchData();
+    } catch (error: any) {
+      console.error("Erro ao alterar status:", error);
+      toast.error('Erro ao alterar status: ' + error.message + ' ❌');
+    }
+  };
+
+  const handleDeleteUser = async (u: Profile) => {
+    if (u.id === user.id) {
+      toast.error('Você não pode excluir seu próprio usuário.');
+      return;
+    }
+
+    if (!confirm('ATENÇÃO: Deseja excluir este usuário permanentemente? Esta ação não poderá ser desfeita.')) {
+      return;
+    }
+
+    setDeletingId(u.id);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) throw new Error('Sessão não encontrada');
+
+      const response = await fetch(`/api/admin/users/${u.id}`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${session.access_token}`
+        }
+      });
+
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.error || 'Erro ao excluir usuário');
+      }
 
       await logAction(
         user.id,
@@ -306,10 +320,13 @@ if (error) throw error;
         null
       );
 
-      toast.success('Usuário excluído com sucesso!');
+      toast.success('Usuário excluído permanentemente com sucesso ✅');
       fetchData();
     } catch (error: any) {
-      toast.error('Erro ao excluir usuário: ' + error.message);
+      console.error("Erro ao excluir usuário:", error);
+      toast.error('Erro ao excluir usuário: ' + error.message + ' ❌');
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -323,8 +340,7 @@ if (error) throw error;
     const labels: any = {
       admin: 'Administrador',
       sindico: 'Síndico',
-      porteiro: 'Porteiro',
-      resident: 'Morador'
+      porteiro: 'Porteiro'
     };
     return labels[role] || role;
   };
@@ -333,16 +349,18 @@ if (error) throw error;
     <div className="max-w-6xl mx-auto p-6">
       <div className="flex justify-between items-center mb-8">
         <div>
-          <h1 className="text-3xl font-bold text-zinc-900">Gerenciar Usuários</h1>
-          <p className="text-zinc-500">Administre síndicos, porteiros e acessos ao sistema</p>
+          <h1 className="text-3xl font-bold text-zinc-900">Usuários</h1>
+          <p className="text-zinc-500">Controle de acesso para administradores, síndicos e porteiros</p>
         </div>
-        <button
-          onClick={() => handleOpenModal()}
-          className="bg-emerald-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-emerald-700 transition-all flex items-center gap-2"
-        >
-          <Plus className="w-5 h-5" />
-          Novo Usuário
-        </button>
+        {user.role === 'admin' && (
+          <button
+            onClick={() => handleOpenModal()}
+            className="bg-emerald-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-emerald-700 transition-all flex items-center gap-2"
+          >
+            <Plus className="w-5 h-5" />
+            Adicionar Usuário
+          </button>
+        )}
       </div>
 
       <div className="relative mb-8">
@@ -361,8 +379,8 @@ if (error) throw error;
           <Loader2 className="w-10 h-10 animate-spin text-emerald-600" />
         </div>
       ) : (
-        <div className="bg-white rounded-3xl border border-zinc-100 shadow-sm overflow-hidden">
-          <table className="w-full text-left border-collapse">
+        <div className="bg-white rounded-3xl border border-zinc-100 shadow-sm overflow-x-auto">
+          <table className="w-full text-left border-collapse min-w-[800px]">
             <thead>
               <tr className="bg-zinc-50 border-b border-zinc-100">
                 <th className="px-6 py-4 text-xs font-bold text-zinc-400 uppercase tracking-wider">Usuário</th>
@@ -407,36 +425,96 @@ if (error) throw error;
                       {u.active ? 'Ativo' : 'Inativo'}
                     </span>
                   </td>
-                  <td className="px-6 py-4 text-right">
-                    <div className="flex items-center justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <button 
-                        onClick={() => handleResetPassword(u)}
-                        className="p-2 hover:bg-zinc-100 rounded-lg text-zinc-400 hover:text-zinc-900 transition-all"
-                        title="Resetar Senha"
-                      >
-                        <Key className="w-4 h-4" />
-                      </button>
-                      <button 
-                        onClick={() => handleOpenModal(u)}
-                        className="p-2 hover:bg-zinc-100 rounded-lg text-zinc-400 hover:text-zinc-900 transition-all"
-                        title="Editar"
-                      >
-                        <Edit2 className="w-4 h-4" />
-                      </button>
-                      <button 
-                        onClick={() => toggleStatus(u)}
-                        className={`p-2 rounded-lg transition-all ${u.active ? 'hover:bg-red-50 text-red-400 hover:text-red-600' : 'hover:bg-emerald-50 text-emerald-400 hover:text-emerald-600'}`}
-                        title={u.active ? 'Inativar' : 'Ativar'}
-                      >
-                        <Power className="w-4 h-4" />
-                      </button>
-                      <button 
-                        onClick={() => handleDeleteUser(u)}
-                        className="p-2 hover:bg-red-50 rounded-lg text-zinc-400 hover:text-red-600 transition-all"
-                        title="Excluir"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+                  <td className="px-6 py-4 text-right relative">
+                    <div className="flex items-center justify-end">
+                      {user.role === 'admin' ? (
+                        <div className="relative">
+                          <button 
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setActiveMenu(activeMenu === u.id ? null : u.id);
+                            }}
+                            className="p-2 hover:bg-zinc-100 rounded-xl text-zinc-400 hover:text-zinc-900 transition-all flex items-center justify-center"
+                            title="Ações"
+                          >
+                            <MoreVertical className="w-5 h-5" />
+                          </button>
+
+                          {activeMenu === u.id && (
+                            <>
+                              <div 
+                                className="fixed inset-0 z-30" 
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setActiveMenu(null);
+                                }}
+                              />
+                              <div className="absolute right-0 top-10 w-48 bg-white rounded-2xl shadow-2xl border border-zinc-100 py-2 z-40 overflow-hidden animate-in fade-in zoom-in-95 duration-200 origin-top-right">
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleOpenModal(u);
+                                    setActiveMenu(null);
+                                  }}
+                                  className="w-full px-4 py-2.5 text-left text-sm font-bold text-zinc-700 hover:bg-zinc-50 flex items-center gap-3 transition-colors"
+                                >
+                                  <Edit2 className="w-4 h-4 text-emerald-600" />
+                                  Editar usuário
+                                </button>
+
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    toggleStatus(u);
+                                    setActiveMenu(null);
+                                  }}
+                                  className={`w-full px-4 py-2.5 text-left text-sm font-bold flex items-center gap-3 transition-colors ${u.active ? 'text-amber-600 hover:bg-amber-50' : 'text-emerald-600 hover:bg-emerald-50'}`}
+                                >
+                                  <Power className="w-4 h-4" />
+                                  {u.active ? 'Inativar usuário' : 'Reativar usuário'}
+                                </button>
+
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleResetPassword(u);
+                                    setActiveMenu(null);
+                                  }}
+                                  className="w-full px-4 py-2.5 text-left text-sm font-bold text-zinc-700 hover:bg-zinc-50 flex items-center gap-3 transition-colors"
+                                >
+                                  <Key className="w-4 h-4 text-blue-600" />
+                                  Resetar Senha
+                                </button>
+
+                                <div className="h-px bg-zinc-100 my-1" />
+
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleDeleteUser(u);
+                                    setActiveMenu(null);
+                                  }}
+                                  disabled={deletingId === u.id || u.id === user.id}
+                                  className={`w-full px-4 py-2.5 text-left text-sm font-bold flex items-center gap-3 transition-colors ${
+                                    u.id === user.id 
+                                      ? 'opacity-20 cursor-not-allowed text-zinc-400' 
+                                      : 'text-red-600 hover:bg-red-50'
+                                  }`}
+                                >
+                                  {deletingId === u.id ? (
+                                    <Loader2 className="w-4 h-4 animate-spin" />
+                                  ) : (
+                                    <Trash2 className="w-4 h-4" />
+                                  )}
+                                  Excluir usuário
+                                </button>
+                              </div>
+                            </>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-xs text-zinc-400 italic">Sem permissão</span>
+                      )}
                     </div>
                   </td>
                 </tr>

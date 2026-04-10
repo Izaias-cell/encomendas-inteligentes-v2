@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Camera, Package, User, LayoutDashboard, LogOut, Bell, CheckCircle, Search, Loader2, Plus, Phone, Home, History, QrCode, X, RefreshCw, AlertTriangle, Check, ArrowLeft, Keyboard, XCircle, Users, UserPlus, Edit2 } from 'lucide-react';
+import { Camera, Package, User, LayoutDashboard, LogOut, Bell, CheckCircle, Search, Loader2, Plus, Phone, Home, History, QrCode, X, RefreshCw, AlertTriangle, Check, ArrowLeft, Keyboard, XCircle, Users, UserPlus, Edit2, Shield } from 'lucide-react';
 import { Toaster, toast } from 'react-hot-toast';
 import { supabase } from './lib/supabase';
 import { ptBR } from 'date-fns/locale';
@@ -12,6 +12,7 @@ import { Html5Qrcode } from 'html5-qrcode';
 
 import { Routes, Route, useNavigate, Navigate, useLocation } from 'react-router-dom';
 import ResidentPortal from './components/ResidentPortal';
+import Retirada from './pages/Retirada';
 import { analyzePackageLabel } from './services/geminiService';
 import { findMatchingResidents } from './services/residentMatcher';
 
@@ -22,11 +23,12 @@ import CondominiumNew from './pages/CondominiumNew';
 import SelectCondominium from './pages/SelectCondominium';
 import ProfileList from './pages/ProfileList';
 import ProfileNew from './pages/ProfileNew';
+import UserManagement from './pages/UserManagement';
 import PackageList from './pages/PackageList';
 import PackageNew from './pages/PackageNew';
 import Portaria from './pages/Portaria';
 import ChangePassword from './pages/ChangePassword';
-import Retirada from './pages/Retirada';
+
 // --- Types ---
 import { Role, Profile, Package as PackageType, ScoredResident } from './types';
 import SyndicPanel from './components/SyndicPanel';
@@ -2073,8 +2075,8 @@ const ResidentDashboard = ({ user }: { user: Profile }) => {
   );
 };
 
-const SindicoDashboard = ({ user, onLogout }: { user: Profile, onLogout: () => void }) => {
-  return <SyndicPanel user={user} onLogout={onLogout} />;
+const SindicoDashboard = ({ user, onLogout, onUpdateUser }: { user: Profile, onLogout: () => void, onUpdateUser: (user: Profile) => void }) => {
+  return <SyndicPanel user={user} onLogout={onLogout} onUpdateUser={onUpdateUser} />;
 };
 
 // --- Main App ---
@@ -2128,7 +2130,8 @@ export default function App() {
   return (
     <Routes>
       <Route path="/portal/:token" element={<ResidentPortal />} />
-      <Route path="/retirada" element={<Retirada />} />j
+      <Route path="/retirada" element={<Retirada />} />
+      <Route path="/retirada/:token" element={<Retirada />} />
       <Route path="/change-password" element={user ? <ChangePassword /> : <Navigate to="/" />} />
       <Route path="/select-condominium" element={
         user ? (
@@ -2137,7 +2140,7 @@ export default function App() {
       } />
       <Route path="*" element={
         (user?.role === 'sindico' || user?.role === 'admin') && !['/portaria', '/packages/new'].includes(location.pathname)
-          ? <SindicoDashboard user={user} onLogout={handleLogout} />
+          ? <SindicoDashboard user={user} onLogout={handleLogout} onUpdateUser={handleUpdateUser} />
           : <AppLayout user={user} loading={loading} setUser={setUser} handleLogout={handleLogout} />
       } />
     </Routes>
@@ -2150,26 +2153,19 @@ const AppLayout = ({ user, loading, setUser, handleLogout }: any) => {
 
   useEffect(() => {
     // Role-based initial redirection
-    const allowedPaths = ['/select-condominium', '/condominiums/new', '/change-password', '/retirada'];
+    const allowedPaths = ['/select-condominium', '/condominiums/new', '/change-password'];
     if (!loading && user && !user.condominium_id && !allowedPaths.includes(location.pathname)) {
       navigate('/select-condominium');
       return;
     }
 
-    if (
-  !loading &&
-  user &&
-  user.condominium_id &&
-  location.pathname !== '/retirada' &&
-  (location.pathname === '/' || location.pathname === '/dashboard')
-) {
-  if (user.role === 'porteiro') {
-    navigate('/portaria');
-  } else if (user.role === 'admin' || user.role === 'sindico') {
-    navigate('/dashboard');
-  }
+    if (!loading && user && user.condominium_id && (location.pathname === '/' || location.pathname === '/dashboard')) {
+      if (user.role === 'porteiro') {
+        navigate('/portaria');
+      } else if ((user.role === 'admin' || user.role === 'sindico') && location.pathname === '/') {
+        navigate('/dashboard');
+      }
     }
- 
   }, [user, loading, navigate, location.pathname]);
 
   if (loading) return (
@@ -2204,6 +2200,57 @@ const AppLayout = ({ user, loading, setUser, handleLogout }: any) => {
               </div>
               <span className="font-bold text-lg hidden sm:inline">Portaria Inteligente</span>
             </div>
+            
+            {/* Desktop Nav Links */}
+            {(user.role === 'porteiro' || user.role === 'sindico' || user.role === 'admin') && (
+              <div className="hidden md:flex items-center gap-1 ml-8">
+                <button 
+                  onClick={() => navigate(user.role === 'porteiro' ? '/portaria' : '/dashboard')}
+                  className={`px-4 py-2 rounded-xl text-sm font-bold transition-all ${
+                    (location.pathname === '/portaria' && !new URLSearchParams(location.search).get('tab')) || location.pathname === '/dashboard' 
+                      ? 'bg-emerald-50 text-emerald-600' 
+                      : 'text-zinc-500 hover:bg-zinc-50'
+                  }`}
+                >
+                  Início
+                </button>
+                <button 
+                  onClick={() => navigate('/portaria')}
+                  className={`px-4 py-2 rounded-xl text-sm font-bold transition-all ${
+                    location.pathname === '/portaria' && !new URLSearchParams(location.search).get('tab')
+                      ? 'bg-emerald-50 text-emerald-600' 
+                      : 'text-zinc-500 hover:bg-zinc-50'
+                  }`}
+                >
+                  Encomendas
+                </button>
+                <button 
+                  onClick={() => {
+                    if (user.role === 'porteiro') navigate('/portaria?tab=residents');
+                    else navigate('/profiles');
+                  }}
+                  className={`px-4 py-2 rounded-xl text-sm font-bold transition-all ${
+                    (location.pathname === '/portaria' && new URLSearchParams(location.search).get('tab') === 'residents') || location.pathname === '/profiles'
+                      ? 'bg-emerald-50 text-emerald-600' 
+                      : 'text-zinc-500 hover:bg-zinc-50'
+                  }`}
+                >
+                  Moradores
+                </button>
+                {(user.role === 'admin' || user.role === 'sindico') && (
+                  <button 
+                    onClick={() => navigate('/users')}
+                    className={`px-4 py-2 rounded-xl text-sm font-bold transition-all ${
+                      location.pathname === '/users'
+                        ? 'bg-emerald-50 text-emerald-600' 
+                        : 'text-zinc-500 hover:bg-zinc-50'
+                    }`}
+                  >
+                    Usuários
+                  </button>
+                )}
+              </div>
+            )}
           </div>
           <div className="flex items-center gap-4">
             <div className="text-right hidden sm:block">
@@ -2231,6 +2278,7 @@ const AppLayout = ({ user, loading, setUser, handleLogout }: any) => {
           <Route path="/condominiums/new" element={<CondominiumNew user={user} onUpdateUser={setUser} />} />
           <Route path="/profiles" element={<ProfileList user={user} />} />
           <Route path="/profiles/new" element={<ProfileNew user={user} />} />
+          <Route path="/users" element={<UserManagement user={user} />} />
           <Route path="/packages" element={<PackageList user={user} />} />
           <Route path="/packages/new" element={<PackageNew user={user} />} />
           
@@ -2242,6 +2290,58 @@ const AppLayout = ({ user, loading, setUser, handleLogout }: any) => {
           } />
         </Routes>
       </main>
+
+      {/* Bottom Navigation for Porter/Sindico/Admin */}
+      {(user.role === 'porteiro' || user.role === 'sindico' || user.role === 'admin') && (
+        <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-zinc-200 px-6 py-3 z-40 sm:hidden">
+          <div className="flex justify-around items-center">
+            <button 
+              onClick={() => navigate(user.role === 'porteiro' ? '/portaria' : '/dashboard')}
+              className={`flex flex-col items-center gap-1 ${
+                location.pathname === '/portaria' || location.pathname === '/dashboard' ? 'text-emerald-600' : 'text-zinc-400'
+              }`}
+            >
+              <LayoutDashboard className="w-6 h-6" />
+              <span className="text-[10px] font-bold uppercase tracking-wider">Início</span>
+            </button>
+            <button 
+              onClick={() => navigate('/portaria')}
+              className={`flex flex-col items-center gap-1 ${
+                location.pathname === '/portaria' ? 'text-emerald-600' : 'text-zinc-400'
+              }`}
+            >
+              <Package className="w-6 h-6" />
+              <span className="text-[10px] font-bold uppercase tracking-wider">Portaria</span>
+            </button>
+            <button 
+              onClick={() => {
+                if (user.role === 'porteiro') {
+                  navigate('/portaria?tab=residents');
+                } else {
+                  navigate('/profiles');
+                }
+              }}
+              className={`flex flex-col items-center gap-1 ${
+                (location.pathname === '/portaria' && new URLSearchParams(location.search).get('tab') === 'residents') || location.pathname === '/profiles' ? 'text-emerald-600' : 'text-zinc-400'
+              }`}
+            >
+              <Users className="w-6 h-6" />
+              <span className="text-[10px] font-bold uppercase tracking-wider">Moradores</span>
+            </button>
+            {(user.role === 'admin' || user.role === 'sindico') && (
+              <button 
+                onClick={() => navigate('/users')}
+                className={`flex flex-col items-center gap-1 ${
+                  location.pathname === '/users' ? 'text-emerald-600' : 'text-zinc-400'
+                }`}
+              >
+                <Shield className="w-6 h-6" />
+                <span className="text-[10px] font-bold uppercase tracking-wider">Usuários</span>
+              </button>
+            )}
+          </div>
+        </div>
+      )}
       
       <Toaster position="bottom-right" />
     </div>

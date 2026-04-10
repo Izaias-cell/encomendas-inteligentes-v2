@@ -32,6 +32,7 @@ export default function AuditLogs({ user }: AuditLogsProps) {
           *,
           user:profiles!user_id(full_name)
         `)
+        .eq('condominium_id', user.condominium_id)
         .order('created_at', { ascending: false })
         .limit(200);
 

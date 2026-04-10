@@ -29,7 +29,12 @@ import {
   Save,
   MessageSquare,
   Camera,
-  Eye
+  Eye,
+  Trash2,
+  MoreVertical,
+  Power,
+  Send,
+  Zap
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { formatDate, formatSafeDateTime } from '../lib/dateUtils';
@@ -40,6 +45,8 @@ import toast from 'react-hot-toast';
 import { logAction } from '../services/auditService';
 import { Html5Qrcode } from 'html5-qrcode';
 import { motion, AnimatePresence } from 'motion/react';
+import { sendWhatsAppMessage, getWhatsAppLink } from '../services/whatsappService';
+import { CondominiumSettings } from '../types';
 
 interface PortariaProps {
   user: Profile;
@@ -51,12 +58,63 @@ export default function Portaria({ user }: PortariaProps) {
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
   const [activeTab, setActiveTab] = useState<'pending' | 'delivered' | 'all' | 'residents'>('pending');
+  const [activeResidentMenu, setActiveResidentMenu] = useState<string | null>(null);
   const navigate = useNavigate();
+
+  // Batch WhatsApp State
+  const [isBatchSending, setIsBatchSending] = useState(false);
+  const [showBatchModal, setShowBatchModal] = useState(false);
+  const [pendingNoticesCount, setPendingNoticesCount] = useState(0);
+  const [condoSettings, setCondoSettings] = useState<CondominiumSettings | null>(null);
+  const [batchMode, setBatchMode] = useState<'api' | 'manual'>('api');
+  const [batchStep, setBatchStep] = useState<'confirm' | 'sending' | 'manual_list' | 'finished'>('confirm');
+  const [batchProgress, setBatchProgress] = useState({ current: 0, total: 0 });
+  const [manualIndex, setManualIndex] = useState(0);
+  const [batchPackages, setBatchPackages] = useState<Package[]>([]);
+
+  const fetchPendingNotices = async () => {
+    if (!user?.condominium_id) return;
+    
+    try {
+      // Migration: Set whatsapp_status to 'pendente' for all received packages that have null or 'pending' status
+      // This ensures old received packages show up in the counter once, and then can be handled.
+      await Promise.all([
+        supabase
+          .from('packages')
+          .update({ whatsapp_status: 'pendente' })
+          .eq('condominium_id', user.condominium_id)
+          .eq('status', 'received')
+          .is('whatsapp_status', null),
+        supabase
+          .from('packages')
+          .update({ whatsapp_status: 'pendente' })
+          .eq('condominium_id', user.condominium_id)
+          .eq('status', 'received')
+          .eq('whatsapp_status', 'pending')
+      ]);
+
+      const { data, error } = await supabase
+        .from('packages')
+        .select('*, package_id:id, recipient_name:recipient_name_raw, unit_label:unit_number')
+        .eq('condominium_id', user.condominium_id)
+        .eq('whatsapp_status', 'pendente') // Strict as requested
+        .order('received_at', { ascending: false });
+
+      if (error) throw error;
+      
+      setBatchPackages(data || []);
+      setPendingNoticesCount(data?.length || 0);
+    } catch (error) {
+      console.error('Erro ao buscar avisos pendentes:', error);
+    }
+  };
 
   const getWhatsAppBadge = (status: string) => {
     const variants: any = {
       pending: 'text-amber-500',
+      pendente: 'text-amber-500',
       sent: 'text-blue-500',
+      enviado: 'text-blue-600',
       delivered: 'text-emerald-500',
       read: 'text-emerald-600',
       failed: 'text-red-500',
@@ -65,7 +123,9 @@ export default function Portaria({ user }: PortariaProps) {
     };
     const labels: any = {
       pending: 'Pendente',
+      pendente: 'Pendente',
       sent: 'Enviado',
+      enviado: 'Enviado',
       delivered: 'Entregue',
       read: 'Lido',
       failed: 'Falhou',
@@ -101,13 +161,24 @@ export default function Portaria({ user }: PortariaProps) {
   const isTransitioningRef = useRef(false);
   const isScanningRef = useRef(false);
 
+  const anim = (props: any) => condoSettings?.light_mode_enabled ? {} : props;
+
   useEffect(() => {
     isScanningRef.current = isScanning;
   }, [isScanning]);
 
   useEffect(() => {
     fetchData();
+    fetchPendingNotices();
   }, [user.condominium_id]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const tab = params.get('tab');
+    if (tab === 'residents') {
+      setActiveTab('residents');
+    }
+  }, [window.location.search]);
 
   useEffect(() => {
     if (isScanning && !qrPackage) {
@@ -117,6 +188,145 @@ export default function Portaria({ user }: PortariaProps) {
     }
     return () => stopScanning();
   }, [isScanning, qrPackage]);
+
+  const handleBatchSend = async () => {
+    if (batchPackages.length === 0) return;
+
+    const mode = condoSettings?.whatsapp_mode === 'api_automatica' ? 'api' : 'manual';
+    setBatchMode(mode);
+    setBatchProgress({ current: 0, total: batchPackages.length });
+    setManualIndex(0);
+
+    if (mode === 'api') {
+      // Validar configuração
+      if (!condoSettings?.api_url || !condoSettings?.api_token) {
+        toast.error('API não configurada. Usando envio manual.');
+        setBatchMode('manual');
+        setBatchStep('manual_list');
+        return;
+      }
+
+      setBatchStep('sending');
+      setIsBatchSending(true);
+      
+      let successCount = 0;
+      let errorCount = 0;
+      let fallbackTriggered = false;
+
+      for (let i = 0; i < batchPackages.length; i++) {
+        const pkg = batchPackages[i];
+        setBatchProgress(prev => ({ ...prev, current: i + 1 }));
+
+        const resident = residents.find(r => r.id === pkg.recipient_id);
+        
+        if (resident?.telefone && pkg.whatsapp_message) {
+          try {
+            const result = await sendWhatsAppMessage(resident.telefone, pkg.whatsapp_message, user.condominium_id, {
+              api_url: condoSettings.api_url,
+              api_token: condoSettings.api_token,
+              instance_id: condoSettings.instance_id,
+              whatsapp_provider: condoSettings.whatsapp_provider
+            });
+            
+            if (result.status_envio === 'sucesso') {
+              const now = new Date().toISOString();
+              const { error: updateError } = await supabase
+                .from('packages')
+                .update({ 
+                  whatsapp_status: 'enviado', 
+                  last_notification_at: now,
+                  whatsapp_sent_at: now,
+                  notification_mode: 'api'
+                })
+                .eq('id', pkg.id);
+              
+              if (updateError) throw updateError;
+              successCount++;
+            } else {
+              throw new Error(result.error || 'Erro na resposta da API');
+            }
+          } catch (error) {
+            console.error('Falha na API:', error);
+            toast.error('Falha na API. Mudando para envio manual assistido.');
+            fallbackTriggered = true;
+            
+            // Log fallback
+            await logAction(
+              user.id,
+              user.condominium_id,
+              'WHATSAPP_FALLBACK',
+              'packages',
+              pkg.id,
+              { mode: 'api' },
+              { mode: 'manual', error: error instanceof Error ? error.message : String(error) }
+            );
+
+            break; // Interromper envio automático
+          }
+        } else {
+          const { error: updateError } = await supabase
+            .from('packages')
+            .update({ 
+              whatsapp_status: resident?.telefone ? 'error' : 'no_recipient'
+            })
+            .eq('id', pkg.id);
+          
+          if (updateError) console.error('Erro ao atualizar status de erro:', updateError);
+          errorCount++;
+        }
+      }
+
+      setIsBatchSending(false);
+      
+      if (fallbackTriggered) {
+        setBatchMode('manual');
+        setBatchStep('manual_list');
+      } else {
+        if (successCount > 0) toast.success(`${successCount} avisos enviados via API!`);
+        if (errorCount > 0) toast.error(`${errorCount} avisos falharam.`);
+        setShowBatchModal(false);
+      }
+      fetchData();
+      fetchPendingNotices();
+    } else {
+      setBatchStep('manual_list');
+    }
+  };
+
+  const handleManualSent = async (pkgId: string) => {
+    try {
+      const now = new Date().toISOString();
+      await supabase
+        .from('packages')
+        .update({ 
+          whatsapp_status: 'enviado', 
+          last_notification_at: now,
+          whatsapp_sent_at: now,
+          notification_mode: 'manual'
+        })
+        .eq('id', pkgId);
+      
+      setPackages(prev => prev.map(p => p.id === pkgId ? { ...p, whatsapp_status: 'enviado', whatsapp_sent_at: now } : p));
+      fetchPendingNotices();
+      toast.success('Status atualizado!');
+      
+      if (manualIndex + 1 >= batchPackages.length) {
+        setBatchStep('finished');
+      } else {
+        setManualIndex(prev => prev + 1);
+      }
+    } catch (error) {
+      toast.error('Erro ao atualizar status');
+    }
+  };
+
+  const handleSkipManual = () => {
+    if (manualIndex + 1 >= batchPackages.length) {
+      setBatchStep('finished');
+    } else {
+      setManualIndex(prev => prev + 1);
+    }
+  };
 
   const startScanning = async () => {
     if (isTransitioningRef.current || !isScanningRef.current) return;
@@ -239,12 +449,12 @@ export default function Portaria({ user }: PortariaProps) {
       }
 
       // The QR code contains the package ID, token or 4-digit pickup code
-      const { data, error: rpcError } = await supabase
+      const { data: packagesFound, error: rpcError } = await supabase
         .from('packages')
         .select('*, package_id:id, recipient_name:recipient_name_raw, unit_label:unit_number')
         .eq('condominium_id', user.condominium_id)
         .or(orParts.join(','))
-        .maybeSingle();
+        .eq('status', 'received');
 
       if (rpcError) {
         console.error("Erro ao buscar encomenda por QR:", rpcError);
@@ -257,7 +467,7 @@ export default function Portaria({ user }: PortariaProps) {
         return;
       }
 
-      if (!data) {
+      if (!packagesFound || packagesFound.length === 0) {
         setQrScanStatus('error');
         toast.error('Encomenda não encontrada');
         setTimeout(() => {
@@ -267,16 +477,7 @@ export default function Portaria({ user }: PortariaProps) {
         return;
       }
 
-      if (data.status === 'delivered') {
-        setQrScanStatus('error');
-        toast.error('Esta encomenda já foi entregue');
-        setTimeout(() => {
-          setQrScanStatus('scanning');
-          startScanning();
-        }, 2000);
-        return;
-      }
-
+      const data = packagesFound[0];
       setQrPackage(data);
       setQrScanStatus('success');
       
@@ -301,6 +502,7 @@ export default function Portaria({ user }: PortariaProps) {
 
   const [editingResident, setEditingResident] = useState<Morador | null>(null);
   const [isAddingResident, setIsAddingResident] = useState(false);
+  const [residentToDelete, setResidentToDelete] = useState<Morador | null>(null);
   const [residentForm, setResidentForm] = useState({
     full_name: '',
     phone: '',
@@ -388,11 +590,90 @@ export default function Portaria({ user }: PortariaProps) {
     }
   };
 
+  const handleDeleteResident = (resident: Morador) => {
+    setResidentToDelete(resident);
+  };
+
+  const confirmDeleteResident = async () => {
+    if (!residentToDelete) return;
+
+    try {
+      setLoading(true);
+      
+      // Soft delete: inativa o morador na tabela moradores
+      const { error: errorMorador } = await supabase
+        .from('moradores')
+        .update({ ativo: false })
+        .eq('id', residentToDelete.id);
+
+      if (errorMorador) throw errorMorador;
+
+      // Também tenta inativar na tabela profiles caso exista um usuário vinculado
+      await supabase
+        .from('profiles')
+        .update({ active: false })
+        .eq('id', residentToDelete.id);
+
+      await logAction(
+        user.id,
+        user.condominium_id,
+        'DELETE_RESIDENT',
+        'moradores',
+        residentToDelete.id,
+        residentToDelete,
+        { ativo: false }
+      );
+
+      toast.success('Morador excluído com sucesso!');
+      setResidentToDelete(null);
+      fetchData();
+    } catch (error: any) {
+      console.error('Erro ao excluir morador:', error);
+      toast.error('Erro ao excluir morador: ' + error.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const toggleResidentStatus = async (resident: Morador) => {
+    try {
+      setLoading(true);
+      const newStatus = !resident.ativo;
+      
+      const { error } = await supabase
+        .from('moradores')
+        .update({ ativo: newStatus })
+        .eq('id', resident.id);
+
+      if (error) throw error;
+
+      await logAction(
+        user.id,
+        user.condominium_id,
+        newStatus ? 'ACTIVATE_RESIDENT' : 'DEACTIVATE_RESIDENT',
+        'moradores',
+        resident.id,
+        resident,
+        { ativo: newStatus }
+      );
+
+      toast.success(`Morador ${newStatus ? 'ativado' : 'desativado'} com sucesso!`);
+      fetchData();
+    } catch (error: any) {
+      console.error('Erro ao alterar status do morador:', error);
+      toast.error('Erro ao alterar status: ' + error.message);
+    } finally {
+      setLoading(false);
+      setActiveResidentMenu(null);
+    }
+  };
+
   const getDeliveryMethodLabel = (method?: string) => {
     switch (method) {
       case 'manual': return 'MANUAL';
       case 'qr_code': return 'QR CODE';
       case 'code':
+      case 'CÓDIGO':
       case 'pickup_code': return 'CÓDIGO';
       case 'photo':
       case 'foto': return 'RETIRADA COM FOTO';
@@ -406,17 +687,35 @@ export default function Portaria({ user }: PortariaProps) {
     try {
       setLoading(true);
       
-      // Busca encomendas e moradores em paralelo para melhor performance
+      // Primeiro busca as configurações para saber se o modo leve está ativado
+      const { data: settingsData } = await supabase
+        .from('condominium_settings')
+        .select('*')
+        .eq('condominium_id', user.condominium_id)
+        .maybeSingle();
+      
+      const isLightMode = settingsData?.light_mode_enabled ?? true;
+      setCondoSettings(settingsData);
+
+      // Busca encomendas e moradores respeitando o modo leve
+      let pkgQuery = supabase
+        .from('packages')
+        .select('*, package_id:id, recipient_name:recipient_name_raw, unit_label:unit_number')
+        .eq('condominium_id', user.condominium_id)
+        .order('received_at', { ascending: false });
+
+      // No modo leve, limitamos a carga inicial de encomendas para melhorar performance
+      if (isLightMode) {
+        pkgQuery = pkgQuery.limit(100);
+      }
+
       const [pkgResult, resResult] = await Promise.all([
-        supabase
-          .from('packages')
-          .select('*, package_id:id, recipient_name:recipient_name_raw, unit_label:unit_number')
-          .eq('condominium_id', user.condominium_id)
-          .order('received_at', { ascending: false }),
+        pkgQuery,
         supabase
           .from('moradores')
           .select('*')
           .eq('condominium_id', user.condominium_id)
+          .eq('ativo', true)
           .order('nome')
       ]);
 
@@ -446,8 +745,20 @@ export default function Portaria({ user }: PortariaProps) {
 
   const uploadDeliveryPhoto = async (base64: string) => {
     try {
+      let finalBase64 = base64;
+
+      // Se o modo leve estiver ativado, comprimimos a imagem antes do upload
+      if (condoSettings?.light_mode_enabled) {
+        try {
+          const { compressImage } = await import('../lib/imageUtils');
+          finalBase64 = await compressImage(base64, 800, 0.6);
+        } catch (err) {
+          console.warn('Falha ao comprimir imagem, enviando original:', err);
+        }
+      }
+
       // Converter base64 para Blob
-      const res = await fetch(base64);
+      const res = await fetch(finalBase64);
       const blob = await res.blob();
       
       // Nome de arquivo único para evitar colisões
@@ -516,7 +827,7 @@ export default function Portaria({ user }: PortariaProps) {
     }
   };
 
-  const handleDeliver = async (pkgId: string, method: 'manual' | 'qr_code' | 'photo' | 'foto' | 'code' = 'manual', photoOverride?: string) => {
+  const handleDeliver = async (pkgId: string, method: 'manual' | 'qr_code' | 'photo' | 'foto' | 'code' | 'CÓDIGO' = 'manual', photoOverride?: string) => {
     if (!pkgId) {
       toast.error('ID da encomenda não encontrado');
       return;
@@ -544,12 +855,17 @@ export default function Portaria({ user }: PortariaProps) {
           throw new Error(`Erro no upload da foto: ${uploadErr.message}`);
         }
       } else if (finalMethod === 'manual' && qrPackage?.pickup_code) {
-        // Se for manual mas tiver código de retirada, salva como 'code'
-        finalMethod = 'code';
+        // Se for manual mas tiver código de retirada, salva como 'CÓDIGO'
+        finalMethod = 'CÓDIGO';
+      } else if (finalMethod === 'code') {
+        finalMethod = 'CÓDIGO';
       }
 
       // Atualizar o status da encomenda no Supabase
-      const { error: updateError } = await supabase
+      // Se houver pickup_token, damos baixa em TODAS as encomendas pendentes com esse token
+      const isJointDelivery = !!(qrPackage?.isGroup || (qrPackage?.pickup_token && packages.filter(p => p.pickup_token === qrPackage.pickup_token && p.status === 'received').length > 1));
+      
+      const updateQuery = supabase
         .from('packages')
         .update({ 
           status: 'delivered',
@@ -558,9 +874,20 @@ export default function Portaria({ user }: PortariaProps) {
           ...(authUser?.id ? { delivered_by: authUser.id } : {}),
           pickup_qr_code: 'used',
           delivered_to_name: 'Morador (Confirmado)',
-          ...(finalPhotoUrl ? { delivery_photo_url: finalPhotoUrl } : {})
-        })
-        .eq('id', pkgId);
+          ...(finalPhotoUrl ? { delivery_photo_url: finalPhotoUrl } : {}),
+          ...(isJointDelivery ? { notes: 'Retirada conjunta com foto' } : {})
+        });
+
+      if (qrPackage?.pickup_token) {
+        updateQuery.eq('pickup_token', qrPackage.pickup_token).eq('status', 'received');
+      } else if (qrPackage?.pickup_code) {
+        // Fallback para código se não houver token (legado)
+        updateQuery.eq('pickup_code', qrPackage.pickup_code).eq('status', 'received').eq('recipient_id', qrPackage.recipient_id);
+      } else {
+        updateQuery.eq('id', pkgId);
+      }
+
+      const { error: updateError } = await updateQuery;
 
       if (updateError) {
         console.error("Erro no update do banco:", updateError);
@@ -575,8 +902,8 @@ export default function Portaria({ user }: PortariaProps) {
           'DELIVER_PACKAGE',
           'packages',
           pkgId,
-          { status: 'received', method },
-          { status: 'delivered', method: finalMethod }
+          { status: 'received', method, token: qrPackage?.pickup_token, joint: isJointDelivery },
+          { status: 'delivered', method: finalMethod, note: isJointDelivery ? 'Retirada conjunta com foto' : undefined }
         );
       } catch (logErr) {
         console.warn("Erro ao registrar log de auditoria:", logErr);
@@ -587,11 +914,19 @@ export default function Portaria({ user }: PortariaProps) {
       toast.success('Entrega confirmada com sucesso');
       
       // Atualiza o estado local para refletir a mudança na lista
-      setPackages(prev => prev.map((p: any) => 
-        (p.id === pkgId || p.package_id === pkgId)
-          ? { ...p, status: 'delivered', delivered_at: new Date().toISOString() } 
-          : p
-      ));
+      setPackages(prev => prev.map((p: any) => {
+        const isMatchByToken = qrPackage?.pickup_token && p.pickup_token === qrPackage.pickup_token;
+        const isMatchByCode = !qrPackage?.pickup_token && qrPackage?.pickup_code && p.pickup_code === qrPackage.pickup_code && p.recipient_id === qrPackage.recipient_id;
+        const isMatchById = p.id === pkgId || p.package_id === pkgId;
+        
+        const isMatch = (isMatchByToken || isMatchByCode || isMatchById) && p.status === 'received';
+        
+        return isMatch
+          ? { ...p, status: 'delivered', delivered_at: new Date().toISOString(), delivery_method: finalMethod } 
+          : p;
+      }));
+      
+      fetchPendingNotices();
       
       // Fecha o modal automaticamente após 2 segundos
       setTimeout(() => {
@@ -619,24 +954,53 @@ export default function Portaria({ user }: PortariaProps) {
   const pendingPackages = packages.filter(p => !p.delivered_at || p.status !== 'delivered');
   const deliveredPackages = packages.filter(p => p.delivered_at || p.status === 'delivered');
 
+  const [selectedGroup, setSelectedGroup] = useState<any>(null);
+
   const getFilteredPackages = () => {
     let basePackages = packages;
     if (activeTab === 'pending') basePackages = pendingPackages;
     if (activeTab === 'delivered') basePackages = deliveredPackages;
 
-    return basePackages.filter((p: any) => 
+    const filtered = basePackages.filter((p: any) => 
       p.recipient_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
       p.unit_label?.toLowerCase().includes(searchTerm.toLowerCase()) ||
       p.carrier?.toLowerCase().includes(searchTerm.toLowerCase()) ||
       p.tracking_code?.toLowerCase().includes(searchTerm.toLowerCase())
     );
+
+    // Agrupamento para aba Pendentes
+    if (activeTab === 'pending') {
+      const groups: { [key: string]: any[] } = {};
+      filtered.forEach(pkg => {
+        // Agrupar por pickup_token (ou pickup_code como fallback)
+        const key = pkg.pickup_token || pkg.pickup_code || pkg.id;
+        if (!groups[key]) groups[key] = [];
+        groups[key].push(pkg);
+      });
+
+      return Object.values(groups).map(group => {
+        if (group.length === 1) return group[0];
+        
+        // Retorna um objeto "virtual" de grupo
+        return {
+          ...group[0],
+          isGroup: true,
+          packages: group,
+          count: group.length
+        };
+      });
+    }
+
+    return filtered;
   };
 
   const filteredPackages = getFilteredPackages();
 
   const filteredResidents = residents.filter(r => 
-    r.nome.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    r.unidade?.toLowerCase().includes(searchTerm.toLowerCase())
+    r.ativo && (
+      r.nome.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      r.unidade?.toLowerCase().includes(searchTerm.toLowerCase())
+    )
   );
 
   return (
@@ -663,13 +1027,6 @@ export default function Portaria({ user }: PortariaProps) {
           >
             <Plus className="w-6 h-6" />
             Registrar Encomenda
-          </button>
-          <button
-            onClick={openNewResidentModal}
-            className="flex-1 md:flex-none bg-white text-zinc-900 px-6 py-4 rounded-2xl font-bold hover:bg-zinc-50 transition-all flex items-center justify-center gap-3 border border-zinc-200 shadow-sm"
-          >
-            <UserPlus className="w-6 h-6 text-emerald-600" />
-            Novo Morador
           </button>
         </div>
       </div>
@@ -716,6 +1073,18 @@ export default function Portaria({ user }: PortariaProps) {
         />
       </div>
 
+      {activeTab === 'residents' && (user.role === 'admin' || user.role === 'porteiro') && (
+        <div className="flex justify-end mb-6">
+          <button
+            onClick={() => navigate('/profiles/new')}
+            className="flex items-center gap-2 px-6 py-3 bg-emerald-600 text-white rounded-2xl font-bold hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-200"
+          >
+            <UserPlus className="w-5 h-5" />
+            Adicionar Morador
+          </button>
+        </div>
+      )}
+
       {loading ? (
         <div className="flex items-center justify-center py-20">
           <Loader2 className="w-10 h-10 animate-spin text-emerald-600" />
@@ -726,12 +1095,17 @@ export default function Portaria({ user }: PortariaProps) {
             {filteredPackages.map((pkg: any) => (
               <div key={pkg.package_id} className="bg-white rounded-3xl border border-zinc-100 shadow-sm p-6 hover:shadow-md transition-all group">
                 <div className="flex justify-between items-start mb-4">
-                  <div className="w-12 h-12 bg-zinc-50 text-emerald-600 rounded-2xl flex items-center justify-center group-hover:bg-emerald-100 transition-colors">
+                  <div className="w-12 h-12 bg-zinc-50 text-emerald-600 rounded-2xl flex items-center justify-center group-hover:bg-emerald-100 transition-colors relative">
                     <PackageIcon className="w-6 h-6" />
+                    {pkg.isGroup && (
+                      <span className="absolute -top-2 -right-2 bg-emerald-600 text-white text-[10px] font-bold w-5 h-5 rounded-full flex items-center justify-center border-2 border-white shadow-sm">
+                        {pkg.count}
+                      </span>
+                    )}
                   </div>
                   <div className="flex flex-col items-end gap-1">
                     <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider ${pkg.status === 'delivered' ? 'bg-zinc-100 text-zinc-600' : 'bg-amber-100 text-amber-700'}`}>
-                      {pkg.status === 'delivered' ? 'Retirada' : 'Pendente'}
+                      {pkg.status === 'delivered' ? 'Retirada' : (pkg.isGroup ? `${pkg.count} Pendentes` : 'Pendente')}
                     </span>
                   </div>
                 </div>
@@ -746,20 +1120,35 @@ export default function Portaria({ user }: PortariaProps) {
                     <Home className="w-4 h-4 flex-shrink-0" />
                     <p className="font-medium">{formatPackageUnit(pkg)}</p>
                   </div>
-                  <div className="flex items-center gap-3 text-zinc-500 text-sm">
-                    <Truck className="w-4 h-4 flex-shrink-0" />
-                    <p>{pkg.carrier}</p>
-                  </div>
+                  {!pkg.isGroup && (
+                    <div className="flex items-center gap-3 text-zinc-500 text-sm">
+                      <Truck className="w-4 h-4 flex-shrink-0" />
+                      <p>{pkg.carrier}</p>
+                    </div>
+                  )}
+                  
+                  {pkg.isGroup && (
+                    <div className="bg-zinc-50 rounded-xl p-3 space-y-2">
+                      <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Transportadoras:</p>
+                      <div className="flex flex-wrap gap-2">
+                        {Array.from(new Set(pkg.packages.map((p: any) => p.carrier))).map((c: any, i) => (
+                          <span key={i} className="text-[11px] bg-white border border-zinc-200 px-2 py-0.5 rounded-md text-zinc-600 font-medium">{c}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   
                   <div className="mt-4 pt-4 border-t border-zinc-50 space-y-3">
                     <div className="flex flex-col">
                       <span className="text-[10px] font-bold text-zinc-400 tracking-widest uppercase">
-                        Código de retirada
+                        {pkg.isGroup ? 'Código único de retirada' : 'Código de retirada'}
                       </span>
-                      <p className={`font-mono text-sm font-bold ${pkg.status === 'delivered' ? 'text-zinc-500' : 'text-emerald-600'}`}>{pkg.pickup_code || '-'}</p>
+                      <p className={`font-mono text-sm font-bold ${pkg.status === 'delivered' ? 'text-zinc-500' : 'text-emerald-600'}`}>
+                        {pkg.pickup_code || '-'}
+                      </p>
                     </div>
 
-                    {pkg.tracking_code && (
+                    {!pkg.isGroup && pkg.tracking_code && (
                       <div className="flex flex-col">
                         <span className="text-[10px] font-bold text-zinc-400 tracking-widest uppercase">
                           Etiqueta
@@ -772,7 +1161,7 @@ export default function Portaria({ user }: PortariaProps) {
                   <div className="space-y-1 pt-2 border-t border-zinc-50/50">
                     <div className="flex items-center gap-2 text-zinc-500 text-[11px]">
                       <Clock className="w-3.5 h-3.5 flex-shrink-0" />
-                      <p>Recebido em: <span className="font-medium text-zinc-700">{formatSafeDateTime(pkg.received_at)}</span></p>
+                      <p>{pkg.isGroup ? 'Última recebida em:' : 'Recebido em:'} <span className="font-medium text-zinc-700">{formatSafeDateTime(pkg.received_at)}</span></p>
                     </div>
                     {pkg.delivered_at && (
                       <div className="flex items-center gap-2 text-emerald-600 text-[11px]">
@@ -806,8 +1195,17 @@ export default function Portaria({ user }: PortariaProps) {
                     className={`col-span-2 py-4 rounded-2xl font-bold transition-all flex items-center justify-center gap-3 text-base shadow-lg ${pkg.status === 'delivered' ? 'bg-zinc-50 text-zinc-400 cursor-not-allowed' : 'bg-emerald-600 text-white hover:bg-emerald-700 shadow-emerald-900/20'}`}
                   >
                     <Camera className={`w-5 h-5 ${pkg.status === 'delivered' ? 'hidden' : ''}`} />
-                    {pkg.status === 'delivered' ? 'Entregue' : 'ENTREGAR'}
+                    {pkg.status === 'delivered' ? 'Entregue' : (pkg.isGroup ? 'ENTREGAR TODAS' : 'ENTREGAR COM FOTO')}
                   </button>
+                  {pkg.isGroup && (
+                    <button 
+                      onClick={() => setSelectedGroup(pkg)}
+                      className="col-span-2 bg-zinc-50 text-zinc-500 py-3 rounded-xl font-bold hover:bg-zinc-100 transition-all flex items-center justify-center gap-2 text-sm"
+                    >
+                      <PackageIcon className="w-4 h-4" />
+                      Ver itens do grupo
+                    </button>
+                  )}
                   <button 
                     onClick={() => {
                       setRetrievalMethod('qr_code');
@@ -837,13 +1235,6 @@ export default function Portaria({ user }: PortariaProps) {
         <div className="space-y-6">
           <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-8">
             <h2 className="text-3xl font-bold text-zinc-900">Moradores</h2>
-            <button
-              onClick={openNewResidentModal}
-              className="flex items-center gap-2 px-6 py-3 bg-emerald-600 text-white rounded-2xl font-bold hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-200"
-            >
-              <UserPlus className="w-5 h-5" />
-              Novo Morador
-            </button>
           </div>
 
           {filteredResidents.length > 0 ? (
@@ -854,17 +1245,70 @@ export default function Portaria({ user }: PortariaProps) {
                     <div className="w-12 h-12 bg-zinc-50 text-emerald-600 rounded-2xl flex items-center justify-center group-hover:bg-emerald-100 transition-colors">
                       <User className="w-6 h-6" />
                     </div>
-                    <div className="flex gap-2">
-                      <button
-                        onClick={() => handleEditResident(resident)}
-                        className="p-2 text-zinc-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-xl transition-colors"
-                        title="Editar Morador"
-                      >
-                        <Edit className="w-5 h-5" />
-                      </button>
-                      <span className="px-2.5 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider bg-blue-100 text-blue-700">
+                    <div className="flex gap-2 items-center">
+                      {!resident.ativo && (
+                        <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-red-100 text-red-700">
+                          Inativo
+                        </span>
+                      )}
+                      <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-blue-100 text-blue-700">
                         Morador
                       </span>
+                      <div className="relative">
+                        <button
+                          onClick={() => setActiveResidentMenu(activeResidentMenu === resident.id ? null : resident.id)}
+                          className="p-2 text-zinc-400 hover:text-zinc-900 hover:bg-zinc-100 rounded-xl transition-all"
+                          title="Ações"
+                        >
+                          <MoreVertical className="w-5 h-5" />
+                        </button>
+
+                        {activeResidentMenu === resident.id && (
+                          <>
+                            <div 
+                              className="fixed inset-0 z-10" 
+                              onClick={() => setActiveResidentMenu(null)}
+                            />
+                            <div className="absolute right-0 mt-2 w-56 bg-white rounded-2xl shadow-2xl border border-zinc-100 py-2 z-20 overflow-hidden animate-in fade-in zoom-in duration-200 origin-top-right">
+                              <button
+                                onClick={() => {
+                                  handleEditResident(resident);
+                                  setActiveResidentMenu(null);
+                                }}
+                                className="w-full px-4 py-3 text-left text-sm font-bold text-zinc-700 hover:bg-zinc-50 flex items-center gap-3 transition-colors"
+                              >
+                                <Edit className="w-4 h-4 text-emerald-600" />
+                                Editar Morador
+                              </button>
+
+                              {(user.role === 'admin' || user.role === 'sindico') && (
+                                <>
+                                  <button
+                                    onClick={() => toggleResidentStatus(resident)}
+                                    className={`w-full px-4 py-3 text-left text-sm font-bold flex items-center gap-3 transition-colors ${resident.ativo ? 'text-amber-600 hover:bg-amber-50' : 'text-emerald-600 hover:bg-emerald-50'}`}
+                                  >
+                                    <Power className="w-4 h-4" />
+                                    {resident.ativo ? 'Desativar Morador' : 'Ativar Morador'}
+                                  </button>
+
+                                  <div className="h-px bg-zinc-100 my-1" />
+
+                                  <button
+                                    onClick={() => {
+                                      handleDeleteResident(resident);
+                                      setActiveResidentMenu(null);
+                                    }}
+                                    className="w-full px-4 py-3 text-left text-sm font-bold text-red-600 hover:bg-red-50 flex items-center gap-3 transition-colors"
+                                  >
+                                    <Trash2 className="w-4 h-4" />
+                                    Excluir Morador
+                                  </button>
+                                </>
+                              )}
+                            </div>
+                          </>
+                        )}
+                      </div>
                     </div>
                   </div>
                   
@@ -901,6 +1345,181 @@ export default function Portaria({ user }: PortariaProps) {
         </div>
       )}
 
+      {/* Modal de Confirmação de Envio em Lote */}
+      <AnimatePresence>
+        {showBatchModal && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-zinc-900/80 backdrop-blur-sm">
+            <motion.div
+              {...anim({
+                initial: { opacity: 0, scale: 0.95, y: 20 },
+                animate: { opacity: 1, scale: 1, y: 0 },
+                exit: { opacity: 0, scale: 0.95, y: 20 }
+              })}
+              className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]"
+            >
+              <div className="p-8 text-center flex-shrink-0">
+                <div className={`w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-6 ${batchMode === 'api' ? 'bg-amber-50 text-amber-600' : 'bg-emerald-50 text-emerald-600'}`}>
+                  <MessageSquare className="w-10 h-10" />
+                </div>
+                
+                <h3 className="text-2xl font-bold text-zinc-900 mb-2">
+                  {batchStep === 'manual_list' ? 'Envio Manual Assistido' : 
+                   batchStep === 'finished' ? 'Envio Concluído' : 'Enviar avisos em lote'}
+                </h3>
+                <p className="text-zinc-500 mb-4">
+                  {batchStep === 'manual_list' 
+                    ? `Siga o fluxo sequencial para enviar as mensagens.`
+                    : batchStep === 'finished'
+                    ? 'Todos os avisos foram processados com sucesso.'
+                    : `Você tem ${pendingNoticesCount} mensagens pendentes para enviar.`}
+                </p>
+
+                {batchStep === 'manual_list' && (
+                  <div className="mb-6">
+                    <div className="w-full bg-zinc-100 h-2 rounded-full overflow-hidden">
+                      <motion.div 
+                        className="bg-emerald-600 h-full"
+                        initial={{ width: 0 }}
+                        animate={{ width: `${((manualIndex + 1) / batchPackages.length) * 100}%` }}
+                      />
+                    </div>
+                    <p className="text-xs font-bold text-zinc-400 mt-2 uppercase tracking-widest">
+                      Mensagem {manualIndex + 1} de {batchPackages.length}
+                    </p>
+                  </div>
+                )}
+
+                {batchStep === 'sending' && (
+                  <div className="mb-6">
+                    <div className="w-full bg-zinc-100 h-2 rounded-full overflow-hidden">
+                      <motion.div 
+                        className="bg-emerald-600 h-full"
+                        initial={{ width: 0 }}
+                        animate={{ width: `${(batchProgress.current / batchProgress.total) * 100}%` }}
+                      />
+                    </div>
+                    <p className="text-xs font-bold text-zinc-400 mt-2 uppercase tracking-widest">
+                      Enviando via API... {batchProgress.current}/{batchProgress.total}
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              {batchStep === 'manual_list' && (
+                <div className="flex-1 overflow-y-auto px-8 pb-8">
+                  {(() => {
+                    const pkg = batchPackages[manualIndex];
+                    if (!pkg) return null;
+                    const resident = residents.find(r => r.id === pkg.recipient_id);
+                    
+                    return (
+                      <motion.div 
+                        key={pkg.id}
+                        initial={{ opacity: 0, x: 20 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        className="bg-zinc-50 p-8 rounded-[2rem] border border-zinc-100 text-center"
+                      >
+                        <div className="w-16 h-16 bg-white rounded-2xl shadow-sm flex items-center justify-center mx-auto mb-4 border border-zinc-100">
+                          <User className="w-8 h-8 text-emerald-600" />
+                        </div>
+                        <h4 className="text-xl font-bold text-zinc-900 mb-1">{pkg.recipient_name}</h4>
+                        <p className="text-zinc-500 mb-4">{formatPackageUnit(pkg)}</p>
+                        
+                        {pkg.carrier && (
+                          <div className="inline-flex items-center gap-2 bg-white px-4 py-2 rounded-full border border-zinc-100 text-xs font-bold text-zinc-600 mb-6">
+                            <Truck className="w-3.5 h-3.5 text-blue-500" />
+                            {pkg.carrier.toUpperCase()}
+                          </div>
+                        )}
+
+                        <div className="grid grid-cols-1 gap-3">
+                          <a
+                            href={getWhatsAppLink(resident?.telefone || '', pkg.whatsapp_message || '')}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={() => handleManualSent(pkg.id)}
+                            className="w-full bg-emerald-600 text-white py-5 rounded-2xl font-bold hover:bg-emerald-700 transition-all flex items-center justify-center gap-3 shadow-lg shadow-emerald-200"
+                          >
+                            <Send className="w-6 h-6" />
+                            ENVIAR PRÓXIMO
+                          </a>
+                          <div className="grid grid-cols-2 gap-3">
+                            <button
+                              onClick={handleSkipManual}
+                              className="bg-white text-zinc-600 py-4 rounded-2xl font-bold border border-zinc-200 hover:bg-zinc-50 transition-all"
+                            >
+                              PULAR
+                            </button>
+                            <button
+                              onClick={() => {
+                                setShowBatchModal(false);
+                                setBatchStep('confirm');
+                              }}
+                              className="bg-white text-red-500 py-4 rounded-2xl font-bold border border-zinc-200 hover:bg-red-50 transition-all"
+                            >
+                              CANCELAR
+                            </button>
+                          </div>
+                        </div>
+                      </motion.div>
+                    );
+                  })()}
+                </div>
+              )}
+
+              {batchStep === 'finished' && (
+                <div className="p-8 pt-0 flex-shrink-0">
+                  <button
+                    onClick={() => {
+                      setShowBatchModal(false);
+                      setBatchStep('confirm');
+                    }}
+                    className="w-full bg-emerald-600 text-white py-4 rounded-2xl font-bold hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-200"
+                  >
+                    FECHAR
+                  </button>
+                </div>
+              )}
+
+              <div className="p-8 pt-0 flex-shrink-0">
+                <div className="grid grid-cols-1 gap-3">
+                  {batchStep === 'confirm' && (
+                    <button
+                      onClick={handleBatchSend}
+                      disabled={isBatchSending}
+                      className="w-full bg-emerald-600 text-white py-4 rounded-2xl font-bold hover:bg-emerald-700 transition-all flex items-center justify-center gap-3 shadow-lg shadow-emerald-200"
+                    >
+                      {condoSettings?.whatsapp_mode === 'api_automatica' ? (
+                        <>
+                          <Zap className="w-5 h-5" />
+                          INICIAR ENVIO AUTOMÁTICO
+                        </>
+                      ) : (
+                        <>
+                          <Send className="w-5 h-5" />
+                          INICIAR ENVIO MANUAL
+                        </>
+                      )}
+                    </button>
+                  )}
+                  
+                  <button
+                    onClick={() => {
+                      setShowBatchModal(false);
+                      setBatchStep('confirm');
+                    }}
+                    disabled={isBatchSending}
+                    className="w-full bg-zinc-100 text-zinc-600 py-4 rounded-2xl font-bold hover:bg-zinc-200 transition-all disabled:opacity-50"
+                  >
+                    {batchStep === 'manual_list' ? 'FECHAR' : 'CANCELAR'}
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* Input de arquivo oculto para captura de foto de entrega */}
       <input 
         type="file" 
@@ -915,8 +1534,10 @@ export default function Portaria({ user }: PortariaProps) {
       {(isAddingResident || editingResident) && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-zinc-900/80 backdrop-blur-sm">
           <motion.div
-            initial={{ opacity: 0, scale: 0.95, y: 20 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
+            {...anim({
+              initial: { opacity: 0, scale: 0.95, y: 20 },
+              animate: { opacity: 1, scale: 1, y: 0 }
+            })}
             className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-lg overflow-hidden"
           >
             <div className="p-8">
@@ -1047,6 +1668,98 @@ export default function Portaria({ user }: PortariaProps) {
               </form>
             </div>
           </motion.div>
+        </div>
+      )}
+
+      {/* Modal de Confirmação de Exclusão de Morador */}
+      <AnimatePresence>
+        {residentToDelete && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-zinc-900/80 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-[2rem] shadow-2xl w-full max-w-sm overflow-hidden"
+            >
+              <div className="p-8 text-center">
+                <div className="w-16 h-16 bg-red-50 text-red-500 rounded-full flex items-center justify-center mx-auto mb-6">
+                  <Trash2 className="w-8 h-8" />
+                </div>
+                <h3 className="text-xl font-bold text-zinc-900 mb-2">Excluir Morador?</h3>
+                <p className="text-zinc-500 mb-8">
+                  Tem certeza que deseja excluir <strong>{residentToDelete.nome}</strong>? 
+                  Ele não será removido permanentemente, apenas ocultado da lista ativa.
+                </p>
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    onClick={() => setResidentToDelete(null)}
+                    className="py-3 px-4 bg-zinc-100 text-zinc-600 rounded-xl font-bold hover:bg-zinc-200 transition-all"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    onClick={confirmDeleteResident}
+                    disabled={loading}
+                    className="py-3 px-4 bg-red-600 text-white rounded-xl font-bold hover:bg-red-700 transition-all shadow-lg shadow-red-200 disabled:opacity-50"
+                  >
+                    {loading ? 'Excluindo...' : 'Sim, Excluir'}
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+      {selectedGroup && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-6 backdrop-blur-sm animate-in fade-in duration-300">
+          <div className="bg-white rounded-[2.5rem] max-w-lg w-full p-8 shadow-2xl animate-in zoom-in-95 duration-300">
+            <div className="flex justify-between items-center mb-6">
+              <div>
+                <h3 className="text-2xl font-bold text-zinc-900">Itens do Grupo</h3>
+                <p className="text-zinc-500">Encomendas para {selectedGroup.recipient_name}</p>
+              </div>
+              <button 
+                onClick={() => setSelectedGroup(null)}
+                className="w-10 h-10 bg-zinc-50 text-zinc-400 rounded-full flex items-center justify-center hover:bg-zinc-100 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-4 max-h-[50vh] overflow-y-auto pr-2 mb-8 custom-scrollbar">
+              {selectedGroup.packages.map((pkg: any, idx: number) => (
+                <div key={pkg.id || idx} className="p-4 bg-zinc-50 rounded-2xl border border-zinc-100 flex items-center gap-4">
+                  <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center text-emerald-600 shadow-sm">
+                    <PackageIcon className="w-5 h-5" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-bold text-zinc-900 truncate">{pkg.carrier}</p>
+                    <p className="text-xs text-zinc-500">Recebido em {formatSafeDateTime(pkg.received_at)}</p>
+                    {pkg.tracking_code && (
+                      <p className="text-[10px] font-mono text-zinc-400 mt-1 truncate">Etiqueta: {pkg.tracking_code}</p>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <button 
+              onClick={() => {
+                const pkg = selectedGroup;
+                setSelectedGroup(null);
+                pendingPackageRef.current = pkg;
+                setQrPackage(pkg);
+                setRetrievalMethod('manual');
+                setIsScanning(true);
+                setQrScanStatus('validating');
+                fileInputRef.current?.click();
+              }}
+              className="w-full bg-emerald-600 text-white py-4 rounded-2xl font-bold hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-900/20 flex items-center justify-center gap-3"
+            >
+              <Camera className="w-5 h-5" />
+              ENTREGAR TODAS ({selectedGroup.count})
+            </button>
+          </div>
         </div>
       )}
 
@@ -1341,9 +2054,11 @@ export default function Portaria({ user }: PortariaProps) {
         {viewQrPackage && (
           <div className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-6 backdrop-blur-sm">
             <motion.div 
-              initial={{ scale: 0.9, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.9, opacity: 0 }}
+              {...anim({
+                initial: { scale: 0.9, opacity: 0 },
+                animate: { scale: 1, opacity: 1 },
+                exit: { scale: 0.9, opacity: 0 }
+              })}
               className="bg-white rounded-[2.5rem] max-w-sm w-full p-8 text-center shadow-2xl"
             >
               <div className="flex justify-between items-center mb-6">

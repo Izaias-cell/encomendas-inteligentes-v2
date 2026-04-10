@@ -180,25 +180,11 @@ export default function Dashboard({ user }: DashboardProps) {
               color="bg-emerald-100 text-emerald-600"
             />
             <ActionCard 
-              title="Condomínios" 
-              description="Cadastre e gerencie os condomínios do sistema." 
-              icon={Building} 
-              onClick={() => navigate('/condominiums')}
-              color="bg-zinc-100 text-zinc-600"
-            />
-            <ActionCard 
-              title="Perfis" 
-              description="Gerencie todos os perfis de acesso do sistema." 
-              icon={Settings} 
-              onClick={() => navigate('/profiles')}
-              color="bg-zinc-100 text-zinc-600"
-            />
-            <ActionCard 
-              title="Relatórios" 
-              description="Visualize estatísticas e relatórios do condomínio." 
-              icon={TrendingUp} 
-              onClick={() => toast.success('Módulo de relatórios em breve!')}
-              color="bg-blue-100 text-blue-600"
+              title="Usuários" 
+              description="Controle de acesso para administradores, síndicos e porteiros." 
+              icon={Shield} 
+              onClick={() => navigate('/users')}
+              color="bg-red-100 text-red-600"
             />
             <ActionCard 
               title="Configurações" 
@@ -207,24 +193,6 @@ export default function Dashboard({ user }: DashboardProps) {
               onClick={() => navigate('/settings')}
               color="bg-zinc-100 text-zinc-600"
             />
-            {user.role === 'admin' && (
-              <>
-                <ActionCard 
-                  title="Gerenciar Usuários" 
-                  description="Administre síndicos, porteiros e acessos ao sistema." 
-                  icon={Shield} 
-                  onClick={() => navigate('/users')}
-                  color="bg-red-100 text-red-600"
-                />
-                <ActionCard 
-                  title="Auditoria" 
-                  description="Visualize o histórico completo de ações no sistema." 
-                  icon={History} 
-                  onClick={() => navigate('/audit')}
-                  color="bg-zinc-100 text-zinc-600"
-                />
-              </>
-            )}
           </>
         )}
 

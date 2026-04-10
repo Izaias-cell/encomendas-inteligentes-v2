@@ -49,21 +49,50 @@ export const standardizeUnitText = (text: string) => {
 
 export const normalizeUnit = (unit: string) => {
   if (!unit) return '';
-  return unit.toLowerCase()
+  
+  // Keywords to ignore in unit numbers (streets, etc.)
+  const ignoreKeywords = ['RUA', 'AVENIDA', 'AV', 'TRAVESSA', 'QUADRA', 'QD', 'CONDOMINIO', 'RESIDENCIAL'];
+  
+  let normalized = unit.toUpperCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // Remove accents
+    .replace(/[^A-Z0-9\s]/g, ' ');
+
+  ignoreKeywords.forEach(kw => {
+    const regex = new RegExp(`\\b${kw}\\b`, 'g');
+    normalized = normalized.replace(regex, '');
+  });
+
+  return normalized.toLowerCase()
     .replace(/\s+/g, '')
     .replace(/apartamento|apto|ap/g, 'ap')
     .replace(/casa|cs/g, 'casa')
     .replace(/lote/g, 'lote')
     .replace(/bloco|bl/g, 'bloco')
-    .replace(/torre|tr/g, 'torre')
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    .replace(/torre|tr/g, 'torre');
 };
 
 export const normalizeName = (name: string) => {
   if (!name) return '';
-  return name.toUpperCase()
+  
+  // Keywords to ignore in names (streets, cities, etc.)
+  const ignoreKeywords = [
+    'RUA', 'AVENIDA', 'AV', 'TRAVESSA', 'BLOCO', 'CASA', 'APTO', 'APARTAMENTO', 
+    'LOTE', 'TORRE', 'QUADRA', 'QD', 'CONDOMINIO', 'RESIDENCIAL', 'EDIFICIO', 'ED',
+    'SAO PAULO', 'SP', 'RIO DE JANEIRO', 'RJ', 'CEP', 'BRASIL'
+  ];
+
+  let normalized = name.toUpperCase()
     .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // Remove accents
-    .replace(/[^A-Z\s]/g, ' ') // Remove non-letters
+    .replace(/[^A-Z0-9\s]/g, ' '); // Keep numbers for now to identify address parts
+
+  // Remove street names and other irrelevant info
+  ignoreKeywords.forEach(kw => {
+    const regex = new RegExp(`\\b${kw}\\b`, 'g');
+    normalized = normalized.replace(regex, '');
+  });
+
+  return normalized
+    .replace(/\d+/g, '') // Now remove numbers
     .replace(/\s+/g, ' ') // Single spaces
     .trim();
 };
@@ -136,18 +165,27 @@ export const findMatchingResidents = async (
     let score = 0;
     const resName = normalizeName(r.nome || '');
     const resUnit = normalizeUnit(r.unidade || '');
+    const resType = normalizeUnit(r.unit_type || '');
     
     // A. Unit Matching (High Priority)
     if ((unit || details) && !isLikelyTrackingCode) {
-      // Exact structured match
+      // 1. Exact number match (Highest Priority)
       if (r.unidade && effectiveOcrNum && r.unidade.toString() === effectiveOcrNum.toString()) {
-        score += 50;
-        // if (!r.unit_type || !ocrType || normalizeUnit(r.unit_type) === ocrType) score += 10;
+        score += 80; // Increased from 50
+        
+        // 2. Unit type match (Bonus)
+        if (resType && ocrType && resType === ocrType) {
+          score += 40;
+        } else if (resType && ocrType && (resType.includes(ocrType) || ocrType.includes(resType))) {
+          score += 20;
+        }
+        
+        // 3. Block/Tower match (Bonus)
         if (!r.bloco || !ocrBlock || normalizeUnit(r.bloco) === ocrBlock) score += 10;
         if (!r.lote || !ocrTower || normalizeUnit(r.lote) === ocrTower) score += 10;
       }
 
-      // Legacy unit match
+      // Legacy unit match (full string comparison)
       if (resUnit === normalizedOcrUnit && resUnit.length > 0) {
         score += 70;
       } else if (resUnit.length > 0 && normalizedOcrUnit.length > 0) {
@@ -159,6 +197,12 @@ export const findMatchingResidents = async (
 
     // B. Name Matching
     if (normalizedOcrName) {
+      // Check if the resident's unit number is present in the raw OCR name (before normalization)
+      const rawOcrName = (name || '').toUpperCase();
+      if (r.unidade && rawOcrName.includes(r.unidade.toString())) {
+        score += 40;
+      }
+
       // Exact match
       if (resName === normalizedOcrName) {
         score += 100;

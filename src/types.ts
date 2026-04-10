@@ -88,15 +88,18 @@ export interface Package {
   delivered_by?: string;
   delivered_to_name?: string;
   notes?: string;
-  whatsapp_status?: 'pending' | 'sent' | 'failed' | 'error' | 'delivered' | 'read' | 'not_configured' | 'pending_configuration' | 'no_recipient';
+  whatsapp_status?: 'pending' | 'pendente' | 'sent' | 'enviado' | 'failed' | 'error' | 'delivered' | 'read' | 'not_configured' | 'pending_configuration' | 'no_recipient';
   last_notification_at?: string;
+  whatsapp_sent_at?: string;
+  notification_mode?: 'api' | 'manual';
+  notification_fallback?: boolean;
   pickup_token?: string;
   pickup_qr_code?: 'active' | 'used' | 'expired';
   qr_code_generated_at?: string;
   pickup_code?: string;
   retrieved_at?: string;
   retrieved_by_user_id?: string;
-  delivery_method?: 'qr_code' | 'manual' | 'photo' | 'code';
+  delivery_method?: 'qr_code' | 'manual' | 'photo' | 'code' | 'CÓDIGO';
   delivery_photo_url?: string;
   whatsapp_message?: string;
   created_at: string;
@@ -119,7 +122,7 @@ export interface RetrievalLog {
   package_id: string;
   porter_id: string;
   condominium_id: string;
-  delivery_method: 'qr_code' | 'manual';
+  delivery_method: 'qr_code' | 'manual' | 'CÓDIGO';
   token_used?: string;
   status: 'success' | 'failed';
   error_message?: string;
@@ -162,6 +165,13 @@ export interface CondominiumSettings {
   reminder_48h_enabled: boolean;
   reminder_72h_enabled: boolean;
   contact_phone?: string;
+  whatsapp_mode?: 'manual_assistido' | 'api_automatica';
+  whatsapp_provider?: string;
+  api_url?: string;
+  api_token?: string;
+  instance_id?: string;
+  sender_phone?: string;
+  light_mode_enabled: boolean;
 }
 
 export interface ResidentAccessToken {

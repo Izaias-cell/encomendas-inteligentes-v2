@@ -18,15 +18,16 @@ export async function analyzePackageLabel(base64Image: string, residentList?: st
   2. Padrões comuns: "BR...", "CR...", "FA...", ou sequências de 13 caracteres terminando em letras.
   3. IGNORE: Datas, pesos, números de unidade curtos (ex: 101, 22), ou palavras como "STOP".
 
-  IDENTIFICAÇÃO DE UNIDADE:
-  - unitDetails.type: Deve ser "Apartamento", "Casa", "Lote", "Sala" ou "Bloco".
-  - Se a etiqueta diz "Casa 111", type="Casa", number="111".
-  - Se a etiqueta diz "Lote 4", type="Lote", number="4".
-  - Se a etiqueta diz "Apto 22", type="Apartamento", number="22".
-  - Se não houver indicação clara do tipo, deixe o campo 'type' vazio ou nulo. Não assuma "Apartamento" como padrão.
+  IDENTIFICAÇÃO DE UNIDADE (EXTREMAMENTE IMPORTANTE):
+  - unitDetails.number: Procure o número da unidade ou casa. Se houver um endereço como "RUA MADRI 426", o número é "426".
+  - unitDetails.type: Identifique se é "Apartamento", "Casa", "Lote", "Sala" ou "Bloco". 
+  - Se a etiqueta diz "CASA AZUL" ou apenas "CASA", o type="Casa".
+  - Se houver "AP", "APTO", "Apto", o type="Apartamento".
+  - IGNORE nomes de ruas, cidades, CEPs e observações de entrega no campo 'number'. O campo 'number' deve conter APENAS o identificador da unidade (ex: "426", "101", "A-12").
 
   IDENTIFICAÇÃO DE DESTINATÁRIO:
-  - recipientName: Nome da pessoa física (destinatário).
+  - recipientName: Nome da pessoa física (destinatário). 
+  - REMOVA do nome qualquer informação de endereço (rua, número, cidade) que possa ter sido lida junto. O nome deve ser apenas o nome da pessoa.
 
   ${residentContext}
 

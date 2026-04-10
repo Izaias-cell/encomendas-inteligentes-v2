@@ -53,12 +53,39 @@ export default function PackageList({ user }: PackageListProps) {
     }
   };
 
-  const filteredPackages = packages.filter((p: any) => 
-    p.recipient_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    p.unit_label?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    p.carrier?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    p.tracking_code?.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  const getFilteredPackages = () => {
+    const filtered = packages.filter((p: any) => 
+      p.recipient_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      p.unit_label?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      p.carrier?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      p.tracking_code?.toLowerCase().includes(searchTerm.toLowerCase())
+    );
+
+    // Agrupamento para encomendas pendentes
+    const pending = filtered.filter(p => p.status !== 'delivered');
+    const delivered = filtered.filter(p => p.status === 'delivered');
+
+    const groups: { [key: string]: any[] } = {};
+    pending.forEach(pkg => {
+      const key = pkg.pickup_token || pkg.pickup_code || pkg.id;
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(pkg);
+    });
+
+    const groupedPending = Object.values(groups).map(group => {
+      if (group.length === 1) return group[0];
+      return {
+        ...group[0],
+        isGroup: true,
+        packages: group,
+        count: group.length
+      };
+    });
+
+    return [...groupedPending, ...delivered];
+  };
+
+  const filteredPackages = getFilteredPackages();
 
   const getStatusBadge = (status: string) => {
     const variants: any = {
@@ -81,7 +108,9 @@ export default function PackageList({ user }: PackageListProps) {
   const getWhatsAppBadge = (status: string) => {
     const variants: any = {
       pending: 'text-amber-500',
+      pendente: 'text-amber-500',
       sent: 'text-blue-500',
+      enviado: 'text-blue-600',
       delivered: 'text-emerald-500',
       read: 'text-emerald-600',
       failed: 'text-red-500',
@@ -90,7 +119,9 @@ export default function PackageList({ user }: PackageListProps) {
     };
     const labels: any = {
       pending: 'Pendente',
+      pendente: 'Pendente',
       sent: 'Enviado',
+      enviado: 'Enviado',
       delivered: 'Entregue',
       read: 'Lido',
       failed: 'Falhou',
@@ -108,6 +139,19 @@ export default function PackageList({ user }: PackageListProps) {
         </span>
       </div>
     );
+  };
+
+  const getDeliveryMethodLabel = (method?: string) => {
+    switch (method) {
+      case 'manual': return 'MANUAL';
+      case 'qr_code': return 'QR CODE';
+      case 'code':
+      case 'CÓDIGO':
+      case 'pickup_code': return 'CÓDIGO';
+      case 'photo':
+      case 'foto': return 'RETIRADA COM FOTO';
+      default: return '-';
+    }
   };
 
   return (
@@ -152,8 +196,13 @@ export default function PackageList({ user }: PackageListProps) {
               className={`bg-white rounded-3xl border border-zinc-100 shadow-sm p-6 hover:shadow-md transition-all group ${pkg.status !== 'delivered' ? 'cursor-pointer border-emerald-100' : ''}`}
             >
               <div className="flex justify-between items-start mb-4">
-                <div className="w-12 h-12 bg-zinc-50 text-emerald-600 rounded-2xl flex items-center justify-center group-hover:bg-emerald-100 transition-colors">
+                <div className="w-12 h-12 bg-zinc-50 text-emerald-600 rounded-2xl flex items-center justify-center group-hover:bg-emerald-100 transition-colors relative">
                   <PackageIcon className="w-6 h-6" />
+                  {pkg.isGroup && (
+                    <span className="absolute -top-2 -right-2 bg-emerald-600 text-white text-[10px] font-bold w-5 h-5 rounded-full flex items-center justify-center border-2 border-white shadow-sm">
+                      {pkg.count}
+                    </span>
+                  )}
                 </div>
                 <div className="flex items-center gap-2">
                   {pkg.status !== 'delivered' && pkg.pickup_token && (
@@ -175,19 +224,31 @@ export default function PackageList({ user }: PackageListProps) {
                   <Home className="w-4 h-4 flex-shrink-0" />
                   <p className="font-medium">{formatPackageUnit(pkg)}</p>
                 </div>
-                <div className="flex items-center gap-3 text-zinc-500 text-sm">
-                  <Truck className="w-4 h-4 flex-shrink-0" />
-                  <p>{pkg.carrier}</p>
-                </div>
+                {!pkg.isGroup && (
+                  <div className="flex items-center gap-3 text-zinc-500 text-sm">
+                    <Truck className="w-4 h-4 flex-shrink-0" />
+                    <p>{pkg.carrier}</p>
+                  </div>
+                )}
+                {pkg.isGroup && (
+                  <div className="bg-zinc-50 rounded-xl p-3 space-y-2">
+                    <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Transportadoras:</p>
+                    <div className="flex flex-wrap gap-2">
+                      {Array.from(new Set(pkg.packages.map((p: any) => p.carrier))).map((c: any, i) => (
+                        <span key={i} className="text-[11px] bg-white border border-zinc-200 px-2 py-0.5 rounded-md text-zinc-600 font-medium">{c}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 <div className="mt-4 pt-4 border-t border-zinc-50 space-y-3">
                   <div className="flex flex-col">
                     <span className="text-[10px] font-bold text-zinc-400 tracking-widest uppercase">
-                      Código de retirada
+                      Código de retirada {pkg.isGroup ? 'Único' : ''}
                     </span>
                     <p className={`font-mono text-sm font-bold ${pkg.status === 'delivered' ? 'text-zinc-500' : 'text-emerald-600'}`}>{pkg.pickup_code || '-'}</p>
                   </div>
 
-                  {pkg.tracking_code && (
+                  {!pkg.isGroup && pkg.tracking_code && (
                     <div className="flex flex-col">
                       <span className="text-[10px] font-bold text-zinc-400 tracking-widest uppercase">
                         Etiqueta
@@ -199,7 +260,7 @@ export default function PackageList({ user }: PackageListProps) {
                 <div className="space-y-1 pt-2 border-t border-zinc-50/50">
                   <div className="flex items-center gap-2 text-zinc-500 text-[11px]">
                     <Clock className="w-3.5 h-3.5 flex-shrink-0" />
-                    <p>Recebido em: <span className="font-medium text-zinc-700">{formatSafeDateTime(pkg.received_at)}</span></p>
+                    <p>{pkg.isGroup ? 'Última recebida em:' : 'Recebido em:'} <span className="font-medium text-zinc-700">{formatSafeDateTime(pkg.received_at)}</span></p>
                   </div>
                   {pkg.delivered_at && (
                     <div className="flex items-center gap-2 text-emerald-600 text-[11px]">
@@ -210,7 +271,7 @@ export default function PackageList({ user }: PackageListProps) {
                   {pkg.status === 'delivered' && (
                     <div className="flex items-center gap-2 text-zinc-500 text-[11px]">
                       <ArrowRight className="w-3.5 h-3.5 flex-shrink-0" />
-                      <p>Forma: <span className="font-bold uppercase">{!pkg.delivery_method ? '-' : (pkg.delivery_method === 'photo' || pkg.delivery_method === 'foto' ? 'RETIRADA COM FOTO' : (pkg.delivery_method === 'qr_code' ? 'QR CODE' : (pkg.delivery_method === 'code' ? 'CÓDIGO' : 'MANUAL')))}</span></p>
+                      <p>Forma: <span className="font-bold uppercase">{getDeliveryMethodLabel(pkg.delivery_method)}</span></p>
                     </div>
                   )}
                 </div>

@@ -8,11 +8,12 @@ export interface WhatsAppVariables {
   rua_logradouro?: string;
   bloco_torre?: string;
   codigo_retirada: string;
-  pickup_token: string;
   data_recebimento: string;
   hora_recebimento: string;
   nome_condominio: string;
   observacao?: string;
+  pickup_token?: string;
+  quantidade_encomendas?: number;
 }
 
 /**
@@ -44,8 +45,12 @@ export const formatUnit = (resident: Morador): string => {
  * Assembles the WhatsApp message from variables following the "Encomendas Inteligentes" standard
  */
 export const assembleWhatsAppMessage = (vars: WhatsAppVariables): string => {
-  const baseUrl = 'https://encomendas-inteligentes-v2.vercel.app';
-const linkRetirada = `${baseUrl}/retirada?token=${vars.pickup_token}`;
+  const BASE_URL = (typeof process !== 'undefined' && process.env?.APP_URL) || 
+                   (typeof import.meta !== 'undefined' && import.meta.env?.VITE_APP_URL) || 
+                   "https://encomendas-inteligentes-v2.vercel.app";
+  const linkRetirada = vars.pickup_token 
+    ? `${BASE_URL}/retirada?token=${vars.pickup_token}`
+    : `${BASE_URL}/retirada?code=${vars.codigo_retirada}`;
   
   // Limpeza rigorosa da observação (Tipo da encomenda)
   const cleanObs = vars.observacao ? vars.observacao
@@ -56,23 +61,13 @@ const linkRetirada = `${baseUrl}/retirada?token=${vars.pickup_token}`;
     .trim() : 'Encomenda';
 
   const lines = [
-    `${vars.saudacao}, ${var8s.nome_morador}!`,
+    `${vars.saudacao}, ${vars.nome_morador}! 📦`,
     '',
-    `Sua encomenda chegou na portaria.`,
+    `Chegou uma encomenda para sua unidade ${vars.unidade}${vars.bloco_torre ? ` ${vars.bloco_torre}` : ''}${vars.quantidade_encomendas && vars.quantidade_encomendas > 1 ? ` (${vars.quantidade_encomendas} encomendas)` : ''}.`,
     '',
-    `Unidade: ${vars.unidade}${vars.bloco_torre ? ` ${vars.bloco_torre}` : ''}`,
+    `Clique no link abaixo para visualizar seu código de retirada e apresentar na portaria:`,
     '',
-    `📦 Tipo: ${cleanObs || 'Encomenda'}`,
-    '',
-    `🔐 Código de retirada:`,
-    `\`${vars.codigo_retirada}\``,
-    '',
-    `Ou utilize o QR Code abaixo:`,
-    `${linkRetirada}`,
-    '',
-    `Recebido em ${vars.data_recebimento} às ${vars.hora_recebimento}.`,
-    '',
-    `Portaria - ${vars.nome_condominio}`
+    `${linkRetirada}`
   ];
 
   return lines.join('\n');
@@ -83,10 +78,11 @@ const linkRetirada = `${baseUrl}/retirada?token=${vars.pickup_token}`;
  */
 export const prepareWhatsAppNotification = (
   resident: Morador,
-condoName: string,
-pickupCode: string,
-pickupToken: string,
-observation?: string
+  condoName: string,
+  pickupCode: string,
+  observation?: string,
+  pickupToken?: string,
+  packageCount?: number
 ): string | null => {
   // Do not notify inactive residents
   if (!resident.ativo) return null;
@@ -102,20 +98,43 @@ observation?: string
     unidade: formatUnit(resident),
     bloco_torre: blocoTorre,
     codigo_retirada: pickupCode,
-    pickup_token: pickupToken,
     data_recebimento: now.toLocaleDateString('pt-BR'),
     hora_recebimento: now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
     nome_condominio: condoName,
-    observacao: observation
+    observacao: observation,
+    pickup_token: pickupToken,
+    quantidade_encomendas: packageCount
   };
 
   return assembleWhatsAppMessage(vars);
 };
 
 /**
- * Sends a WhatsApp message via Z-API (Hardcoded credentials as requested)
+ * Generates a WhatsApp wa.me link for manual sending
  */
-export async function sendWhatsAppMessage(phone: string, message: string, condominiumId: string) {
+export const getWhatsAppLink = (phone: string, message: string): string => {
+  let normalizedPhone = phone.replace(/\D/g, '');
+  if (normalizedPhone.length > 0 && !normalizedPhone.startsWith('55')) {
+    normalizedPhone = '55' + normalizedPhone;
+  }
+  const encodedMessage = encodeURIComponent(message);
+  return `https://wa.me/${normalizedPhone}?text=${encodedMessage}`;
+};
+
+/**
+ * Sends a WhatsApp message via dynamic API configuration
+ */
+export async function sendWhatsAppMessage(
+  phone: string, 
+  message: string, 
+  condominiumId: string,
+  config?: {
+    api_url?: string;
+    api_token?: string;
+    instance_id?: string;
+    whatsapp_provider?: string;
+  }
+) {
   if (!message || message.trim() === "") {
     console.warn('[WhatsApp Service] Mensagem vazia');
     return { error: 'Mensagem vazia', httpStatus: 400 };
@@ -134,18 +153,21 @@ export async function sendWhatsAppMessage(phone: string, message: string, condom
     return { error: 'Telefone inválido', httpStatus: 400 };
   }
 
-  console.log("Enviando WhatsApp:", {
+  // Use provided config or fallback to hardcoded (for backward compatibility/default)
+  const apiUrl = config?.api_url || "https://api.z-api.io/instances/3F0CA22AFB9F62F46D76D268A7BECB03/token/851123DB426AFD0E08384D87/send-text";
+  const apiToken = config?.api_token || "F3cec1a5aa2b14f0cbc667b86c75de2ebS";
+
+  console.log("Enviando WhatsApp via API:", {
     phone: normalizedPhone,
-    message: message
+    apiUrl: apiUrl.split('/token/')[0] + '/...' // Hide token in logs
   });
 
   try {
-    // Requisição com Account Security Token (Client-Token)
-    const response = await fetch("https://api.z-api.io/instances/3F0CA22AFB9F62F46D76D268A7BECB03/token/851123DB426AFD0E08384D87/send-text", {
+    const response = await fetch(apiUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Client-Token": "F3cec1a5aa2b14f0cbc667b86c75de2ebS"
+        "Client-Token": apiToken
       },
       body: JSON.stringify({
         phone: normalizedPhone,
@@ -156,19 +178,13 @@ export async function sendWhatsAppMessage(phone: string, message: string, condom
     const data = await response.json();
     const status_envio = response.ok ? 'sucesso' : 'erro';
     
-    console.log("Resposta completa Z-API:", {
-      status: response.status,
-      ok: response.ok,
-      data: data
-    });
-    
     // Log no banco de dados
     try {
       await supabase.from('message_logs').insert([{
         condominium_id: condominiumId,
         telefone: normalizedPhone,
         status_envio: status_envio,
-        status: response.ok ? 'sent' : 'failed', // Mantendo compatibilidade se necessário
+        status: response.ok ? 'sent' : 'failed',
         erro_api: !response.ok ? JSON.stringify(data) : null,
         data_envio: new Date().toISOString()
       }]);
@@ -176,30 +192,42 @@ export async function sendWhatsAppMessage(phone: string, message: string, condom
       console.error("Erro ao registrar log de mensagem:", logErr);
     }
     
-    if (!response.ok) {
-      console.error("Erro detalhado Z-API:", data);
-    } else {
-      console.log('[WhatsApp Service] Sucesso no envio:', data);
-    }
-
     return { ...data, httpStatus: response.status, status_envio };
   } catch (error) {
-    console.error("Erro Z-API:", error);
-    
-    // Log de erro de conexão/exceção
-    try {
-      await supabase.from('message_logs').insert([{
-        condominium_id: condominiumId,
-        telefone: normalizedPhone,
-        status_envio: 'erro',
-        status: 'failed',
-        erro_api: error instanceof Error ? error.message : String(error),
-        data_envio: new Date().toISOString()
-      }]);
-    } catch (logErr) {
-      console.error("Erro ao registrar log de erro de mensagem:", logErr);
-    }
-
+    console.error("Erro na API de WhatsApp:", error);
     return { error: error instanceof Error ? error.message : String(error), httpStatus: 500, status_envio: 'erro' };
+  }
+}
+
+/**
+ * Tests the Z-API connection by attempting a simple profile fetch or similar lightweight call
+ */
+export async function testZApiConnection(apiUrl: string, apiToken: string) {
+  if (!apiUrl || !apiToken) {
+    return { success: false, error: 'URL ou Token não informados' };
+  }
+
+  try {
+    // Z-API usually has a /status or /instance-status endpoint. 
+    // We'll try to reach the base instance URL to check connectivity.
+    // The apiUrl usually ends in /send-text, we need the base instance URL.
+    const baseUrl = apiUrl.split('/token/')[0];
+    
+    const response = await fetch(baseUrl, {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+        "Client-Token": apiToken
+      }
+    });
+
+    if (response.ok) {
+      return { success: true };
+    } else {
+      const data = await response.json().catch(() => ({}));
+      return { success: false, error: data.message || `Erro HTTP ${response.status}` };
+    }
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
 }

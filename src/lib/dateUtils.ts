@@ -6,7 +6,7 @@ export const formatSafeDateTime = (value: any) => {
   try {
     const d = new Date(value);
     if (isNaN(d.getTime())) return "-";
-    return format(d, 'dd/MM/yyyy HH:mm:ss', { locale: ptBR });
+    return format(d, 'dd/MM/yyyy HH:mm', { locale: ptBR });
   } catch (e) {
     return "-";
   }
