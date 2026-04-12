@@ -4,6 +4,57 @@ import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
 const apiKey = process.env.GEMINI_API_KEY || "";
 const ai = new GoogleGenAI({ apiKey });
 
+export async function extractBasicText(base64Image: string) {
+  const model = "gemini-3-flash-preview";
+  
+  const prompt = `Extraia os dados essenciais desta etiqueta de encomenda:
+  - recipientName: Nome do destinatário.
+  - unitNumber: Número da casa ou apartamento.
+  - carrier: Nome da transportadora (ex: Correios, Jadlog, Shopee, Mercado Livre, Amazon, Loggi, Total Express, DHL, FedEx, Sequoia).
+  - trackingNumber: Código de rastreio (priorize padrões como BR...BR, CR..., FA..., NF..., PR... ou sequências alfanuméricas de 8+ caracteres).
+  
+  Seja extremamente rápido e foque apenas no que for mais legível. Retorne apenas o JSON.`;
+
+  try {
+    const response = await ai.models.generateContent({
+      model,
+      contents: [
+        {
+          parts: [
+            { text: prompt },
+            {
+              inlineData: {
+                mimeType: "image/jpeg",
+                data: base64Image.split(',')[1] || base64Image
+              }
+            }
+          ]
+        }
+      ],
+      config: {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            recipientName: { type: Type.STRING },
+            unitNumber: { type: Type.STRING },
+            carrier: { type: Type.STRING },
+            trackingNumber: { type: Type.STRING }
+          }
+        }
+      },
+    });
+
+    const text = response.text;
+    if (!text) return null;
+    return JSON.parse(text);
+  } catch (e) {
+    console.error("Erro no OCR básico:", e);
+    return null;
+  }
+}
+
 export async function analyzePackageLabel(base64Image: string, residentList?: string[]) {
   const model = "gemini-3-flash-preview";
   
@@ -11,27 +62,13 @@ export async function analyzePackageLabel(base64Image: string, residentList?: st
     ? `\nCONTEXTO: Os seguintes moradores estão cadastrados neste condomínio. Use esta lista para priorizar o match de Nome e Unidade:\n${residentList.join('\n')}`
     : '';
 
-  const prompt = `Extraia dados desta etiqueta de encomenda para o sistema "Portaria Inteligente".
-  
-  PRIORIDADE PARA CÓDIGO DE RASTREIO (trackingNumber):
-  1. Procure códigos alfanuméricos longos (10-15+ caracteres).
-  2. Padrões comuns: "BR...", "CR...", "FA...", ou sequências de 13 caracteres terminando em letras.
-  3. IGNORE: Datas, pesos, números de unidade curtos (ex: 101, 22), ou palavras como "STOP".
-
-  IDENTIFICAÇÃO DE UNIDADE (EXTREMAMENTE IMPORTANTE):
-  - unitDetails.number: Procure o número da unidade ou casa. Se houver um endereço como "RUA MADRI 426", o número é "426".
-  - unitDetails.type: Identifique se é "Apartamento", "Casa", "Lote", "Sala" ou "Bloco". 
-  - Se a etiqueta diz "CASA AZUL" ou apenas "CASA", o type="Casa".
-  - Se houver "AP", "APTO", "Apto", o type="Apartamento".
-  - IGNORE nomes de ruas, cidades, CEPs e observações de entrega no campo 'number'. O campo 'number' deve conter APENAS o identificador da unidade (ex: "426", "101", "A-12").
-
-  IDENTIFICAÇÃO DE DESTINATÁRIO:
-  - recipientName: Nome da pessoa física (destinatário). 
-  - REMOVA do nome qualquer informação de endereço (rua, número, cidade) que possa ter sido lida junto. O nome deve ser apenas o nome da pessoa.
-
+  const prompt = `Extraia os dados desta etiqueta de encomenda para o sistema "Portaria Inteligente":
+  - recipientName: Nome do morador (destinatário).
+  - unitDetails: Número da unidade/casa e tipo (Apartamento, Casa, etc).
+  - carrier: Transportadora (priorize: Correios, Jadlog, Shopee, Mercado Livre, Amazon, Loggi, Total Express, DHL, FedEx, Sequoia).
+  - trackingNumber: Código de rastreio (priorize padrões: BR...BR, CR..., FA..., NF..., PR... ou alfanuméricos de 8+ caracteres).
   ${residentContext}
-
-  Retorne JSON com 'value' e 'confidence' (0.0-1.0).`;
+  Retorne apenas o JSON conforme o esquema definido.`;
 
   try {
     const response = await ai.models.generateContent({

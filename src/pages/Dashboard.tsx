@@ -22,6 +22,8 @@ import {
   History
 } from 'lucide-react';
 
+import { normalizeRole } from '../lib/authUtils';
+
 interface DashboardProps {
   user: Profile;
 }
@@ -143,61 +145,67 @@ export default function Dashboard({ user }: DashboardProps) {
       <h2 className="text-2xl font-bold text-zinc-900 mb-6">Ações Rápidas</h2>
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         {/* Porter & Manager Actions */}
-        {(user.role === 'porteiro' || user.role === 'sindico' || user.role === 'admin') && (
-          <>
-            <ActionCard 
-              title="Registrar Encomenda" 
-              description="Registre a chegada de uma nova encomenda na portaria." 
-              icon={Plus} 
-              onClick={() => navigate('/packages/new')}
-              color="bg-emerald-100 text-emerald-600"
-            />
-            <ActionCard 
-              title="Ver Encomendas" 
-              description="Visualize e gerencie todas as encomendas do condomínio." 
-              icon={PackageIcon} 
-              onClick={() => navigate('/packages')}
-              color="bg-blue-100 text-blue-600"
-            />
-            <ActionCard 
-              title="Moradores" 
-              description="Lista completa de moradores e unidades." 
-              icon={Users} 
-              onClick={() => navigate('/profiles')}
-              color="bg-zinc-100 text-zinc-600"
-            />
-          </>
-        )}
+        {(() => {
+          const role = normalizeRole(user.role);
+          return (role === 'porteiro' || role === 'sindico' || role === 'admin') && (
+            <>
+              <ActionCard 
+                title="Registrar Encomenda" 
+                description="Registre a chegada de uma nova encomenda na portaria." 
+                icon={Plus} 
+                onClick={() => navigate('/packages/new')}
+                color="bg-emerald-100 text-emerald-600"
+              />
+              <ActionCard 
+                title="Ver Encomendas" 
+                description="Visualize e gerencie todas as encomendas do condomínio." 
+                icon={PackageIcon} 
+                onClick={() => navigate('/packages')}
+                color="bg-blue-100 text-blue-600"
+              />
+              <ActionCard 
+                title="Moradores" 
+                description="Lista completa de moradores e unidades." 
+                icon={Users} 
+                onClick={() => navigate('/profiles')}
+                color="bg-zinc-100 text-zinc-600"
+              />
+            </>
+          );
+        })()}
 
         {/* Manager & Admin Only Actions */}
-        {(user.role === 'sindico' || user.role === 'admin') && (
-          <>
-            <ActionCard 
-              title="Cadastrar Morador" 
-              description="Adicione um novo morador ao sistema." 
-              icon={UserPlus} 
-              onClick={() => navigate('/profiles/new')}
-              color="bg-emerald-100 text-emerald-600"
-            />
-            <ActionCard 
-              title="Usuários" 
-              description="Controle de acesso para administradores, síndicos e porteiros." 
-              icon={Shield} 
-              onClick={() => navigate('/users')}
-              color="bg-red-100 text-red-600"
-            />
-            <ActionCard 
-              title="Configurações" 
-              description="Ajuste as configurações gerais do condomínio." 
-              icon={Settings} 
-              onClick={() => navigate('/settings')}
-              color="bg-zinc-100 text-zinc-600"
-            />
-          </>
-        )}
+        {(() => {
+          const role = normalizeRole(user.role);
+          return (role === 'sindico' || role === 'admin') && (
+            <>
+              <ActionCard 
+                title="Cadastrar Morador" 
+                description="Adicione um novo morador ao sistema." 
+                icon={UserPlus} 
+                onClick={() => navigate('/profiles/new')}
+                color="bg-emerald-100 text-emerald-600"
+              />
+              <ActionCard 
+                title="Usuários" 
+                description="Controle de acesso para administradores, síndicos e porteiros." 
+                icon={Shield} 
+                onClick={() => navigate('/users')}
+                color="bg-red-100 text-red-600"
+              />
+              <ActionCard 
+                title="Configurações" 
+                description="Ajuste as configurações gerais do condomínio." 
+                icon={Settings} 
+                onClick={() => navigate('/settings')}
+                color="bg-zinc-100 text-zinc-600"
+              />
+            </>
+          );
+        })()}
 
         {/* Resident Actions */}
-        {user.role === 'resident' && (
+        {normalizeRole(user.role) === 'resident' && (
           <ActionCard 
             title="Minhas Encomendas" 
             description="Veja o histórico e status das suas encomendas." 

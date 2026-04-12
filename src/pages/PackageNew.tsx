@@ -26,7 +26,7 @@ import { supabase } from '../lib/supabase';
 import { Profile, Morador, CondominiumSettings } from '../types';
 import toast from 'react-hot-toast';
 import { logAction } from '../services/auditService';
-import { analyzePackageLabel } from '../services/geminiService';
+import { analyzePackageLabel, extractBasicText } from '../services/geminiService';
 import { findMatchingResidents, ScoredResident } from '../services/residentMatcher';
 import { formatResidentAddress } from '../lib/residentUtils';
 import { motion, AnimatePresence } from 'motion/react';
@@ -76,6 +76,8 @@ export default function PackageNew({ user }: PackageNewProps) {
   const [lastSavedPackage, setLastSavedPackage] = useState<any>(null);
   const [currentMessage, setCurrentMessage] = useState('');
   const [condoSettings, setCondoSettings] = useState<CondominiumSettings | null>(null);
+  const [isAmbiguous, setIsAmbiguous] = useState(false);
+  const [statusMessage, setStatusMessage] = useState('Lendo dados...');
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -209,102 +211,147 @@ export default function PackageNew({ user }: PackageNewProps) {
   const processImage = async (base64: string) => {
     setStep('analyzing');
     setLoading(true);
+    setStatusMessage('Lendo nome...');
     
     try {
       let finalBase64 = base64;
 
-      // Se o modo leve estiver ativado, comprimimos a imagem antes do upload e análise
-      if (condoSettings?.light_mode_enabled) {
-        try {
-          const { compressImage } = await import('../lib/imageUtils');
-          finalBase64 = await compressImage(base64, 800, 0.6);
-        } catch (err) {
-          console.warn('Falha ao comprimir imagem:', err);
-        }
+      // Otimização: Redimensionar e comprimir antes de enviar para IA
+      try {
+        const { compressImage } = await import('../lib/imageUtils');
+        finalBase64 = await compressImage(base64, 900, 0.65);
+      } catch (err) {
+        console.warn('Falha ao comprimir imagem:', err);
       }
 
-      // 1. Convert base64 to blob for upload
-      const res = await fetch(finalBase64);
-      const blob = await res.blob();
-      const file = new File([blob], "package.jpg", { type: "image/jpeg" });
+      // 1. Inicia o upload em segundo plano (não bloqueia)
+      const uploadPromise = (async () => {
+        try {
+          const res = await fetch(finalBase64);
+          const blob = await res.blob();
+          const file = new File([blob], "package.jpg", { type: "image/jpeg" });
+          const fileName = `${Math.random()}.jpg`;
+          const filePath = `package-photos/${fileName}`;
+          
+          const { error: uploadError } = await supabase.storage
+            .from('packages')
+            .upload(filePath, file);
 
-      // 2. Upload to Supabase (Opcional)
-      const fileName = `${Math.random()}.jpg`;
-      const filePath = `package-photos/${fileName}`;
+          if (!uploadError) {
+            const { data: { publicUrl } } = supabase.storage
+              .from('packages')
+              .getPublicUrl(filePath);
+            setPhotoUrl(publicUrl);
+          }
+        } catch (storageErr) {
+          console.warn("Storage error:", storageErr);
+        }
+      })();
 
-      // Set photoUrl to base64 as a fallback for preview and if upload fails
       setPhotoUrl(finalBase64);
 
-      try {
-        const { error: uploadError } = await supabase.storage
-          .from('packages')
-          .upload(filePath, file);
+      // 2. OCR Básico (Rápido)
+      const basicData = await extractBasicText(finalBase64);
+      
+      let foundStrongMatch = false;
+      let shouldCallSupportIA = true;
+      const hasInsufficientText = !basicData || (!basicData.recipientName && !basicData.unitNumber);
 
-        if (!uploadError) {
-          const { data: { publicUrl } } = supabase.storage
-            .from('packages')
-            .getPublicUrl(filePath);
-          setPhotoUrl(publicUrl);
-        } else {
-          console.warn("Upload error:", uploadError);
-        }
-      } catch (storageErr) {
-        console.warn("Storage error:", storageErr);
-      }
+      // Pre-fill carrier and tracking from basic OCR if available
+      if (basicData?.carrier) setCarrier(basicData.carrier);
+      if (basicData?.trackingNumber) setTrackingNumber(basicData.trackingNumber);
 
-      // 3. Analyze with Gemini
-      const residentList = allCondoResidents.map(r => `${r.nome} - ${r.unidade}`);
-      const data = await analyzePackageLabel(base64, residentList);
-      if (data) {
-        if (data.carrier?.value) {
-          setCarrier(data.carrier.value);
-        }
-        if (data.trackingNumber?.value) {
-          setTrackingNumber(data.trackingNumber.value);
-        }
-        
-        // Store raw values from OCR
-        const ocrName = data.recipientName?.value || '';
-        const ocrUnit = data.unitDetails?.number || data.unitDetails?.full_string || '';
-        const ocrType = data.unitDetails?.type || '';
-        
-        setRecipientName(ocrName);
-        setUnitNumber(ocrUnit);
-        setUnitType(ocrType);
+      if (!hasInsufficientText && user?.condominium_id) {
+        setStatusMessage('Buscando morador...');
+        const matches = await findMatchingResidents(
+          user.condominium_id,
+          basicData.unitNumber || '',
+          basicData.recipientName || '',
+          { street: basicData.street }
+        );
 
-        if (user?.condominium_id) {
-          // Rule 1 & 2: Try to find by unit number first
-          // ONLY auto-select if we have BOTH unit and name match or very high confidence
-          const matches = await findMatchingResidents(
-            user.condominium_id,
-            data.unitDetails?.full_string || '',
-            ocrName,
-            data.unitDetails
-          );
-          
-          if (matches.length > 0) {
-            // Filter: only show top 3 and only if score >= 50
-            const filteredMatches = matches
-              .filter(m => m.score >= 50)
-              .slice(0, 3);
-            
-            setMatchingResidents(filteredMatches);
-            
-            if (filteredMatches.length > 0) {
-              // Auto-select if:
-              // 1. Extremely high confidence (exact name + unit)
-              // 2. ONLY ONE match found with high confidence (>= 120)
-              const topMatch = filteredMatches[0];
-              const isExtremelyHigh = topMatch.score >= 180;
-              const isOnlyMatchWithHighConfidence = filteredMatches.length === 1 && topMatch.score >= 120;
-              
-              if (isExtremelyHigh || isOnlyMatchWithHighConfidence) {
-                handleSelectResident(topMatch.resident);
-              }
+        if (matches.length > 0) {
+          const topMatch = matches[0];
+          // Se for um match muito forte (exato), usamos ele e pulamos a IA completa
+          if (topMatch.score >= 180) {
+            setRecipientName(topMatch.resident.nome);
+            setUnitNumber(topMatch.resident.unidade);
+            setUnitType(topMatch.resident.unit_type || '');
+            if (basicData.carrier) setCarrier(basicData.carrier);
+            if (basicData.trackingNumber) setTrackingNumber(basicData.trackingNumber);
+            handleSelectResident(topMatch.resident);
+            setStatusMessage('Morador encontrado');
+            foundStrongMatch = true;
+            shouldCallSupportIA = false;
+          } else {
+            setMatchingResidents(matches.slice(0, 3));
+            const strongCandidates = matches.filter(m => m.score >= 120);
+            if (strongCandidates.length > 1) {
+              setIsAmbiguous(true);
+              setStatusMessage('Selecione o morador');
+              // Ambiguidade forte: IA de apoio pode ajudar a desempatar
+              shouldCallSupportIA = true;
+            } else if (strongCandidates.length === 1) {
+              // Apenas um candidato razoável, mas não "perfeito"
+              // Vamos tentar a IA de apoio para ter certeza
+              shouldCallSupportIA = true;
             }
           }
         }
       }
+
+      // 3. IA de Apoio (Apenas se necessário)
+      if (shouldCallSupportIA && !foundStrongMatch) {
+        setStatusMessage(hasInsufficientText ? 'Analisando etiqueta...' : 'Refinando busca...');
+        const residentList = allCondoResidents.map(r => `${r.nome} - ${r.unidade}`);
+        const data = await analyzePackageLabel(finalBase64, residentList);
+
+        if (data) {
+          if (data.carrier?.value) setCarrier(data.carrier.value);
+          if (data.trackingNumber?.value) setTrackingNumber(data.trackingNumber.value);
+          
+          const ocrName = data.recipientName?.value || '';
+          const ocrUnit = data.unitDetails?.number || data.unitDetails?.full_string || '';
+          const ocrType = data.unitDetails?.type || '';
+          
+          if (!selectedResident) {
+            setRecipientName(ocrName);
+            setUnitNumber(ocrUnit);
+            setUnitType(ocrType);
+
+            const matches = await findMatchingResidents(
+              user.condominium_id || '',
+              data.unitDetails?.full_string || '',
+              ocrName,
+              data.unitDetails
+            );
+            
+            if (matches.length > 0) {
+              const filteredMatches = matches.filter(m => m.score >= 50).slice(0, 3);
+              setMatchingResidents(filteredMatches);
+              
+              const strongCandidates = filteredMatches.filter(m => m.score >= 120);
+              if (strongCandidates.length > 1) {
+                setIsAmbiguous(true);
+                setStatusMessage('Selecione o morador');
+              } else {
+                setIsAmbiguous(false);
+                const topMatch = filteredMatches[0];
+                if (topMatch.score >= 120) {
+                  handleSelectResident(topMatch.resident);
+                  setStatusMessage('Morador encontrado');
+                } else {
+                  setStatusMessage('Selecione o morador');
+                }
+              }
+            } else {
+              setStatusMessage('Morador não identificado');
+            }
+          }
+        }
+      }
+
+      await uploadPromise;
       setStep('confirmation');
     } catch (err) {
       console.error("Erro no processamento:", err);
@@ -332,23 +379,41 @@ export default function PackageNew({ user }: PackageNewProps) {
   useEffect(() => {
     const searchResidents = async () => {
       if (searchTerm.length < 2 || selectedResident) {
-        if (searchTerm.length < 2) setResidents([]);
+        if (searchTerm.length < 2) {
+          setResidents([]);
+          setMatchingResidents([]);
+        }
         return;
       }
 
-      const { data, error } = await supabase
-        .from('moradores')
-        .select('*')
-        .eq('condominium_id', user?.condominium_id)
-        .or(`nome.ilike.%${searchTerm}%,unidade.ilike.%${searchTerm}%`)
-        .limit(5);
+      // Intelligent search: Use the matcher even for manual typing
+      const matches = await findMatchingResidents(
+        user?.condominium_id || '',
+        searchTerm, // Try as unit
+        searchTerm, // Try as name
+        { full_string: searchTerm } // Try as full string
+      );
 
-      if (error) {
-        console.error('Error searching residents:', error);
-        return;
+      if (matches.length > 0) {
+        setMatchingResidents(matches);
+        
+        // Check for ambiguity
+        const strongCandidates = matches.filter(m => m.score >= 120);
+        if (strongCandidates.length > 1) {
+          setIsAmbiguous(true);
+        } else {
+          setIsAmbiguous(false);
+          // Auto-select if extremely high confidence (exact match)
+          const topMatch = matches[0];
+          if (topMatch.score >= 180 && searchTerm.length >= 3) {
+            handleSelectResident(topMatch.resident);
+            toast.success(`Morador encontrado: ${topMatch.resident.nome}`, { icon: '🔍' });
+          }
+        }
+      } else {
+        setMatchingResidents([]);
+        setIsAmbiguous(false);
       }
-
-      setResidents(data || []);
     };
 
     const timer = setTimeout(searchResidents, 300);
@@ -368,6 +433,7 @@ export default function PackageNew({ user }: PackageNewProps) {
     setSearchTerm(resident.nome || '');
     setResidents([]);
     setMatchingResidents([]);
+    setIsAmbiguous(false);
   };
 
   const handleClearResident = () => {
@@ -375,6 +441,7 @@ export default function PackageNew({ user }: PackageNewProps) {
     // Não limpamos recipientName e unitNumber para que o porteiro possa ver o que o OCR leu
     setSearchTerm('');
     setMatchingResidents([]);
+    setIsAmbiguous(false);
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -383,106 +450,25 @@ export default function PackageNew({ user }: PackageNewProps) {
 
     setStep('analyzing');
     setLoading(true);
+    setStatusMessage('Lendo nome...');
+    
     try {
       const reader = new FileReader();
       reader.onloadend = async () => {
         let base64 = reader.result as string;
 
-        // Se o modo leve estiver ativado, comprimimos a imagem
-        if (condoSettings?.light_mode_enabled) {
-          try {
-            const { compressImage } = await import('../lib/imageUtils');
-            base64 = await compressImage(base64, 800, 0.6);
-          } catch (err) {
-            console.warn('Falha ao comprimir imagem:', err);
-          }
+        // Otimização: Redimensionar e comprimir antes de enviar para IA
+        try {
+          const { compressImage } = await import('../lib/imageUtils');
+          base64 = await compressImage(base64, 900, 0.65);
+        } catch (err) {
+          console.warn('Falha ao comprimir imagem:', err);
         }
 
         setPhotoUrl(base64);
-
-        // 1. Upload to Supabase
-        const res = await fetch(base64);
-        const blob = await res.blob();
-        const uploadFile = new File([blob], file.name, { type: file.type });
-        
-        const fileExt = file.name.split('.').pop();
-        const fileName = `${Math.random()}.${fileExt}`;
-        const filePath = `package-photos/${fileName}`;
-
-        try {
-          const { error: uploadError } = await supabase.storage
-            .from('packages')
-            .upload(filePath, uploadFile);
-
-          if (!uploadError) {
-            const { data: { publicUrl } } = supabase.storage
-              .from('packages')
-              .getPublicUrl(filePath);
-            setPhotoUrl(publicUrl);
-          }
-        } catch (storageErr) {
-          console.warn("Storage error:", storageErr);
-        }
-
-        // 2. Analyze with Gemini
-        try {
-          const residentList = allCondoResidents.map(r => `${r.nome} - ${r.unidade}`);
-          const data = await analyzePackageLabel(base64, residentList);
-          if (data) {
-            if (data.carrier?.value) {
-              setCarrier(data.carrier.value);
-            }
-            if (data.trackingNumber?.value) {
-              setTrackingNumber(data.trackingNumber.value);
-            }
-            
-            const ocrName = data.recipientName?.value || '';
-            const ocrUnit = data.unitDetails?.number || data.unitDetails?.full_string || '';
-            const ocrType = data.unitDetails?.type || '';
-            
-            setRecipientName(ocrName);
-            setUnitNumber(ocrUnit);
-            setUnitType(ocrType);
-
-            // Try to find matching residents
-            if (user?.condominium_id) {
-              const matches = await findMatchingResidents(
-                user.condominium_id,
-                data.unitDetails?.full_string || '',
-                ocrName,
-                data.unitDetails
-              );
-              
-              if (matches.length > 0) {
-                const filteredMatches = matches
-                  .filter(m => m.score >= 50)
-                  .slice(0, 3);
-                setMatchingResidents(filteredMatches);
-                if (filteredMatches.length > 0) {
-                  // Auto-select if:
-                  // 1. Extremely high confidence
-                  // 2. ONLY ONE match found with high confidence (>= 120)
-                  const topMatch = filteredMatches[0];
-                  const isExtremelyHigh = topMatch.score >= 180;
-                  const isOnlyMatchWithHighConfidence = filteredMatches.length === 1 && topMatch.score >= 120;
-                  
-                  if (isExtremelyHigh || isOnlyMatchWithHighConfidence) {
-                    handleSelectResident(topMatch.resident);
-                  }
-                }
-              }
-            }
-          }
-          setStep('confirmation');
-        } catch (err) {
-          console.error("Erro na análise Gemini:", err);
-          setStep('manual');
-        } finally {
-          setLoading(false);
-        }
+        processImage(base64); // Reutiliza a lógica otimizada
       };
       reader.readAsDataURL(file);
-
     } catch (error: any) {
       toast.error('Erro ao carregar foto: ' + error.message);
       setStep('camera');
@@ -733,8 +719,8 @@ export default function PackageNew({ user }: PackageNewProps) {
                   <Sparkles className="w-10 h-10 text-indigo-600" />
                 </div>
               </div>
-              <h2 className="text-2xl font-bold text-gray-900 mb-2">Lendo etiqueta...</h2>
-              <p className="text-gray-500">A IA está identificando o morador e os dados da entrega.</p>
+              <h2 className="text-2xl font-bold text-gray-900 mb-2">{statusMessage}</h2>
+              <p className="text-gray-500">Processando informações da etiqueta para agilizar seu trabalho.</p>
             </motion.div>
           )}
 
@@ -805,69 +791,49 @@ export default function PackageNew({ user }: PackageNewProps) {
                         />
                       </div>
 
-                      {/* Search Results */}
-                      {residents.length > 0 && (
-                        <div className="border border-gray-100 rounded-xl overflow-hidden divide-y divide-gray-50">
-                          {residents.map((resident) => (
-                            <button
-                              key={resident.id}
-                              type="button"
-                              onClick={() => handleSelectResident(resident)}
-                              className="w-full px-4 py-3 text-left hover:bg-indigo-50 transition-colors flex items-center justify-between"
-                            >
-                              <div>
-                                <p className="font-medium text-gray-900">{resident.nome}</p>
-                                <p className="text-sm text-gray-500">
-                                  {formatResidentAddress(resident)}
-                                </p>
-                              </div>
-                              <CheckCircle className="w-5 h-5 text-gray-200" />
-                            </button>
-                          ))}
+                      {/* Ambiguity Warning */}
+                      {isAmbiguous && !selectedResident && (
+                        <div className="p-3 bg-amber-50 border border-amber-100 rounded-xl flex items-center gap-3 animate-pulse">
+                          <AlertCircle className="w-5 h-5 text-amber-600 flex-shrink-0" />
+                          <p className="text-xs font-medium text-amber-800">
+                            Mais de um morador encontrado, selecione o correto
+                          </p>
                         </div>
                       )}
 
-                      {/* AI Suggestions */}
+                      {/* Search Results / Intelligent Suggestions */}
                       {matchingResidents.length > 0 && (
                         <div className="space-y-2">
                           <div className="flex items-center gap-2 text-xs font-medium text-indigo-600 uppercase tracking-wider px-1">
                             <Sparkles className="w-3 h-3" />
-                            Sugestões da IA
+                            Busca Inteligente
                           </div>
                           <div className="grid gap-2">
-                            {matchingResidents.slice(0, 3).map(({ resident, score }) => (
+                            {matchingResidents.slice(0, 5).map(({ resident, score }) => (
                               <button
                                 key={resident.id}
                                 type="button"
                                 onClick={() => handleSelectResident(resident)}
-                                className="flex items-center justify-between p-3 bg-indigo-50/50 border border-indigo-100 rounded-xl hover:bg-indigo-50 transition-colors group"
+                                className="flex items-center justify-between p-3 bg-white border border-gray-100 rounded-xl hover:bg-indigo-50 hover:border-indigo-200 transition-all group shadow-sm"
                               >
                                 <div className="flex items-center gap-3">
-                                  <div className="w-10 h-10 bg-white rounded-full flex items-center justify-center border border-indigo-100 shadow-sm">
+                                  <div className="w-10 h-10 bg-indigo-50 rounded-full flex items-center justify-center border border-indigo-100">
                                     <User className="w-5 h-5 text-indigo-600" />
                                   </div>
                                   <div className="text-left">
                                     <div className="flex items-center gap-2">
                                       <p className="font-medium text-gray-900">{resident.nome}</p>
-                                      {score >= 180 && (
-                                        <span className="bg-emerald-100 text-emerald-700 text-[8px] px-1.5 py-0.5 rounded-full font-bold uppercase tracking-wider">Alta Confiança</span>
-                                      )}
-                                      {score >= 100 && score < 180 && (
-                                        <span className="bg-blue-100 text-blue-700 text-[8px] px-1.5 py-0.5 rounded-full font-bold uppercase tracking-wider">Média</span>
-                                      )}
-                                      {score < 100 && (
-                                        <span className="bg-amber-100 text-amber-700 text-[8px] px-1.5 py-0.5 rounded-full font-bold uppercase tracking-wider">Baixa</span>
+                                      {score >= 150 && (
+                                        <span className="bg-emerald-100 text-emerald-700 text-[8px] px-1.5 py-0.5 rounded-full font-bold uppercase tracking-wider">Forte</span>
                                       )}
                                     </div>
-                                    <p className="text-xs text-indigo-600 font-medium">
+                                    <p className="text-xs text-gray-500">
                                       {formatResidentAddress(resident)}
                                     </p>
                                   </div>
                                 </div>
                                 <div className="flex items-center gap-2">
-                                  <span className="text-[10px] font-bold bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full">
-                                    {Math.round(score)}
-                                  </span>
+                                  <CheckCircle className="w-5 h-5 text-gray-200 group-hover:text-indigo-400" />
                                 </div>
                               </button>
                             ))}

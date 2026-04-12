@@ -5,6 +5,8 @@ import { Condominium, Profile } from '../types';
 import { Building, Loader2, Search, MapPin, CheckCircle } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 
+import { normalizeRole } from '../lib/authUtils';
+
 interface SelectCondominiumProps {
   user: Profile;
   onUpdateUser: (user: Profile) => void;
@@ -40,8 +42,12 @@ export default function SelectCondominium({ user, onUpdateUser }: SelectCondomin
   const handleSelect = async (condoId: string) => {
     setSelecting(condoId);
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) throw new Error('Sessão não encontrada');
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+      if (sessionError || !session) {
+        toast.error('Sessão não encontrada. Por favor, faça login novamente.');
+        setSelecting(null);
+        return;
+      }
 
       const response = await fetch('/api/profiles/select-condominium', {
         method: 'POST',
@@ -61,10 +67,11 @@ export default function SelectCondominium({ user, onUpdateUser }: SelectCondomin
       toast.success('Condomínio selecionado com sucesso!');
       onUpdateUser(result.profile);
       
-      if (result.profile.role === 'porteiro') {
+      const role = normalizeRole(result.profile.role);
+      if (role === 'porteiro') {
         navigate('/portaria');
-      } else if (result.profile.role === 'admin') {
-        navigate('/profiles');
+      } else if (role === 'admin' || role === 'sindico') {
+        navigate('/dashboard');
       } else {
         navigate('/dashboard');
       }

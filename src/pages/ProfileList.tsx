@@ -268,11 +268,13 @@ export default function ProfileList({ user }: ProfileListProps) {
     );
   };
 
+  const activeResidentsCount = profiles.filter(p => p.active && p.role === 'resident').length;
+
   return (
     <div className="max-w-6xl mx-auto p-6">
       <div className="flex justify-between items-center mb-8">
         <div>
-          <h1 className="text-3xl font-bold text-zinc-900">Moradores</h1>
+          <h1 className="text-3xl font-bold text-zinc-900">MORADORES ({activeResidentsCount})</h1>
           <p className="text-zinc-500">Gerencie os moradores do condomínio</p>
         </div>
         {(user.role === 'admin' || user.role === 'sindico') && (

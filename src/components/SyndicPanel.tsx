@@ -26,6 +26,8 @@ import { testZApiConnection } from '../services/whatsappService';
 
 
 
+import { normalizeRole } from '../lib/authUtils';
+
 import ProfileList from '../pages/ProfileList';
 import ProfileNew from '../pages/ProfileNew';
 import PackageNew from '../pages/PackageNew';
@@ -179,7 +181,7 @@ const Dashboard = ({ user, residents = [], logs = [], systemStatus }: any) => {
         }).length,
         notificationsSent: (logs || []).filter((l: any) => l.status_envio === 'sucesso' || l.status === 'sent').length,
         failedWhatsApp: (logs || []).filter((l: any) => l.status_envio === 'erro' || l.status === 'failed').length,
-        residentsCount: (residents || []).length,
+        residentsCount: (residents || []).filter((r: any) => r.ativo).length,
         qrRetrievals: pkgs.filter((p: any) => p.delivery_method === 'qr_code').length,
         manualRetrievals: pkgs.filter((p: any) => 
           p.status === 'delivered' && 
@@ -273,7 +275,7 @@ const Dashboard = ({ user, residents = [], logs = [], systemStatus }: any) => {
               <Users className="w-5 h-5" />
             </div>
           </div>
-          <p className="text-zinc-500 text-xs font-bold uppercase tracking-wider">Moradores</p>
+          <p className="text-zinc-500 text-xs font-bold uppercase tracking-wider">MORADORES ({stats.residentsCount})</p>
           <h3 className="text-3xl font-bold text-zinc-900">{stats.residentsCount}</h3>
         </Card>
 
@@ -2426,11 +2428,12 @@ export default function SyndicPanel({ user, onLogout, onUpdateUser }: { user: Pr
     if (path.includes('/residents-inactive')) return 'residents-inactive';
     if (path.includes('/residents')) return 'residents';
     if (path.includes('/reports')) return 'reports';
-    if (path.includes('/notifications') && user.role === 'admin') return 'notifications';
-    if (path.includes('/settings') && user.role === 'admin') return 'settings';
-    if (path.includes('/profiles') && user.role === 'admin') return 'profiles';
+    const role = normalizeRole(user.role);
+    if (path.includes('/notifications') && role === 'admin') return 'notifications';
+    if (path.includes('/settings') && role === 'admin') return 'settings';
+    if (path.includes('/profiles') && role === 'admin') return 'profiles';
     if (path.includes('/users')) return 'users';
-    if (path.includes('/audit') && user.role === 'admin') return 'audit';
+    if (path.includes('/audit') && role === 'admin') return 'audit';
     return 'dashboard';
   };
 
@@ -2486,17 +2489,17 @@ export default function SyndicPanel({ user, onLogout, onUpdateUser }: { user: Pr
     }
   };
 
+  const activeResidentsCount = residents.filter(r => r.ativo).length;
+
   const menuItems = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { id: 'packages', label: 'Encomendas', icon: Package },
-    { id: 'residents', label: 'Moradores', icon: Users },
+    { id: 'residents', label: `MORADORES (${activeResidentsCount})`, icon: Users },
     { id: 'residents-inactive', label: 'Moradores Desativados', icon: XCircle },
-    ...(user.role === 'admin' ? [
+    { id: 'users', label: 'Usuários', icon: Shield },
+    ...(normalizeRole(user.role) === 'admin' ? [
       { id: 'settings', label: 'Configurações', icon: Settings },
-      { id: 'users', label: 'Usuários', icon: Shield },
       { id: 'audit', label: 'Auditoria', icon: History }
-    ] : user.role === 'sindico' ? [
-      { id: 'users', label: 'Usuários', icon: Shield }
     ] : []),
   ];
 
@@ -2512,7 +2515,7 @@ export default function SyndicPanel({ user, onLogout, onUpdateUser }: { user: Pr
       <aside className="w-full md:w-64 bg-white border-r border-zinc-100 flex flex-col h-auto md:h-screen sticky top-0 z-40">
         <div className="p-6 border-b border-zinc-50">
           <div className="flex items-center justify-between mb-4">
-            {user.role === 'admin' && (
+            {normalizeRole(user.role) === 'admin' && (
               <div className="flex items-center gap-2">
                 <button 
                   onClick={() => navigate('/portaria')}
@@ -2585,7 +2588,7 @@ export default function SyndicPanel({ user, onLogout, onUpdateUser }: { user: Pr
             <Route path="/residents-inactive" element={<InactiveResidentsList residents={residents} />} />
             
             {/* Admin Only Routes */}
-            {user.role === 'admin' ? (
+            {normalizeRole(user.role) === 'admin' ? (
               <>
                 <Route path="/history" element={<HistoryTab user={user} />} />
                 <Route path="/reports" element={<Reports packages={packages} />} />

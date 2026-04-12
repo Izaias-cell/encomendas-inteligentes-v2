@@ -1058,7 +1058,7 @@ export default function Portaria({ user }: PortariaProps) {
           className={`px-6 py-3 rounded-xl font-bold transition-all flex items-center gap-2 whitespace-nowrap ${activeTab === 'residents' ? 'bg-white text-emerald-600 shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
         >
           <Users className="w-5 h-5" />
-          Moradores ({residents.length})
+          MORADORES ({residents.length})
         </button>
       </div>
 
@@ -1234,7 +1234,7 @@ export default function Portaria({ user }: PortariaProps) {
       ) : (
         <div className="space-y-6">
           <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-8">
-            <h2 className="text-3xl font-bold text-zinc-900">Moradores</h2>
+            <h2 className="text-3xl font-bold text-zinc-900">MORADORES ({residents.length})</h2>
           </div>
 
           {filteredResidents.length > 0 ? (

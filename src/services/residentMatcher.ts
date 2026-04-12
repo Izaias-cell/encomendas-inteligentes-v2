@@ -130,11 +130,12 @@ export const findMatchingResidents = async (
 
   const normalizedOcrUnit = normalizeUnit(unit || '');
   const normalizedOcrName = normalizeName(name || '');
+  const ocrStreet = normalizeName(details?.street || '');
   
   const ocrNum = details?.number || (unit?.match(/\d+/) ? unit.match(/\d+/)![0] : '');
   
   // AVOID MISASSOCIATION: If the unit number looks like a tracking code or logistical text, ignore it
-  const logisticalPrefixes = ['BR', 'CR', 'FA', 'PR', 'ROTA', 'STOP', 'PARADA', 'PEDIDO', 'HUB', 'PAC'];
+  const logisticalPrefixes = ['BR', 'CR', 'FA', 'PR', 'NF', 'ROTA', 'STOP', 'PARADA', 'PEDIDO', 'HUB', 'PAC'];
   const isLogisticalText = unit && logisticalPrefixes.some(p => unit.toUpperCase().startsWith(p));
   const isLikelyTrackingCode = (ocrNum && ocrNum.length > 6) || isLogisticalText;
   const effectiveOcrNum = isLikelyTrackingCode ? '' : ocrNum;
@@ -150,7 +151,26 @@ export const findMatchingResidents = async (
     .eq('condominium_id', condominiumId)
     .eq('ativo', true);
 
-  if (!allResidents) return [];
+  if (!allResidents || allResidents.length === 0) return [];
+
+  // 1.5 Determine if street is a relevant differentiator
+  // If most residents share the same street, it's not useful for disambiguation
+  const streetFrequency: Record<string, number> = {};
+  let totalWithStreet = 0;
+  allResidents.forEach(r => {
+    const s = (r.street || '').trim().toUpperCase();
+    if (s) {
+      streetFrequency[s] = (streetFrequency[s] || 0) + 1;
+      totalWithStreet++;
+    }
+  });
+
+  const distinctStreets = Object.keys(streetFrequency).length;
+  const maxFreq = Math.max(0, ...Object.values(streetFrequency));
+  
+  // Street is relevant ONLY if there's more than one street 
+  // AND no single street dominates too much (e.g., > 80% of those who have a street)
+  const isStreetRelevant = totalWithStreet > 0 && distinctStreets > 1 && (maxFreq / totalWithStreet) < 0.8;
 
   // 2. Fetch history (last 50 packages) to boost confidence
   const { data: history } = await supabase
@@ -171,13 +191,11 @@ export const findMatchingResidents = async (
     if ((unit || details) && !isLikelyTrackingCode) {
       // 1. Exact number match (Highest Priority)
       if (r.unidade && effectiveOcrNum && r.unidade.toString() === effectiveOcrNum.toString()) {
-        score += 80; // Increased from 50
+        score += 80;
         
         // 2. Unit type match (Bonus)
         if (resType && ocrType && resType === ocrType) {
           score += 40;
-        } else if (resType && ocrType && (resType.includes(ocrType) || ocrType.includes(resType))) {
-          score += 20;
         }
         
         // 3. Block/Tower match (Bonus)
@@ -185,60 +203,61 @@ export const findMatchingResidents = async (
         if (!r.lote || !ocrTower || normalizeUnit(r.lote) === ocrTower) score += 10;
       }
 
-      // Legacy unit match (full string comparison)
-      if (resUnit === normalizedOcrUnit && resUnit.length > 0) {
-        score += 70;
-      } else if (resUnit.length > 0 && normalizedOcrUnit.length > 0) {
-        if (normalizedOcrUnit.includes(resUnit) || resUnit.includes(normalizedOcrUnit)) {
-          score += 30;
+      // Street match (Bonus) - Only if street is a relevant differentiator in this condo
+      if (isStreetRelevant) {
+        const resStreet = normalizeName(r.street || '');
+        if (resStreet && ocrStreet && (resStreet === ocrStreet || resStreet.includes(ocrStreet) || ocrStreet.includes(resStreet))) {
+          score += 50;
         }
       }
     }
 
     // B. Name Matching
     if (normalizedOcrName) {
-      // Check if the resident's unit number is present in the raw OCR name (before normalization)
-      const rawOcrName = (name || '').toUpperCase();
-      if (r.unidade && rawOcrName.includes(r.unidade.toString())) {
-        score += 40;
-      }
+      const ocrParts = normalizedOcrName.split(' ').filter(p => p.length > 1);
+      const resParts = resName.split(' ').filter(p => p.length > 1);
 
       // Exact match
       if (resName === normalizedOcrName) {
         score += 100;
+        // Bonus for full name (more than one part)
+        if (resParts.length > 1) {
+          score += 20;
+        }
       } 
       // Partial match (contains)
       else if (resName.includes(normalizedOcrName) || normalizedOcrName.includes(resName)) {
         score += 60;
+        if (resName.startsWith(normalizedOcrName) || normalizedOcrName.startsWith(resName)) {
+          score += 20;
+        }
+        // Bonus if multiple parts match
+        let partMatches = 0;
+        ocrParts.forEach(op => {
+          if (resParts.some(rp => rp === op)) {
+            partMatches++;
+          }
+        });
+        if (partMatches > 1) {
+          score += 30;
+        }
       } 
-      // Fuzzy match for common variations (SOUSA/SOUZA)
+      // Fuzzy match
       else {
-        const fuzzyOcr = normalizedOcrName.replace(/Z/g, 'S');
-        const fuzzyRes = resName.replace(/Z/g, 'S');
-        if (fuzzyOcr === fuzzyRes) {
-          score += 90;
-        } else if (fuzzyRes.includes(fuzzyOcr) || fuzzyOcr.includes(fuzzyRes)) {
-          score += 55;
+        const distance = getLevenshteinDistance(normalizedOcrName, resName);
+        if (distance <= 2) {
+          score += 80;
         } else {
-          // Levenshtein distance for small typos
-          const distance = getLevenshteinDistance(normalizedOcrName, resName);
-          if (distance <= 2) {
-            score += 80;
-          } else {
-            // Match by parts (first and last name)
-            const ocrParts = normalizedOcrName.split(' ').filter(p => p.length > 1);
-            const resParts = resName.split(' ').filter(p => p.length > 1);
-            
-            let partMatches = 0;
-            ocrParts.forEach(op => {
-              if (resParts.some(rp => rp === op || rp.startsWith(op) || op.startsWith(rp))) {
-                partMatches++;
-              }
-            });
-
-            if (partMatches > 0) {
-              score += (partMatches / Math.max(ocrParts.length, resParts.length)) * 70;
+          // Match by parts
+          let partMatches = 0;
+          ocrParts.forEach(op => {
+            if (resParts.some(rp => rp === op || rp.startsWith(op) || op.startsWith(rp))) {
+              partMatches++;
             }
+          });
+
+          if (partMatches > 0) {
+            score += (partMatches / Math.max(ocrParts.length, resParts.length)) * 70;
           }
         }
       }
@@ -248,11 +267,9 @@ export const findMatchingResidents = async (
     if (history && history.length > 0) {
       const residentHistory = history.filter(h => h.recipient_id === r.id);
       if (residentHistory.length > 0) {
-        // If this resident has received packages in this unit before
         const unitMatch = residentHistory.some(h => normalizeUnit(h.unit_number) === normalizedOcrUnit);
         if (unitMatch) score += 20;
         
-        // If this resident has received packages with this raw name before
         const nameMatch = residentHistory.some(h => normalizeName(h.recipient_name_raw) === normalizedOcrName);
         if (nameMatch) score += 15;
       }
@@ -262,7 +279,7 @@ export const findMatchingResidents = async (
   });
 
   // Filter and sort by score
-  const threshold = 40; 
+  const threshold = 30; 
   return scoredResidents
     .filter(sr => sr.score >= threshold)
     .sort((a, b) => b.score - a.score);

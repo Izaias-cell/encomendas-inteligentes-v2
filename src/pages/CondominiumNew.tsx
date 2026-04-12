@@ -21,11 +21,12 @@ export default function CondominiumNew({ user, onUpdateUser }: CondominiumNewPro
     setLoading(true);
 
     try {
-      // 1. Get the current session to send the access token
-      const { data: { session } } = await supabase.auth.getSession();
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
       
-      if (!session) {
-        throw new Error('Você precisa estar logado para realizar esta operação.');
+      if (sessionError || !session) {
+        toast.error('Sessão não encontrada. Por favor, faça login novamente.');
+        setLoading(false);
+        return;
       }
 
       // 2. Call the backend API to create the condominium and update profile

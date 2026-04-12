@@ -107,15 +107,91 @@ export default function UserManagement({ user }: UserManagementProps) {
     setShowModal(true);
   };
 
+  const getValidSession = async () => {
+    console.log("[DEBUG FRONTEND] getValidSession iniciada");
+    try {
+      // 1. Try to get current session from Supabase
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+      
+      if (session) {
+        console.log("[DEBUG FRONTEND] Sessão encontrada via getSession");
+        return session;
+      }
+
+      if (sessionError) {
+        console.warn('[DEBUG FRONTEND] Aviso ao buscar sessão:', sessionError.message);
+      }
+
+      // 2. Check for Mock User (AI Studio Preview)
+      // If we have a user prop with a mock ID, we return a simulated session
+      if (user.id && user.id.startsWith('00000000-0000-0000-0000')) {
+        console.warn("[DEBUG FRONTEND] Usuário Mock detectado. Retornando sessão simulada.");
+        return {
+          access_token: 'MOCK_TOKEN',
+          user: { id: user.id, email: user.email || 'demo@example.com' }
+        } as any;
+      }
+
+      // 3. Try fallback to getUser() which might work if session is partially lost
+      console.log("[DEBUG FRONTEND] Sessão não encontrada via getSession, tentando getUser...");
+      const { data: { user: authUser }, error: userError } = await supabase.auth.getUser();
+      
+      if (authUser) {
+        console.log("[DEBUG FRONTEND] Usuário encontrado via getUser, tentando recuperar sessão...");
+        const { data: { session: refreshedSession } } = await supabase.auth.getSession();
+        if (refreshedSession) {
+          console.log("[DEBUG FRONTEND] Sessão recuperada com sucesso");
+          return refreshedSession;
+        }
+        
+        // If we have a user but no session object, we can't get a token for the backend
+        // but we might be able to proceed if it's a local operation (not the case here)
+      }
+
+      if (userError && userError.message !== 'Auth session missing!') {
+        console.error('[DEBUG FRONTEND] Erro ao buscar usuário via getUser:', userError.message);
+      }
+
+      console.error("[DEBUG FRONTEND] Nenhuma sessão válida encontrada");
+      return null;
+    } catch (err) {
+      console.error('[DEBUG FRONTEND] Erro inesperado no getValidSession:', err);
+      return null;
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setModalLoading(true);
 
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) throw new Error('Sessão não encontrada');
+      console.log("[DEBUG FRONTEND] handleSubmit iniciado", { editingUser: editingUser?.id, formData });
+      const session = await getValidSession();
+      
+      if (!session) {
+        console.error("[DEBUG FRONTEND] Sessão não encontrada no handleSubmit");
+        toast.error('Sessão não encontrada. Por favor, faça login novamente para realizar esta ação.');
+        setModalLoading(false);
+        return;
+      }
+
+      const isMock = session.access_token === 'MOCK_TOKEN';
+      const loadingToast = toast.loading(editingUser ? 'Salvando alterações...' : 'Criando usuário...');
 
       if (editingUser) {
+        if (isMock) {
+          // Simulate success for mock users
+          setTimeout(() => {
+            const updatedProfile = { ...editingUser, ...formData };
+            setUsers(prev => prev.map(u => u.id === editingUser.id ? updatedProfile : u));
+            toast.success('Usuário atualizado com sucesso! (Modo Demo) ✅', { id: loadingToast });
+            setShowModal(false);
+            setModalLoading(false);
+          }, 1000);
+          return;
+        }
+
+        console.log("[DEBUG FRONTEND] Enviando PATCH para /api/admin/users/" + editingUser.id);
         // Update existing user profile via backend API to ensure consistency and bypass RLS if needed
         const response = await fetch(`/api/admin/users/${editingUser.id}`, {
           method: 'PATCH',
@@ -127,32 +203,65 @@ export default function UserManagement({ user }: UserManagementProps) {
             full_name: formData.full_name,
             phone: formData.phone,
             role: formData.role,
-            condominium_id: formData.condominium_id,
+            condominium_id: formData.condominium_id || null,
             active: formData.active
           })
         });
 
+        console.log("[DEBUG FRONTEND] Resposta PATCH recebida:", response.status);
+
         if (!response.ok) {
           const err = await response.json();
+          console.error("[DEBUG FRONTEND] Erro no PATCH:", err);
+          toast.dismiss(loadingToast);
           throw new Error(err.error || 'Erro ao atualizar usuário');
         }
 
         const { profile: updatedProfile } = await response.json();
+        console.log("[DEBUG FRONTEND] Perfil atualizado com sucesso:", updatedProfile);
 
-        await logAction(
-          user.id,
-          user.condominium_id,
-          'UPDATE_USER',
-          'profiles',
-          editingUser.id,
-          editingUser,
-          updatedProfile
-        );
+        // Update local state immediately for better UX
+        setUsers(prev => prev.map(u => u.id === updatedProfile.id ? updatedProfile : u));
 
-        toast.success('Usuário atualizado com sucesso! ✅');
+        try {
+          await logAction(
+            user.id,
+            user.condominium_id,
+            'UPDATE_USER',
+            'profiles',
+            editingUser.id,
+            editingUser,
+            updatedProfile
+          );
+        } catch (auditErr) {
+          console.warn("[DEBUG FRONTEND] Erro ao registrar log de auditoria (não crítico):", auditErr);
+        }
+
+        toast.success('Usuário atualizado com sucesso! ✅', { id: loadingToast });
       } else {
+        if (isMock) {
+          // Simulate creation for mock users
+          setTimeout(() => {
+            const newProfile = { 
+              id: Math.random().toString(36).substring(7),
+              ...formData,
+              created_at: new Date().toISOString(),
+              active: true
+            } as Profile;
+            setUsers(prev => [...prev, newProfile]);
+            toast.success(`Usuário criado com sucesso! (Modo Demo) ✅`, {
+              id: loadingToast,
+              duration: 5000
+            });
+            setShowModal(false);
+            setModalLoading(false);
+          }, 1000);
+          return;
+        }
+
         // Create new user with temporary password
         const tempPassword = Math.random().toString(36).slice(-8);
+        console.log("[DEBUG FRONTEND] Criando novo usuário com senha temporária");
         
         const response = await fetch('/api/admin/users', {
           method: 'POST',
@@ -166,35 +275,50 @@ export default function UserManagement({ user }: UserManagementProps) {
             full_name: formData.full_name,
             phone: formData.phone,
             role: formData.role,
-            condominium_id: formData.condominium_id
+            condominium_id: formData.condominium_id || null
           })
         });
 
+        console.log("[DEBUG FRONTEND] Resposta POST recebida:", response.status);
+
         if (!response.ok) {
           const err = await response.json();
+          console.error("[DEBUG FRONTEND] Erro no POST:", err);
+          toast.dismiss(loadingToast);
           throw new Error(err.error || 'Erro ao criar usuário');
         }
 
         const { profile: newProfile } = await response.json();
+        console.log("[DEBUG FRONTEND] Novo usuário criado com sucesso:", newProfile);
 
-        await logAction(
-          user.id,
-          user.condominium_id,
-          'CREATE_USER',
-          'profiles',
-          newProfile.id,
-          null,
-          newProfile
-        );
+        // Update local state
+        setUsers(prev => [...prev, newProfile]);
+
+        try {
+          await logAction(
+            user.id,
+            user.condominium_id,
+            'CREATE_USER',
+            'profiles',
+            newProfile.id,
+            null,
+            newProfile
+          );
+        } catch (auditErr) {
+          console.warn("[DEBUG FRONTEND] Erro ao registrar log de auditoria (não crítico):", auditErr);
+        }
 
         toast.success(`Usuário criado com sucesso! Senha temporária: ${tempPassword}`, {
+          id: loadingToast,
           duration: 10000,
           icon: '🔑'
         });
       }
       setShowModal(false);
+      // Still call fetchData to ensure everything is in sync (e.g. condo names)
       fetchData();
     } catch (error: any) {
+      console.error('Erro no handleSubmit:', error);
       toast.error('Erro ao salvar usuário: ' + error.message);
     } finally {
       setModalLoading(false);
@@ -205,11 +329,26 @@ export default function UserManagement({ user }: UserManagementProps) {
     if (!confirm(`Deseja realmente resetar a senha de ${u.full_name}? Uma nova senha temporária será gerada.`)) return;
 
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) throw new Error('Sessão não encontrada');
+      console.log("[DEBUG FRONTEND] handleResetPassword iniciado para:", u.id, u.email);
+      const session = await getValidSession();
+      if (!session) {
+        console.error("[DEBUG FRONTEND] Sessão não encontrada no handleResetPassword");
+        toast.error('Sessão não encontrada. Por favor, faça login novamente.');
+        return;
+      }
 
+      const isMock = session.access_token === 'MOCK_TOKEN';
       const newPassword = Math.random().toString(36).slice(-8);
 
+      if (isMock) {
+        toast.success(`Senha resetada com sucesso! (Modo Demo) Nova senha: ${newPassword} ✅`, {
+          duration: 10000,
+          icon: '🔑'
+        });
+        return;
+      }
+
+      console.log("[DEBUG FRONTEND] Enviando POST para reset-password");
       const response = await fetch(`/api/admin/users/${u.id}/reset-password`, {
         method: 'POST',
         headers: {
@@ -219,20 +358,27 @@ export default function UserManagement({ user }: UserManagementProps) {
         body: JSON.stringify({ newPassword })
       });
 
+      console.log("[DEBUG FRONTEND] Resposta reset-password recebida:", response.status);
+
       if (!response.ok) {
         const err = await response.json();
+        console.error("[DEBUG FRONTEND] Erro no reset-password:", err);
         throw new Error(err.error || 'Erro ao resetar senha');
       }
 
-      await logAction(
-        user.id,
-        user.condominium_id,
-        'RESET_PASSWORD',
-        'profiles',
-        u.id,
-        null,
-        { must_change_password: true }
-      );
+      try {
+        await logAction(
+          user.id,
+          user.condominium_id,
+          'RESET_PASSWORD',
+          'profiles',
+          u.id,
+          null,
+          { must_change_password: true }
+        );
+      } catch (auditErr) {
+        console.warn("[DEBUG FRONTEND] Erro ao registrar log de auditoria (não crítico):", auditErr);
+      }
 
       toast.success(`Senha resetada com sucesso! Nova senha temporária: ${newPassword} ✅`, {
         duration: 10000,
@@ -246,11 +392,24 @@ export default function UserManagement({ user }: UserManagementProps) {
 
   const toggleStatus = async (u: Profile) => {
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) throw new Error('Sessão não encontrada');
+      console.log("[DEBUG FRONTEND] toggleStatus iniciado para:", u.id, "Status atual:", u.active);
+      const session = await getValidSession();
+      if (!session) {
+        console.error("[DEBUG FRONTEND] Sessão não encontrada no toggleStatus");
+        toast.error('Sessão não encontrada. Por favor, faça login novamente.');
+        return;
+      }
 
+      const isMock = session.access_token === 'MOCK_TOKEN';
       const newStatus = !u.active;
+
+      if (isMock) {
+        setUsers(prev => prev.map(item => item.id === u.id ? { ...item, active: newStatus } : item));
+        toast.success(`Usuário ${newStatus ? 'ativado' : 'inativado'} com sucesso! (Modo Demo) ✅`);
+        return;
+      }
       
+      console.log("[DEBUG FRONTEND] Enviando PATCH para alterar status para:", newStatus);
       const response = await fetch(`/api/admin/users/${u.id}`, {
         method: 'PATCH',
         headers: {
@@ -260,20 +419,30 @@ export default function UserManagement({ user }: UserManagementProps) {
         body: JSON.stringify({ active: newStatus })
       });
 
+      console.log("[DEBUG FRONTEND] Resposta toggleStatus recebida:", response.status);
+
       if (!response.ok) {
         const err = await response.json();
+        console.error("[DEBUG FRONTEND] Erro no toggleStatus:", err);
         throw new Error(err.error || 'Erro ao alterar status');
       }
 
-      await logAction(
-        user.id,
-        user.condominium_id,
-        newStatus ? 'ACTIVATE_USER' : 'DEACTIVATE_USER',
-        'profiles',
-        u.id,
-        { active: u.active },
-        { active: newStatus }
-      );
+      // Update local state immediately
+      setUsers(prev => prev.map(item => item.id === u.id ? { ...item, active: newStatus } : item));
+
+      try {
+        await logAction(
+          user.id,
+          user.condominium_id,
+          newStatus ? 'ACTIVATE_USER' : 'DEACTIVATE_USER',
+          'profiles',
+          u.id,
+          { active: u.active },
+          { active: newStatus }
+        );
+      } catch (auditErr) {
+        console.warn("[DEBUG FRONTEND] Erro ao registrar log de auditoria (não crítico):", auditErr);
+      }
 
       toast.success(`Usuário ${newStatus ? 'ativado' : 'inativado'} com sucesso! ✅`);
       fetchData();
@@ -293,11 +462,29 @@ export default function UserManagement({ user }: UserManagementProps) {
       return;
     }
 
+    console.log("[DEBUG FRONTEND] handleDeleteUser iniciado para:", u.id);
     setDeletingId(u.id);
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) throw new Error('Sessão não encontrada');
+      const session = await getValidSession();
+      if (!session) {
+        console.error("[DEBUG FRONTEND] Sessão não encontrada no handleDeleteUser");
+        toast.error('Sessão não encontrada. Por favor, faça login novamente.');
+        setDeletingId(null);
+        return;
+      }
 
+      const isMock = session.access_token === 'MOCK_TOKEN';
+
+      if (isMock) {
+        setTimeout(() => {
+          setUsers(prev => prev.filter(item => item.id !== u.id));
+          toast.success('Usuário excluído com sucesso! (Modo Demo) ✅');
+          setDeletingId(null);
+        }, 1000);
+        return;
+      }
+
+      console.log("[DEBUG FRONTEND] Enviando DELETE para /api/admin/users/" + u.id);
       const response = await fetch(`/api/admin/users/${u.id}`, {
         method: 'DELETE',
         headers: {
@@ -305,20 +492,31 @@ export default function UserManagement({ user }: UserManagementProps) {
         }
       });
 
+      console.log("[DEBUG FRONTEND] Resposta DELETE recebida:", response.status);
+
       if (!response.ok) {
         const err = await response.json();
+        console.error("[DEBUG FRONTEND] Erro no DELETE:", err);
         throw new Error(err.error || 'Erro ao excluir usuário');
       }
 
-      await logAction(
-        user.id,
-        user.condominium_id,
-        'DELETE_USER',
-        'profiles',
-        u.id,
-        u,
-        null
-      );
+      // Update local state immediately
+      const deletedId = u.id;
+      setUsers(prev => prev.filter(item => item.id !== deletedId));
+
+      try {
+        await logAction(
+          user.id,
+          user.condominium_id,
+          'DELETE_USER',
+          'profiles',
+          u.id,
+          u,
+          null
+        );
+      } catch (auditErr) {
+        console.warn("[DEBUG FRONTEND] Erro ao registrar log de auditoria (não crítico):", auditErr);
+      }
 
       toast.success('Usuário excluído permanentemente com sucesso ✅');
       fetchData();
