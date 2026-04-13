@@ -72,6 +72,7 @@ export default function PackageNew({ user }: PackageNewProps) {
   const [flashOn, setFlashOn] = useState(false);
   const [condoSettings, setCondoSettings] = useState<CondominiumSettings | null>(null);
   const [isAmbiguous, setIsAmbiguous] = useState(false);
+  const [foundPartialData, setFoundPartialData] = useState(false);
   const [statusMessage, setStatusMessage] = useState('Lendo dados...');
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -248,7 +249,10 @@ export default function PackageNew({ user }: PackageNewProps) {
       // 2. Extração de Texto Bruto (OCR Simples)
       const rawText = await getRawTextFromImage(finalBase64);
       
-      if (!rawText || rawText.length < 5) {
+      console.log("[DEBUG OCR] Texto extraído:", rawText);
+
+      if (!rawText || rawText.length < 3) {
+        console.warn("[DEBUG OCR] Falha: Texto muito curto ou vazio.");
         throw new Error("Nenhum texto legível encontrado na etiqueta.");
       }
 
@@ -256,10 +260,13 @@ export default function PackageNew({ user }: PackageNewProps) {
       setStatusMessage('Processando dados...');
       const parsedData = parseLabelText(rawText);
       
+      console.log("[DEBUG OCR] Dados parseados:", parsedData);
+
       if (parsedData.recipientName) setRecipientName(parsedData.recipientName);
       if (parsedData.unitNumber) setUnitNumber(parsedData.unitNumber);
 
       // 4. Busca Inteligente e Cruzamento com Moradores
+      let foundMatch = false;
       if ((parsedData.recipientName || parsedData.unitNumber) && user?.condominium_id) {
         setStatusMessage('Buscando morador...');
         const matches = await findMatchingResidents(
@@ -268,8 +275,14 @@ export default function PackageNew({ user }: PackageNewProps) {
           parsedData.recipientName
         );
 
+        console.log("[DEBUG OCR] Candidatos encontrados:", matches.length);
+
         if (matches.length > 0) {
           const topMatch = matches[0];
+          console.log("[DEBUG OCR] Melhor sugestão:", topMatch.resident.nome, "Score:", topMatch.score);
+          
+          setMatchingResidents(matches.slice(0, 5));
+          
           // Se for um match forte, já selecionamos
           if (topMatch.score >= 150) {
             setRecipientName(topMatch.resident.nome);
@@ -277,19 +290,40 @@ export default function PackageNew({ user }: PackageNewProps) {
             setUnitType(topMatch.resident.unit_type || '');
             handleSelectResident(topMatch.resident);
             setStatusMessage('Morador identificado');
+            foundMatch = true;
           } else {
-            setMatchingResidents(matches.slice(0, 3));
-            setStatusMessage('Selecione o morador');
+            setStatusMessage('Confirme o morador');
+            // Preenche o termo de busca com o que foi encontrado para ajudar o porteiro
+            setSearchTerm(parsedData.unitNumber || parsedData.recipientName || '');
           }
+        } else {
+          console.log("[DEBUG OCR] Nenhum morador correspondente encontrado no banco.");
+          // Preenche o termo de busca com o que foi encontrado para ajudar o porteiro
+          setSearchTerm(parsedData.unitNumber || parsedData.recipientName || '');
         }
+      }
+
+      // Só mostra erro se não encontrou NADA útil
+      if (!parsedData.recipientName && !parsedData.unitNumber) {
+        console.warn("[DEBUG OCR] Falha: Nenhum nome ou casa identificado no texto.");
+        toast.error("Não foi possível identificar o morador automaticamente.");
+        setFoundPartialData(false);
+      } else if (!foundMatch) {
+        console.log("[DEBUG OCR] Dados parciais encontrados, aguardando confirmação do porteiro.");
+        setFoundPartialData(true);
+      } else {
+        setFoundPartialData(false);
       }
 
       await uploadPromise;
       setStep('confirmation');
-    } catch (err) {
-      console.error("Erro no processamento:", err);
+    } catch (err: any) {
+      console.error("[DEBUG OCR] Erro fatal no processamento:", err);
       setStep('confirmation'); 
-      toast.error("Não foi possível ler todos os dados automaticamente.");
+      // Se o erro for o que nós lançamos, mostra a mensagem específica
+      if (err.message === "Nenhum texto legível encontrado na etiqueta.") {
+        toast.error("Não foi possível ler a etiqueta. Tente novamente ou preencha manualmente.");
+      }
     } finally {
       setLoading(false);
     }
@@ -424,6 +458,7 @@ export default function PackageNew({ user }: PackageNewProps) {
     setMatchingResidents([]);
     setPickupCode(generatePickupCode());
     setIsAmbiguous(false);
+    setFoundPartialData(false);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -767,6 +802,16 @@ export default function PackageNew({ user }: PackageNewProps) {
                           className="block w-full pl-10 pr-3 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all"
                         />
                       </div>
+
+                      {/* Partial Data Found Message */}
+                      {foundPartialData && !selectedResident && (
+                        <div className="p-3 bg-indigo-50 border border-indigo-100 rounded-xl flex items-center gap-3">
+                          <Info className="w-5 h-5 text-indigo-600 flex-shrink-0" />
+                          <p className="text-xs font-medium text-indigo-800">
+                            Identificamos dados parciais. Por favor, confirme o morador abaixo.
+                          </p>
+                        </div>
+                      )}
 
                       {/* Ambiguity Warning */}
                       {isAmbiguous && !selectedResident && (

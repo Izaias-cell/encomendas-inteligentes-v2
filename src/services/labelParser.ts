@@ -59,21 +59,26 @@ export function parseLabelText(rawText: string): ParsedLabel {
   for (const line of lines) {
     const upperLine = line.toUpperCase();
     
-    // Skip lines with numbers (likely addresses or codes)
-    if (/\d/.test(line)) continue;
-    
     // Skip lines that contain ignore words
     if (IGNORE_WORDS.some(word => upperLine.includes(word))) continue;
     
     // Skip lines that are too short or too long
-    if (line.length < 5 || line.length > 40) continue;
+    if (line.length < 3 || line.length > 50) continue;
 
-    // Check if it looks like a name (multiple words starting with capital letters)
-    const words = line.split(/\s+/);
-    if (words.length >= 2 && words.length <= 5) {
+    // Clean line from unit number if it was already found on this line
+    let cleanLine = line;
+    if (unitNumber && line.includes(unitNumber)) {
+      cleanLine = line.replace(unitNumber, '').replace(/\s+/g, ' ').trim();
+    }
+
+    // Remove common non-name characters but keep letters
+    const nameCandidate = cleanLine.replace(/[^a-zA-ZÀ-ÿ\s]/g, '').trim();
+    const words = nameCandidate.split(/\s+/).filter(w => w.length >= 2);
+
+    if (words.length >= 2 && words.length <= 6) {
       // If we haven't found a name yet, or this one looks better (longer)
-      if (!recipientName || line.length > recipientName.length) {
-        recipientName = line;
+      if (!recipientName || nameCandidate.length > recipientName.length) {
+        recipientName = nameCandidate;
       }
     }
   }
