@@ -6,10 +6,13 @@ const IGNORE_WORDS = [
   'RUA', 'AVENIDA', 'AV', 'CEP', 'CIDADE', 'ESTADO', 'BRASIL', 'LOGRADOURO',
   'BAIRRO', 'NUMERO', 'Nº', 'DESTINATARIO', 'REMETENTE', 'ENDERECO',
   'TELEFONE', 'TEL', 'CPF', 'RG', 'DATA', 'ENTREGA', 'PEDIDO', 'RASTREIO',
-  'CODIGO', 'TRANSPORTADORA', 'LOGISTICA', 'HUB', 'ROTA', 'STOP', 'PARADA'
+  'CODIGO', 'TRANSPORTADORA', 'LOGISTICA', 'HUB', 'ROTA', 'STOP', 'PARADA',
+  'NF', 'NOTA FISCAL', 'COMPLEMENTO', 'REFERENCIA', 'REF', 'PED', 'ORDER',
+  'VALOR', 'DECLARADO', 'PESO', 'VOLUME', 'CHAVE', 'ACESSO', 'DANFE'
 ];
 
-const UNIT_KEYWORDS = ['CASA', 'AP', 'APTO', 'APARTAMENTO', 'UNIDADE', 'UNID', 'BLOCO', 'BL', 'LOTE'];
+const UNIT_KEYWORDS = ['CASA', 'AP', 'APTO', 'APARTAMENTO', 'UNIDADE', 'UNID', 'BLOCO', 'BL', 'LOTE', 'TORRE', 'TR', 'SALA'];
+const UNIT_REGEX = new RegExp(`\\b(?:${UNIT_KEYWORDS.join('|')})\\s*[:\\-]?\\s*(\\d+[A-Z]?)\\b`, 'i');
 
 export interface ParsedLabel {
   recipientName: string;
@@ -21,65 +24,38 @@ export function parseLabelText(rawText: string): ParsedLabel {
   let recipientName = '';
   let unitNumber = '';
 
-  // 1. Identify Unit Number
-  // Look for numbers near keywords or isolated numbers
+  // 1. EXTRAÇÃO DE UNIDADE (CASA/AP)
+  // Tenta encontrar um número que pareça uma unidade em qualquer linha
   for (const line of lines) {
-    const upperLine = line.toUpperCase();
-    
-    // Check for keywords like "CASA 123" or "APTO 45"
-    for (const keyword of UNIT_KEYWORDS) {
-      const regex = new RegExp(`${keyword}\\s*[:\\-]?\\s*(\\d+[A-Z]?)`, 'i');
-      const match = line.match(regex);
-      if (match && match[1]) {
-        unitNumber = match[1];
-        break;
-      }
+    // Primeiro tenta com palavras-chave
+    const match = line.match(UNIT_REGEX);
+    if (match && match[1]) {
+      unitNumber = match[1];
+      break;
     }
-    if (unitNumber) break;
-  }
-
-  // If no unit found with keywords, look for isolated numbers (usually at the end of a line or alone)
-  if (!unitNumber) {
-    for (const line of lines) {
-      // Look for a line that is just a number or ends with a number (common for units)
-      const isolatedNumMatch = line.match(/^(\d{1,4}[A-Z]?)$/) || line.match(/(\d{1,4}[A-Z]?)$/);
-      if (isolatedNumMatch) {
-        const num = isolatedNumMatch[1];
-        // Avoid common logistical numbers (like house numbers in addresses if they are too long)
-        if (num.length <= 4) {
-          unitNumber = num;
-          break;
-        }
-      }
+    
+    // Se não encontrou com palavra-chave, mas a linha é apenas um número curto (1-4 dígitos)
+    const isolatedNum = line.match(/^(\d{1,4}[A-Z]?)$/);
+    if (isolatedNum) {
+      unitNumber = isolatedNum[1];
+      break;
     }
   }
 
-  // 2. Identify Recipient Name
-  // Look for lines that look like a name (2-4 words, capitalized, no numbers, not in ignore list)
+  // 2. EXTRAÇÃO DE NOME
+  // Pega a primeira linha que não foi identificada como unidade e que parece um nome
   for (const line of lines) {
-    const upperLine = line.toUpperCase();
+    if (line === unitNumber) continue;
     
-    // Skip lines that contain ignore words
+    const upperLine = line.toUpperCase();
     if (IGNORE_WORDS.some(word => upperLine.includes(word))) continue;
     
-    // Skip lines that are too short or too long
-    if (line.length < 3 || line.length > 50) continue;
+    const cleanLine = line.replace(/[^a-zA-ZÀ-ÿ\s]/g, '').replace(/\s+/g, ' ').trim();
+    const words = cleanLine.split(' ').filter(w => w.length >= 2);
 
-    // Clean line from unit number if it was already found on this line
-    let cleanLine = line;
-    if (unitNumber && line.includes(unitNumber)) {
-      cleanLine = line.replace(unitNumber, '').replace(/\s+/g, ' ').trim();
-    }
-
-    // Remove common non-name characters but keep letters
-    const nameCandidate = cleanLine.replace(/[^a-zA-ZÀ-ÿ\s]/g, '').trim();
-    const words = nameCandidate.split(/\s+/).filter(w => w.length >= 2);
-
-    if (words.length >= 2 && words.length <= 6) {
-      // If we haven't found a name yet, or this one looks better (longer)
-      if (!recipientName || nameCandidate.length > recipientName.length) {
-        recipientName = nameCandidate;
-      }
+    if (words.length >= 2) {
+      recipientName = cleanLine;
+      break; 
     }
   }
 

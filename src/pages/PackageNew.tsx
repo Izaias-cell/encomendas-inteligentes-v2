@@ -204,23 +204,30 @@ export default function PackageNew({ user }: PackageNewProps) {
     }
   };
 
+  const processingRef = useRef(false);
+
   const processImage = async (base64: string) => {
+    if (processingRef.current) return;
+    processingRef.current = true;
+
+    const startTime = Date.now();
     setStep('analyzing');
     setLoading(true);
-    setStatusMessage('Extraindo texto...');
+    setStatusMessage('Lendo etiqueta...');
     
     try {
       let finalBase64 = base64;
 
-      // Otimização: Redimensionar e comprimir antes de enviar para IA
+      // 1. Otimização: Compressão agressiva para OCR (mais rápido)
       try {
         const { compressImage } = await import('../lib/imageUtils');
-        finalBase64 = await compressImage(base64, 1000, 0.7); // Qualidade um pouco maior para OCR bruto
+        // Reduzimos o tamanho para 800px para ser mais rápido no upload/processamento
+        finalBase64 = await compressImage(base64, 800, 0.6); 
       } catch (err) {
         console.warn('Falha ao comprimir imagem:', err);
       }
 
-      // 1. Inicia o upload em segundo plano
+      // 2. Upload em segundo plano (não bloqueante)
       const uploadPromise = (async () => {
         try {
           const res = await fetch(base64);
@@ -246,86 +253,95 @@ export default function PackageNew({ user }: PackageNewProps) {
 
       setPhotoUrl(finalBase64);
 
-      // 2. Extração de Texto Bruto (OCR Simples)
-      const rawText = await getRawTextFromImage(finalBase64);
-      
-      console.log("[DEBUG OCR] Texto extraído:", rawText);
+      // 3. Timeout de 5 segundos para a operação total
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('TIMEOUT')), 5000)
+      );
 
-      if (!rawText || rawText.length < 3) {
-        console.warn("[DEBUG OCR] Falha: Texto muito curto ou vazio.");
-        throw new Error("Nenhum texto legível encontrado na etiqueta.");
-      }
-
-      // 3. Processamento do Texto (Lógica Simples)
-      setStatusMessage('Processando dados...');
-      const parsedData = parseLabelText(rawText);
-      
-      console.log("[DEBUG OCR] Dados parseados:", parsedData);
-
-      if (parsedData.recipientName) setRecipientName(parsedData.recipientName);
-      if (parsedData.unitNumber) setUnitNumber(parsedData.unitNumber);
-
-      // 4. Busca Inteligente e Cruzamento com Moradores
-      let foundMatch = false;
-      if ((parsedData.recipientName || parsedData.unitNumber) && user?.condominium_id) {
-        setStatusMessage('Buscando morador...');
-        const matches = await findMatchingResidents(
-          user.condominium_id,
-          parsedData.unitNumber,
-          parsedData.recipientName
-        );
-
-        console.log("[DEBUG OCR] Candidatos encontrados:", matches.length);
-
-        if (matches.length > 0) {
-          const topMatch = matches[0];
-          console.log("[DEBUG OCR] Melhor sugestão:", topMatch.resident.nome, "Score:", topMatch.score);
-          
-          setMatchingResidents(matches.slice(0, 5));
-          
-          // Se for um match forte, já selecionamos
-          if (topMatch.score >= 150) {
-            setRecipientName(topMatch.resident.nome);
-            setUnitNumber(topMatch.resident.unidade);
-            setUnitType(topMatch.resident.unit_type || '');
-            handleSelectResident(topMatch.resident);
-            setStatusMessage('Morador identificado');
-            foundMatch = true;
-          } else {
-            setStatusMessage('Confirme o morador');
-            // Preenche o termo de busca com o que foi encontrado para ajudar o porteiro
-            setSearchTerm(parsedData.unitNumber || parsedData.recipientName || '');
-          }
-        } else {
-          console.log("[DEBUG OCR] Nenhum morador correspondente encontrado no banco.");
-          // Preenche o termo de busca com o que foi encontrado para ajudar o porteiro
-          setSearchTerm(parsedData.unitNumber || parsedData.recipientName || '');
+      // 4. Fluxo de Processamento Direto e Rápido
+      const analysisPromise = (async () => {
+        // A. Captura de Texto Bruto (OCR Simples)
+        const rawText = await getRawTextFromImage(finalBase64);
+        
+        if (!rawText || rawText.length < 3) {
+          throw new Error("Nenhum texto legível encontrado.");
         }
-      }
 
-      // Só mostra erro se não encontrou NADA útil
-      if (!parsedData.recipientName && !parsedData.unitNumber) {
-        console.warn("[DEBUG OCR] Falha: Nenhum nome ou casa identificado no texto.");
-        toast.error("Não foi possível identificar o morador automaticamente.");
-        setFoundPartialData(false);
-      } else if (!foundMatch) {
-        console.log("[DEBUG OCR] Dados parciais encontrados, aguardando confirmação do porteiro.");
-        setFoundPartialData(true);
-      } else {
-        setFoundPartialData(false);
+        // B. Extração Direta (Sem interpretação complexa)
+        const parsedData = parseLabelText(rawText);
+
+        if (parsedData.recipientName) setRecipientName(parsedData.recipientName);
+        if (parsedData.unitNumber) setUnitNumber(parsedData.unitNumber);
+
+        // C. Cruzamento Simples com Cadastro
+        let foundMatch = false;
+        if ((parsedData.recipientName || parsedData.unitNumber) && user?.condominium_id) {
+          const matches = await findMatchingResidents(
+            user.condominium_id,
+            parsedData.unitNumber,
+            parsedData.recipientName
+          );
+
+          if (matches.length > 0) {
+            const topMatch = matches[0];
+            setMatchingResidents(matches.slice(0, 5));
+            
+            // Match forte: Seleciona direto
+            if (topMatch.score >= 150) {
+              setRecipientName(topMatch.resident.nome);
+              setUnitNumber(topMatch.resident.unidade);
+              setUnitType(topMatch.resident.unit_type || '');
+              handleSelectResident(topMatch.resident);
+              setStatusMessage('Morador identificado');
+              foundMatch = true;
+            } else {
+              // Match parcial: Sugere confirmação
+              setStatusMessage('Confirme o morador');
+              setSearchTerm(parsedData.recipientName || parsedData.unitNumber || '');
+            }
+          } else {
+            // Sem match: Preenche busca para ajuste manual
+            setSearchTerm(parsedData.recipientName || parsedData.unitNumber || '');
+          }
+        }
+
+        // Estado para mensagem de confirmação parcial
+        if (!parsedData.recipientName && !parsedData.unitNumber) {
+          setFoundPartialData(false);
+          toast.error("Não foi possível identificar dados na etiqueta.");
+        } else if (!foundMatch) {
+          setFoundPartialData(true);
+        } else {
+          setFoundPartialData(false);
+        }
+
+        return true;
+      })();
+
+      // Executa com limite de tempo
+      try {
+        await Promise.race([analysisPromise, timeoutPromise]);
+      } catch (raceErr: any) {
+        if (raceErr.message === 'TIMEOUT') {
+          console.warn("[PERF] Timeout de 5s atingido. Mostrando resultados parciais.");
+          // Se deu timeout, o que foi setado nos states (recipientName, unitNumber) será mostrado
+        } else {
+          throw raceErr;
+        }
       }
 
       await uploadPromise;
       setStep('confirmation');
     } catch (err: any) {
-      console.error("[DEBUG OCR] Erro fatal no processamento:", err);
+      console.error("[DEBUG OCR] Erro no processamento:", err);
       setStep('confirmation'); 
-      // Se o erro for o que nós lançamos, mostra a mensagem específica
-      if (err.message === "Nenhum texto legível encontrado na etiqueta.") {
-        toast.error("Não foi possível ler a etiqueta. Tente novamente ou preencha manualmente.");
+      if (err.message === "Nenhum texto legível encontrado.") {
+        toast.error("Não foi possível ler a etiqueta automaticamente.");
       }
     } finally {
       setLoading(false);
+      processingRef.current = false;
+      console.log(`[PERF] Tempo total de processamento: ${Date.now() - startTime}ms`);
     }
   };
 

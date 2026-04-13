@@ -7,7 +7,7 @@ const ai = new GoogleGenAI({ apiKey });
 export async function getRawTextFromImage(base64Image: string): Promise<string | null> {
   const model = "gemini-3-flash-preview";
   
-  const prompt = "Extraia todo o texto visível desta etiqueta de encomenda. Retorne apenas o texto bruto, linha por linha, exatamente como aparece.";
+  const prompt = "Identifique e extraia APENAS o NOME DO DESTINATÁRIO e o NÚMERO DA CASA/APTO desta etiqueta. Ignore qualquer outro texto (rua, CEP, códigos, transportadora). Retorne o nome na primeira linha e a unidade na segunda linha.";
 
   try {
     const response = await ai.models.generateContent({
@@ -26,7 +26,8 @@ export async function getRawTextFromImage(base64Image: string): Promise<string |
         }
       ],
       config: {
-        thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
+        temperature: 0,
+        maxOutputTokens: 400,
       },
     });
 
