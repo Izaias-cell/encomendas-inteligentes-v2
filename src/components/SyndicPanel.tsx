@@ -416,6 +416,7 @@ const PackagesList = ({ user }: any) => {
   const [confirmationCode, setConfirmationCode] = useState('');
   const [actionLoading, setActionLoading] = useState(false);
   const [isDeliverySuccess, setIsDeliverySuccess] = useState(false);
+  const [viewPhotoUrl, setViewPhotoUrl] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -528,7 +529,11 @@ const PackagesList = ({ user }: any) => {
   const [counts, setCounts] = useState({ all: 0, pending: 0, delivered: 0 });
 
   const fetchPackages = async () => {
-    if (!user?.condominium_id) return;
+    if (!user?.condominium_id) {
+      setLoading(false);
+      return;
+    }
+    
     setLoading(true);
     setError(false);
     try {
@@ -546,7 +551,12 @@ const PackagesList = ({ user }: any) => {
         .eq('condominium_id', user.condominium_id)
         .order('received_at', { ascending: false });
 
-      if (error) throw error;
+      if (error) {
+        // If it's a real error, log it and set error state
+        console.error('Erro Supabase ao buscar encomendas:', error);
+        setError(true);
+        return;
+      }
 
       const allData = data || [];
       const pendingData = allData.filter(p => !p.delivered_at || p.status !== 'delivered');
@@ -564,12 +574,8 @@ const PackagesList = ({ user }: any) => {
       else if (filterStatus === 'delivered') setPackages(deliveredData);
 
     } catch (err) {
-      console.error('Erro ao buscar encomendas:', err);
+      console.error('Erro inesperado ao buscar encomendas:', err);
       setError(true);
-      let errorMsg = "Erro ao carregar encomendas";
-      if (filterStatus === 'pending') errorMsg = "Erro ao carregar encomendas pendentes";
-      if (filterStatus === 'delivered') errorMsg = "Erro ao carregar encomendas retiradas";
-      toast.error(errorMsg);
     } finally {
       setLoading(false);
     }
@@ -905,7 +911,7 @@ const PackagesList = ({ user }: any) => {
                   >
                     <Eye className="w-4 h-4" />
                   </button>
-                  {pkg.status !== 'delivered' && (
+                  {pkg.status !== 'delivered' && normalizeRole(user.role) !== 'sindico' && (
                     <button 
                       onClick={() => { setPkgForDelivery(pkg); setIsDeliveryModalOpen(true); }}
                       disabled={actionLoading}
@@ -990,6 +996,25 @@ const PackagesList = ({ user }: any) => {
               </div>
             </div>
 
+            {selectedPackage.photo_url && (
+              <div className="p-4 bg-zinc-50 rounded-2xl space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-bold text-zinc-900">Foto da Etiqueta</p>
+                    <p className="text-xs text-zinc-500">Visualizar imagem original da etiqueta</p>
+                  </div>
+                  <Button 
+                    variant="outline" 
+                    size="sm" 
+                    onClick={() => setViewPhotoUrl(selectedPackage.photo_url)}
+                  >
+                    <Camera className="w-4 h-4 mr-2" />
+                    Ver Foto
+                  </Button>
+                </div>
+              </div>
+            )}
+
             <div className="p-4 bg-zinc-50 rounded-2xl space-y-3">
               <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-widest">Ações de Notificação</h4>
               <div className="flex items-center justify-between">
@@ -1004,7 +1029,7 @@ const PackagesList = ({ user }: any) => {
             </div>
 
             <div className="flex gap-3 pt-4 border-t border-zinc-100">
-              {selectedPackage.status !== 'delivered' && (
+              {selectedPackage.status !== 'delivered' && normalizeRole(user.role) !== 'sindico' && (
                 <Button 
                   className="flex-1" 
                   onClick={() => { setPkgForDelivery(selectedPackage); setIsDeliveryModalOpen(true); }} 
@@ -1013,13 +1038,51 @@ const PackagesList = ({ user }: any) => {
                   Entregar Agora
                 </Button>
               )}
-              <Button variant="danger" size="sm" onClick={() => handleDelete(selectedPackage)} loading={actionLoading}>
-                <Trash2 className="w-4 h-4" />
-              </Button>
+              {normalizeRole(user.role) !== 'sindico' && (
+                <Button variant="danger" size="sm" onClick={() => handleDelete(selectedPackage)} loading={actionLoading}>
+                  <Trash2 className="w-4 h-4" />
+                </Button>
+              )}
             </div>
           </div>
         )}
       </Modal>
+
+      {/* Modal de Foto */}
+      {viewPhotoUrl && (
+        <div className="fixed inset-0 bg-black/90 z-[70] flex items-center justify-center p-4 backdrop-blur-md animate-in fade-in duration-300">
+          <div className="relative max-w-4xl w-full max-h-[90vh] flex flex-col items-center">
+            <button 
+              onClick={() => setViewPhotoUrl(null)}
+              className="absolute -top-12 right-0 text-white bg-white/10 hover:bg-white/20 p-2 rounded-full transition-all"
+            >
+              <Plus className="w-6 h-6 rotate-45" />
+            </button>
+            <img 
+              src={viewPhotoUrl} 
+              alt="Foto da etiqueta" 
+              className="max-w-full max-h-[80vh] object-contain rounded-2xl shadow-2xl border-4 border-white/10"
+              referrerPolicy="no-referrer"
+            />
+            <div className="mt-6 flex gap-4">
+              <button
+                onClick={() => setViewPhotoUrl(null)}
+                className="bg-white text-zinc-900 px-8 py-3 rounded-xl font-bold hover:bg-zinc-100 transition-all"
+              >
+                Fechar
+              </button>
+              <a 
+                href={viewPhotoUrl} 
+                target="_blank" 
+                rel="noopener noreferrer"
+                className="bg-emerald-600 text-white px-8 py-3 rounded-xl font-bold hover:bg-emerald-700 transition-all flex items-center gap-2"
+              >
+                Abrir imagem original
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
 
       <Modal 
         isOpen={isDeliveryModalOpen} 
@@ -1190,6 +1253,11 @@ const HistoryTab = ({ user }: any) => {
   const [dateRange, setDateRange] = useState({ start: '', end: '' });
 
   const fetchPackages = async () => {
+    if (!user?.condominium_id) {
+      setLoading(false);
+      return;
+    }
+    
     setLoading(true);
     try {
       const { data, error } = await supabase
@@ -1202,11 +1270,18 @@ const HistoryTab = ({ user }: any) => {
         .eq('condominium_id', user.condominium_id)
         .order('created_at', { ascending: false });
 
-      if (error) throw error;
+      if (error) {
+        console.error('Erro Supabase ao buscar histórico:', error);
+        // We don't throw here to avoid the toast error for now, 
+        // but we could set a local error state if needed.
+        setPackages([]);
+        return;
+      }
+      
       setPackages(data || []);
     } catch (err) {
-      console.error('Erro ao buscar histórico:', err);
-      toast.error("Erro ao carregar histórico");
+      console.error('Erro inesperado ao buscar histórico:', err);
+      setPackages([]);
     } finally {
       setLoading(false);
     }
@@ -1534,10 +1609,12 @@ const ResidentsList = ({ user, residents = [], onUpdate }: any) => {
             placeholder="Buscar morador..." 
           />
         </div>
-        <Button onClick={() => { setEditingResident(null); setFormData({ nome: '', unidade: '', telefone: '', ativo: true, unit_type: '', block: '', lote: '', street: '' }); setIsModalOpen(true); }}>
-          <UserPlus className="w-4 h-4" />
-          Novo Morador
-        </Button>
+        {normalizeRole(user.role) !== 'sindico' && (
+          <Button onClick={() => { setEditingResident(null); setFormData({ nome: '', unidade: '', telefone: '', ativo: true, unit_type: '', block: '', lote: '', street: '' }); setIsModalOpen(true); }}>
+            <UserPlus className="w-4 h-4" />
+            Novo Morador
+          </Button>
+        )}
       </div>
 
       <Card className="p-0 overflow-hidden">
@@ -1580,15 +1657,37 @@ const ResidentsList = ({ user, residents = [], onUpdate }: any) => {
                           />
                           <div className="absolute right-6 top-12 w-48 bg-white rounded-xl shadow-xl border border-zinc-100 py-2 z-20 animate-in fade-in zoom-in-95 duration-100">
                             <button
-                              onClick={() => handleEdit(res)}
+                              onClick={() => {
+                                setEditingResident(res);
+                                setFormData({ 
+                                  nome: res.nome, 
+                                  unidade: res.unidade, 
+                                  telefone: res.telefone, 
+                                  ativo: res.ativo ?? true, 
+                                  unit_type: res.unit_type || '', 
+                                  block: res.block || res.bloco || '', 
+                                  lote: res.lote || '',
+                                  street: res.street || '' 
+                                });
+                                setIsModalOpen(true);
+                                setActiveResidentMenu(null);
+                              }}
                               className="w-full px-4 py-2 text-left text-sm text-zinc-600 hover:bg-zinc-50 flex items-center gap-2"
                             >
-                              <Edit2 className="w-4 h-4" />
-                              Editar Morador
+                              <Eye className="w-4 h-4" />
+                              Visualizar Detalhes
                             </button>
-                            
+
                             {(user.role === 'admin' || user.role === 'sindico') && (
                               <>
+                                <button
+                                  onClick={() => handleEdit(res)}
+                                  className="w-full px-4 py-2 text-left text-sm text-zinc-600 hover:bg-zinc-50 flex items-center gap-2"
+                                >
+                                  <Edit2 className="w-4 h-4" />
+                                  Editar Morador
+                                </button>
+                                
                                 <button
                                   onClick={() => toggleResidentStatus(res)}
                                   className={`w-full px-4 py-2 text-left text-sm flex items-center gap-2 hover:bg-zinc-50 ${res.ativo ? 'text-amber-600' : 'text-emerald-600'}`}
@@ -2420,24 +2519,7 @@ export default function SyndicPanel({ user, onLogout, onUpdateUser }: { user: Pr
   const navigate = useNavigate();
   const location = useLocation();
 
-  // Determine active tab from URL
-  const getActiveTab = () => {
-    const path = location.pathname;
-    if (path.includes('/packages')) return 'packages';
-    if (path.includes('/history')) return 'history';
-    if (path.includes('/residents-inactive')) return 'residents-inactive';
-    if (path.includes('/residents')) return 'residents';
-    if (path.includes('/reports')) return 'reports';
-    const role = normalizeRole(user.role);
-    if (path.includes('/notifications') && role === 'admin') return 'notifications';
-    if (path.includes('/settings') && role === 'admin') return 'settings';
-    if (path.includes('/profiles') && role === 'admin') return 'profiles';
-    if (path.includes('/users')) return 'users';
-    if (path.includes('/audit') && role === 'admin') return 'audit';
-    return 'dashboard';
-  };
-
-  const activeTab = getActiveTab();
+  const [activeTab, setActiveTab] = useState('dashboard');
 
   useEffect(() => {
     if (user && user.must_change_password && location.pathname !== '/change-password') {
@@ -2493,15 +2575,40 @@ export default function SyndicPanel({ user, onLogout, onUpdateUser }: { user: Pr
 
   const menuItems = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-    { id: 'packages', label: 'Encomendas', icon: Package },
-    { id: 'residents', label: `MORADORES (${activeResidentsCount})`, icon: Users },
-    { id: 'residents-inactive', label: 'Moradores Desativados', icon: XCircle },
-    { id: 'users', label: 'Usuários', icon: Shield },
+    { id: 'encomendas', label: 'Encomendas', icon: Package },
+    { id: 'historico', label: 'Histórico', icon: History },
+    { id: 'moradores', label: `MORADORES (${activeResidentsCount})`, icon: Users },
+    { id: 'moradores_desativados', label: 'Moradores Desativados', icon: XCircle },
+    { id: 'usuarios', label: 'Usuários', icon: Shield },
     ...(normalizeRole(user.role) === 'admin' ? [
       { id: 'settings', label: 'Configurações', icon: Settings },
       { id: 'audit', label: 'Auditoria', icon: History }
     ] : []),
   ];
+
+  const renderContent = () => {
+    console.log("Aba ativa atual:", activeTab);
+    switch (activeTab) {
+      case 'dashboard':
+        return <Dashboard user={user} residents={residents} logs={logs} systemStatus={systemStatus} />;
+      case 'encomendas':
+        return <PackagesList user={user} />;
+      case 'historico':
+        return <HistoryTab user={user} />;
+      case 'moradores':
+        return <ResidentsList user={user} residents={residents} onUpdate={fetchInitialData} />;
+      case 'moradores_desativados':
+        return <InactiveResidentsList residents={residents} />;
+      case 'usuarios':
+        return <UserManagement user={user} />;
+      case 'settings':
+        return <SettingsPanel user={user} systemStatus={systemStatus} onUpdateUser={onUpdateUser} />;
+      case 'audit':
+        return <AuditLogs user={user} />;
+      default:
+        return <Dashboard user={user} residents={residents} logs={logs} systemStatus={systemStatus} />;
+    }
+  };
 
   if (loading) return (
     <div className="min-h-screen flex items-center justify-center bg-zinc-50">
@@ -2541,7 +2648,10 @@ export default function SyndicPanel({ user, onLogout, onUpdateUser }: { user: Pr
           {menuItems.map((item) => (
             <button
               key={item.id}
-              onClick={() => navigate(`/${item.id === 'dashboard' ? 'dashboard' : item.id}`)}
+              onClick={() => {
+                console.log("Aba clicada:", item.id);
+                setActiveTab(item.id);
+              }}
               className={`flex items-center gap-3 px-4 py-3 rounded-xl transition-all whitespace-nowrap md:whitespace-normal ${
                 activeTab === item.id 
                   ? 'bg-emerald-50 text-emerald-700 font-bold' 
@@ -2581,40 +2691,7 @@ export default function SyndicPanel({ user, onLogout, onUpdateUser }: { user: Pr
         </header>
 
         <div className="max-w-6xl mx-auto animate-in fade-in slide-in-from-bottom-2 duration-500">
-          <Routes>
-            <Route path="/dashboard" element={<Dashboard user={user} residents={residents} logs={logs} systemStatus={systemStatus} />} />
-            <Route path="/packages" element={<PackagesList user={user} />} />
-            <Route path="/residents" element={<ResidentsList user={user} residents={residents} onUpdate={fetchInitialData} />} />
-            <Route path="/residents-inactive" element={<InactiveResidentsList residents={residents} />} />
-            
-            {/* Admin Only Routes */}
-            {normalizeRole(user.role) === 'admin' ? (
-              <>
-                <Route path="/history" element={<HistoryTab user={user} />} />
-                <Route path="/reports" element={<Reports packages={packages} />} />
-                <Route path="/notifications" element={<NotificationsPanel logs={logs} onUpdate={fetchInitialData} />} />
-                <Route path="/settings" element={<SettingsPanel user={user} systemStatus={systemStatus} onUpdateUser={onUpdateUser} />} />
-                <Route path="/profiles" element={<ProfileList user={user} />} />
-                <Route path="/profiles/new" element={<ProfileNew user={user} />} />
-                <Route path="/audit" element={<AuditLogs user={user} />} />
-              </>
-            ) : (
-              <>
-                <Route path="/history" element={<Navigate to="/dashboard" replace />} />
-                <Route path="/reports" element={<Navigate to="/dashboard" replace />} />
-                <Route path="/notifications" element={<Navigate to="/dashboard" replace />} />
-                <Route path="/settings" element={<Navigate to="/dashboard" replace />} />
-                <Route path="/profiles" element={<Navigate to="/dashboard" replace />} />
-                <Route path="/profiles/new" element={<Navigate to="/dashboard" replace />} />
-                <Route path="/audit" element={<Navigate to="/dashboard" replace />} />
-              </>
-            )}
-
-            <Route path="/users" element={<UserManagement user={user} />} />
-            <Route path="/condominiums/new" element={<CondominiumNew user={user} onUpdateUser={() => {}} />} />
-            <Route path="/" element={<Navigate to="/dashboard" />} />
-            <Route path="*" element={<Navigate to="/dashboard" />} />
-          </Routes>
+          {renderContent()}
         </div>
       </main>
     </div>

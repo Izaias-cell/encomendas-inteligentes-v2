@@ -955,6 +955,7 @@ export default function Portaria({ user }: PortariaProps) {
   const deliveredPackages = packages.filter(p => p.delivered_at || p.status === 'delivered');
 
   const [selectedGroup, setSelectedGroup] = useState<any>(null);
+  const [viewPhotoUrl, setViewPhotoUrl] = useState<string | null>(null);
 
   const getFilteredPackages = () => {
     let basePackages = packages;
@@ -1156,6 +1157,19 @@ export default function Portaria({ user }: PortariaProps) {
                         <p className="font-mono text-sm text-zinc-900 font-bold truncate" title={pkg.tracking_code}>{pkg.tracking_code}</p>
                       </div>
                     )}
+
+                    {!pkg.isGroup && pkg.photo_url && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setViewPhotoUrl(pkg.photo_url);
+                        }}
+                        className="w-full mt-2 py-2 bg-zinc-50 text-zinc-600 rounded-xl text-xs font-bold hover:bg-zinc-100 transition-all flex items-center justify-center gap-2 border border-zinc-100"
+                      >
+                        <Camera className="w-3.5 h-3.5" />
+                        VER FOTO DA ETIQUETA
+                      </button>
+                    )}
                   </div>
 
                   <div className="space-y-1 pt-2 border-t border-zinc-50/50">
@@ -1342,6 +1356,42 @@ export default function Portaria({ user }: PortariaProps) {
               <p className="text-zinc-500">Tente buscar por outro nome ou unidade.</p>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Modal de Foto */}
+      {viewPhotoUrl && (
+        <div className="fixed inset-0 bg-black/90 z-[70] flex items-center justify-center p-4 backdrop-blur-md animate-in fade-in duration-300">
+          <div className="relative max-w-4xl w-full max-h-[90vh] flex flex-col items-center">
+            <button 
+              onClick={() => setViewPhotoUrl(null)}
+              className="absolute -top-12 right-0 text-white bg-white/10 hover:bg-white/20 p-2 rounded-full transition-all"
+            >
+              <Plus className="w-6 h-6 rotate-45" />
+            </button>
+            <img 
+              src={viewPhotoUrl} 
+              alt="Foto da etiqueta" 
+              className="max-w-full max-h-[80vh] object-contain rounded-2xl shadow-2xl border-4 border-white/10"
+              referrerPolicy="no-referrer"
+            />
+            <div className="mt-6 flex gap-4">
+              <button
+                onClick={() => setViewPhotoUrl(null)}
+                className="bg-white text-zinc-900 px-8 py-3 rounded-xl font-bold hover:bg-zinc-100 transition-all"
+              >
+                Fechar
+              </button>
+              <a 
+                href={viewPhotoUrl} 
+                target="_blank" 
+                rel="noopener noreferrer"
+                className="bg-emerald-600 text-white px-8 py-3 rounded-xl font-bold hover:bg-emerald-700 transition-all flex items-center gap-2"
+              >
+                Abrir imagem original
+              </a>
+            </div>
+          </div>
         </div>
       )}
 

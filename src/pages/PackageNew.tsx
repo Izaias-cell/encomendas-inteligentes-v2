@@ -227,10 +227,11 @@ export default function PackageNew({ user }: PackageNewProps) {
       // 1. Inicia o upload em segundo plano (não bloqueia)
       const uploadPromise = (async () => {
         try {
-          const res = await fetch(finalBase64);
+          // Usamos a imagem original (base64) para o histórico/conferência
+          const res = await fetch(base64);
           const blob = await res.blob();
-          const file = new File([blob], "package.jpg", { type: "image/jpeg" });
-          const fileName = `${Math.random()}.jpg`;
+          const file = new File([blob], "package_original.jpg", { type: "image/jpeg" });
+          const fileName = `${Date.now()}_${Math.random().toString(36).substring(7)}.jpg`;
           const filePath = `package-photos/${fileName}`;
           
           const { error: uploadError } = await supabase.storage
@@ -248,6 +249,7 @@ export default function PackageNew({ user }: PackageNewProps) {
         }
       })();
 
+      // Para exibição imediata no UI, usamos a versão comprimida (mais leve)
       setPhotoUrl(finalBase64);
 
       // 2. OCR Básico (Rápido)

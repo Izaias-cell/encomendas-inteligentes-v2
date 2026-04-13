@@ -7,13 +7,9 @@ const ai = new GoogleGenAI({ apiKey });
 export async function extractBasicText(base64Image: string) {
   const model = "gemini-3-flash-preview";
   
-  const prompt = `Extraia os dados essenciais desta etiqueta de encomenda:
-  - recipientName: Nome do destinatário.
-  - unitNumber: Número da casa ou apartamento.
-  - carrier: Nome da transportadora (ex: Correios, Jadlog, Shopee, Mercado Livre, Amazon, Loggi, Total Express, DHL, FedEx, Sequoia).
-  - trackingNumber: Código de rastreio (priorize padrões como BR...BR, CR..., FA..., NF..., PR... ou sequências alfanuméricas de 8+ caracteres).
-  
-  Seja extremamente rápido e foque apenas no que for mais legível. Retorne apenas o JSON.`;
+  const prompt = `Extraia APENAS o nome do destinatário (nome e sobrenome) e o número da unidade (casa/apto) desta etiqueta de encomenda. 
+  Ignore completamente CEP, cidade, estado, endereço completo, códigos de rastreio e transportadora.
+  Seja extremamente rápido. Retorne apenas o JSON.`;
 
   try {
     const response = await ai.models.generateContent({
@@ -38,9 +34,7 @@ export async function extractBasicText(base64Image: string) {
           type: Type.OBJECT,
           properties: {
             recipientName: { type: Type.STRING },
-            unitNumber: { type: Type.STRING },
-            carrier: { type: Type.STRING },
-            trackingNumber: { type: Type.STRING }
+            unitNumber: { type: Type.STRING }
           }
         }
       },
@@ -62,11 +56,11 @@ export async function analyzePackageLabel(base64Image: string, residentList?: st
     ? `\nCONTEXTO: Os seguintes moradores estão cadastrados neste condomínio. Use esta lista para priorizar o match de Nome e Unidade:\n${residentList.join('\n')}`
     : '';
 
-  const prompt = `Extraia os dados desta etiqueta de encomenda para o sistema "Portaria Inteligente":
-  - recipientName: Nome do morador (destinatário).
+  const prompt = `Extraia os dados essenciais desta etiqueta de encomenda para o sistema "Portaria Inteligente":
+  - recipientName: Nome e sobrenome do morador (destinatário).
   - unitDetails: Número da unidade/casa e tipo (Apartamento, Casa, etc).
-  - carrier: Transportadora (priorize: Correios, Jadlog, Shopee, Mercado Livre, Amazon, Loggi, Total Express, DHL, FedEx, Sequoia).
-  - trackingNumber: Código de rastreio (priorize padrões: BR...BR, CR..., FA..., NF..., PR... ou alfanuméricos de 8+ caracteres).
+  
+  Ignore completamente CEP, cidade, estado, endereço completo, códigos de rastreio e transportadora.
   ${residentContext}
   Retorne apenas o JSON conforme o esquema definido.`;
 
@@ -110,23 +104,9 @@ export async function analyzePackageLabel(base64Image: string, residentList?: st
                 complement: { type: Type.STRING },
                 confidence: { type: Type.NUMBER }
               }
-            },
-            carrier: {
-              type: Type.OBJECT,
-              properties: {
-                value: { type: Type.STRING },
-                confidence: { type: Type.NUMBER }
-              }
-            },
-            trackingNumber: {
-              type: Type.OBJECT,
-              properties: {
-                value: { type: Type.STRING },
-                confidence: { type: Type.NUMBER }
-              }
             }
           },
-          required: ["recipientName", "unitDetails", "carrier"]
+          required: ["recipientName", "unitDetails"]
         }
       },
     });

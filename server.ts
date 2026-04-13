@@ -20,6 +20,12 @@ const supabase = createClient(supabaseUrl, supabaseAnonKey);
 // Admin client for bypassing RLS (uses service role key)
 const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey || supabaseAnonKey);
 
+if (!supabaseServiceKey) {
+  console.warn("[DEBUG BACKEND] AVISO: SUPABASE_SERVICE_ROLE_KEY não encontrada. As ações administrativas podem falhar devido ao RLS.");
+} else {
+  console.log("[DEBUG BACKEND] SUPABASE_SERVICE_ROLE_KEY encontrada. Cliente admin inicializado.");
+}
+
 async function startServer() {
   const formatSafeDateTime = (value: any) => {
   if (!value) return "-";
@@ -185,6 +191,40 @@ const app = express();
       });
     } catch (err) {
       console.error("Code validation error:", err);
+      res.status(500).json({ error: "Erro interno do servidor" });
+    }
+  });
+
+  // Fetch single package by pickup token
+  app.get("/api/portal/package/:token", async (req, res) => {
+    try {
+      const { token } = req.params;
+
+      // Fetch package by pickup token or pickup code
+      const { data: pkg, error: pkgError } = await supabaseAdmin
+        .from('packages')
+        .select('*, moradores(*), condominiums(*)')
+        .or(`pickup_token.eq.${token},pickup_code.eq.${token}`)
+        .maybeSingle();
+
+      if (pkgError || !pkg) {
+        return res.status(404).json({ error: "Encomenda não encontrada ou link inválido" });
+      }
+
+      const resident = pkg.moradores;
+      const condo = pkg.condominiums;
+
+      if (!resident || !condo) {
+        return res.status(404).json({ error: "Dados do morador ou condomínio não encontrados" });
+      }
+
+      res.json({
+        package: pkg,
+        resident,
+        condominium: condo
+      });
+    } catch (err) {
+      console.error("Package token validation error:", err);
       res.status(500).json({ error: "Erro interno do servidor" });
     }
   });
@@ -410,13 +450,19 @@ const app = express();
 
       // Generate Portal Link
       const residentId = pkg.recipient_id;
+      const BASE_URL = process.env.APP_URL || "https://encomendas-inteligentes-v2.vercel.app";
       let portalLink = "";
+      let directPickupLink = "";
 
       if (residentId) {
         const token = await getOrCreatePortalToken(residentId, condominiumId);
         if (token) {
-          portalLink = `${process.env.APP_URL || 'http://localhost:3000'}/portal/${token}`;
+          portalLink = `${BASE_URL}/portal/${token}`;
         }
+      }
+
+      if (pkg.pickup_token) {
+        directPickupLink = `${BASE_URL}/retirada?token=${pkg.pickup_token}`;
       }
 
       // Fetch custom settings
@@ -438,7 +484,7 @@ Uma nova encomenda chegou para você na portaria.
 🔢 Código de Retirada: *${pkg.pickup_code || 'N/A'}*
 
 Você pode retirar sua encomenda apresentando o código acima ou o QR Code no link abaixo:
-${portalLink || `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${pkg.pickup_token}`}
+${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${pkg.pickup_token}`}
 
 *Portaria Inteligente*`;
 
@@ -689,6 +735,7 @@ ${portalLink || `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=$
     }
 
     const { email, password, full_name, phone, role, condominium_id } = req.body;
+    console.log("[DEBUG BACKEND] Criando novo usuário:", { email, full_name, role, condominium_id });
 
     // Síndico can only create users for their own condo and only roles 'porteiro' or 'resident'
     if (adminProfile.role === 'sindico') {
@@ -700,13 +747,14 @@ ${portalLink || `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=$
       }
     }
 
-    const { data: authData, error: createError } =
-  await supabaseAdmin.auth.admin.createUser({
-    email,
-    password,
-    email_confirm: true,
-    user_metadata: { full_name, role }
-  });
+    try {
+      // 1. Create user in Supabase Auth
+      const { data: authData, error: createError } = await supabaseAdmin.auth.admin.createUser({
+        email,
+        password,
+        email_confirm: true,
+        user_metadata: { full_name, role }
+      });
 
       if (createError) throw createError;
 
@@ -719,7 +767,7 @@ ${portalLink || `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=$
           email,
           phone,
           role,
-          condominium_id,
+          condominium_id: condominium_id || null,
           active: true,
           must_change_password: true,
           created_by: adminUser.id
@@ -763,6 +811,7 @@ ${portalLink || `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=$
 
     const { id } = req.params;
     const { full_name, phone, role, condominium_id, active } = req.body;
+    console.log("[DEBUG BACKEND] Atualizando usuário:", id, { full_name, phone, role, condominium_id, active });
 
     // Fetch target user to check permissions
     const { data: targetProfile } = await supabaseAdmin
@@ -791,6 +840,7 @@ ${portalLink || `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=$
     }
 
     try {
+      console.log("[DEBUG BACKEND] Iniciando atualização no Supabase para ID:", id);
       // Update profile
       const updateData: any = {
         updated_by: adminUser.id,
@@ -799,8 +849,10 @@ ${portalLink || `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=$
       if (full_name !== undefined) updateData.full_name = full_name;
       if (phone !== undefined) updateData.phone = phone;
       if (role !== undefined) updateData.role = role;
-      if (condominium_id !== undefined) updateData.condominium_id = condominium_id;
+      if (condominium_id !== undefined) updateData.condominium_id = condominium_id || null;
       if (active !== undefined) updateData.active = active;
+
+      console.log("[DEBUG BACKEND] Dados de atualização:", updateData);
 
       const { data: profile, error: profileError } = await supabaseAdmin
         .from('profiles')
@@ -809,11 +861,15 @@ ${portalLink || `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=$
         .select()
         .single();
 
-      if (profileError) throw profileError;
+      if (profileError) {
+        console.error("[DEBUG BACKEND] Erro ao atualizar perfil no Supabase:", profileError);
+        throw profileError;
+      }
 
+      console.log("[DEBUG BACKEND] Perfil atualizado com sucesso no Supabase:", profile.id);
       res.json({ profile });
     } catch (err: any) {
-      console.error("Erro ao atualizar usuário admin:", err);
+      console.error("[DEBUG BACKEND] Erro fatal no PATCH /api/admin/users/:id:", err);
       res.status(500).json({ error: err.message });
     }
   });
@@ -841,6 +897,7 @@ ${portalLink || `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=$
 
     const { id } = req.params;
     const { newPassword } = req.body;
+    console.log("[DEBUG BACKEND] Resetando senha para usuário:", id);
 
     // Síndico restrictions
     if (adminProfile.role === 'sindico') {
@@ -860,12 +917,18 @@ ${portalLink || `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=$
     }
 
     try {
+      console.log("[DEBUG BACKEND] Iniciando reset de senha no Auth para ID:", id);
       // 1. Update password in Auth
       const { error: authError } = await supabaseAdmin.auth.admin.updateUserById(id, {
         password: newPassword
       });
 
-      if (authError) throw authError;
+      if (authError) {
+        console.error("[DEBUG BACKEND] Erro ao resetar senha no Auth:", authError);
+        throw authError;
+      }
+
+      console.log("[DEBUG BACKEND] Senha resetada no Auth. Atualizando perfil...");
 
       // 2. Set must_change_password to true
       const { error: profileError } = await supabaseAdmin
@@ -873,11 +936,15 @@ ${portalLink || `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=$
         .update({ must_change_password: true })
         .eq('id', id);
 
-      if (profileError) throw profileError;
+      if (profileError) {
+        console.error("[DEBUG BACKEND] Erro ao atualizar must_change_password no perfil:", profileError);
+        throw profileError;
+      }
 
+      console.log("[DEBUG BACKEND] Reset de senha concluído com sucesso para:", id);
       res.json({ success: true });
     } catch (err: any) {
-      console.error("Erro ao resetar senha admin:", err);
+      console.error("[DEBUG BACKEND] Erro fatal no reset-password:", err);
       res.status(500).json({ error: err.message });
     }
   });
@@ -904,6 +971,7 @@ ${portalLink || `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=$
     }
 
     const { id } = req.params;
+    console.log(`[DEBUG BACKEND] Recebida requisição DELETE para usuário: ${id} por admin: ${adminUser.id}`);
 
     try {
       // Fetch target user to check permissions
@@ -913,36 +981,49 @@ ${portalLink || `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=$
         .eq('id', id)
         .single();
 
-      if (!targetProfile) return res.status(404).json({ error: "Usuário não encontrado." });
+      if (!targetProfile) {
+        console.warn(`[DEBUG BACKEND] Usuário ${id} não encontrado na tabela profiles.`);
+        return res.status(404).json({ error: "Usuário não encontrado." });
+      }
+
+      console.log(`[DEBUG BACKEND] Perfil encontrado: role=${targetProfile.role}, condo=${targetProfile.condominium_id}`);
 
       // Síndico restrictions
       if (adminProfile.role === 'sindico') {
         if (targetProfile.condominium_id !== adminProfile.condominium_id) {
+          console.warn(`[DEBUG BACKEND] Síndico ${adminUser.id} tentou excluir usuário de outro condomínio.`);
           return res.status(403).json({ error: "Síndicos só podem excluir usuários do seu próprio condomínio." });
         }
         if (targetProfile.role === 'admin' || targetProfile.role === 'sindico') {
+          console.warn(`[DEBUG BACKEND] Síndico ${adminUser.id} tentou excluir outro síndico/admin.`);
           return res.status(403).json({ error: "Síndicos não podem excluir outros síndicos ou administradores." });
         }
       }
 
+      console.log(`[DEBUG BACKEND] Deletando perfil de ${id}...`);
       // 1. Delete profile
       const { error: profileError } = await supabaseAdmin
         .from('profiles')
         .delete()
         .eq('id', id);
 
-      if (profileError) throw profileError;
+      if (profileError) {
+        console.error(`[DEBUG BACKEND] Erro ao deletar perfil:`, profileError);
+        throw profileError;
+      }
 
+      console.log(`[DEBUG BACKEND] Deletando usuário do Auth ${id}...`);
       // 2. Delete Auth user
       const { error: deleteError } = await supabaseAdmin.auth.admin.deleteUser(id);
       if (deleteError) {
-        console.error("Erro ao excluir usuário do Auth (perfil já excluído):", deleteError);
+        console.error("[DEBUG BACKEND] Erro ao excluir usuário do Auth (perfil já excluído):", deleteError);
         // We don't throw here because the profile is already gone, but it's a problem
       }
 
+      console.log(`[DEBUG BACKEND] Exclusão de ${id} concluída com sucesso.`);
       res.json({ success: true });
     } catch (err: any) {
-      console.error("Erro ao excluir usuário admin:", err);
+      console.error("[DEBUG BACKEND] Erro fatal na rota de exclusão:", err);
       res.status(500).json({ error: err.message });
     }
   });
