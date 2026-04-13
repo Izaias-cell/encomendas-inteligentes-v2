@@ -969,8 +969,8 @@ export default function Portaria({ user }: PortariaProps) {
       p.tracking_code?.toLowerCase().includes(searchTerm.toLowerCase())
     );
 
-    // Agrupamento para aba Pendentes
-    if (activeTab === 'pending') {
+    // Agrupamento para abas Pendentes e Retiradas
+    if (activeTab === 'pending' || activeTab === 'delivered') {
       const groups: { [key: string]: any[] } = {};
       filtered.forEach(pkg => {
         // Agrupar por pickup_token (ou pickup_code como fallback)
@@ -1106,7 +1106,9 @@ export default function Portaria({ user }: PortariaProps) {
                   </div>
                   <div className="flex flex-col items-end gap-1">
                     <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider ${pkg.status === 'delivered' ? 'bg-zinc-100 text-zinc-600' : 'bg-amber-100 text-amber-700'}`}>
-                      {pkg.status === 'delivered' ? 'Retirada' : (pkg.isGroup ? `${pkg.count} Pendentes` : 'Pendente')}
+                      {pkg.status === 'delivered' 
+                        ? (pkg.isGroup ? `${pkg.count} Retiradas` : 'Retirada') 
+                        : (pkg.isGroup ? `${pkg.count} Pendentes` : 'Pendente')}
                     </span>
                   </div>
                 </div>

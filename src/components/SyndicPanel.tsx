@@ -401,7 +401,7 @@ const Dashboard = ({ user, residents = [], logs = [], systemStatus }: any) => {
 
 // --- Packages Component ---
 
-const PackagesList = ({ user }: any) => {
+const PackagesList = ({ user, counts: externalCounts }: any) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [filterStatus, setFilterStatus] = useState('all');
   const [packages, setPackages] = useState<any[]>([]);
@@ -526,7 +526,8 @@ const PackagesList = ({ user }: any) => {
     }
   };
 
-  const [counts, setCounts] = useState({ all: 0, pending: 0, delivered: 0 });
+  const [localCounts, setLocalCounts] = useState({ all: 0, pending: 0, delivered: 0 });
+  const counts = externalCounts || localCounts;
 
   const fetchPackages = async () => {
     if (!user?.condominium_id) {
@@ -562,7 +563,7 @@ const PackagesList = ({ user }: any) => {
       const pendingData = allData.filter(p => !p.delivered_at || p.status !== 'delivered');
       const deliveredData = allData.filter(p => p.status === 'delivered' || p.delivered_at);
 
-      setCounts({
+      setLocalCounts({
         all: allData.length,
         pending: pendingData.length,
         delivered: deliveredData.length
@@ -2520,6 +2521,7 @@ export default function SyndicPanel({ user, onLogout, onUpdateUser }: { user: Pr
   const location = useLocation();
 
   const [activeTab, setActiveTab] = useState('dashboard');
+  const [packageCounts, setPackageCounts] = useState({ all: 0, pending: 0, delivered: 0 });
 
   useEffect(() => {
     if (user && user.must_change_password && location.pathname !== '/change-password') {
@@ -2529,6 +2531,44 @@ export default function SyndicPanel({ user, onLogout, onUpdateUser }: { user: Pr
     fetchInitialData();
     checkSystemStatus();
   }, [user, location.pathname]);
+
+  // Real-time package counts
+  useEffect(() => {
+    if (!user?.condominium_id) return;
+
+    const fetchCounts = async () => {
+      const { data, error } = await supabase
+        .from('packages')
+        .select('status, delivered_at')
+        .eq('condominium_id', user.condominium_id);
+
+      if (data) {
+        const all = data.length;
+        const pending = data.filter(p => !p.delivered_at || p.status !== 'delivered').length;
+        const delivered = data.filter(p => p.status === 'delivered' || p.delivered_at).length;
+        setPackageCounts({ all, pending, delivered });
+      }
+    };
+
+    fetchCounts();
+
+    // Subscribe to changes
+    const channel = supabase
+      .channel('package-counts-syndic')
+      .on('postgres_changes', { 
+        event: '*', 
+        schema: 'public', 
+        table: 'packages',
+        filter: `condominium_id=eq.${user.condominium_id}`
+      }, () => {
+        fetchCounts();
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [user?.condominium_id]);
 
   const checkSystemStatus = async () => {
     try {
@@ -2575,7 +2615,7 @@ export default function SyndicPanel({ user, onLogout, onUpdateUser }: { user: Pr
 
   const menuItems = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-    { id: 'encomendas', label: 'Encomendas', icon: Package },
+    { id: 'encomendas', label: `Encomendas (${packageCounts.all})`, icon: Package },
     { id: 'historico', label: 'Histórico', icon: History },
     { id: 'moradores', label: `MORADORES (${activeResidentsCount})`, icon: Users },
     { id: 'moradores_desativados', label: 'Moradores Desativados', icon: XCircle },
@@ -2592,7 +2632,7 @@ export default function SyndicPanel({ user, onLogout, onUpdateUser }: { user: Pr
       case 'dashboard':
         return <Dashboard user={user} residents={residents} logs={logs} systemStatus={systemStatus} />;
       case 'encomendas':
-        return <PackagesList user={user} />;
+        return <PackagesList user={user} counts={packageCounts} />;
       case 'historico':
         return <HistoryTab user={user} />;
       case 'moradores':

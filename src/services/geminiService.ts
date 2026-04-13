@@ -4,12 +4,52 @@ import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
 const apiKey = process.env.GEMINI_API_KEY || "";
 const ai = new GoogleGenAI({ apiKey });
 
+export async function getRawTextFromImage(base64Image: string): Promise<string | null> {
+  const model = "gemini-3-flash-preview";
+  
+  const prompt = "Extraia todo o texto visível desta etiqueta de encomenda. Retorne apenas o texto bruto, linha por linha, exatamente como aparece.";
+
+  try {
+    const response = await ai.models.generateContent({
+      model,
+      contents: [
+        {
+          parts: [
+            { text: prompt },
+            {
+              inlineData: {
+                mimeType: "image/jpeg",
+                data: base64Image.split(',')[1] || base64Image
+              }
+            }
+          ]
+        }
+      ],
+      config: {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
+      },
+    });
+
+    return response.text || null;
+  } catch (e) {
+    console.error("Erro no OCR bruto:", e);
+    return null;
+  }
+}
+
 export async function extractBasicText(base64Image: string) {
   const model = "gemini-3-flash-preview";
   
-  const prompt = `Extraia APENAS o nome do destinatário (nome e sobrenome) e o número da unidade (casa/apto) desta etiqueta de encomenda. 
-  Ignore completamente CEP, cidade, estado, endereço completo, códigos de rastreio e transportadora.
-  Seja extremamente rápido. Retorne apenas o JSON.`;
+  const prompt = `Extraia o nome do destinatário e o número da unidade (casa/apto) desta etiqueta de encomenda.
+  
+  DIRETRIZES:
+  1. Priorize velocidade e precisão básica.
+  2. Se o nome não estiver claro, extraia o que parecer ser o nome do destinatário.
+  3. Se a unidade não estiver clara, extraia qualquer número que pareça ser a casa ou apartamento (ex: "Casa 12", "Apto 101", "142").
+  4. Ignore CEP, cidade, estado, endereço completo, códigos de rastreio e transportadora, A MENOS que ajudem a identificar o morador.
+  5. Se encontrar apenas um dos dados (só nome ou só unidade), retorne o que encontrou.
+  
+  Retorne APENAS o JSON.`;
 
   try {
     const response = await ai.models.generateContent({
@@ -33,8 +73,10 @@ export async function extractBasicText(base64Image: string) {
         responseSchema: {
           type: Type.OBJECT,
           properties: {
-            recipientName: { type: Type.STRING },
-            unitNumber: { type: Type.STRING }
+            recipientName: { type: Type.STRING, description: "Nome aproximado ou exato do destinatário" },
+            unitNumber: { type: Type.STRING, description: "Número da casa ou apartamento encontrado" },
+            carrier: { type: Type.STRING, description: "Nome da transportadora (opcional)" },
+            trackingNumber: { type: Type.STRING, description: "Código de rastreio (opcional)" }
           }
         }
       },
@@ -53,16 +95,23 @@ export async function analyzePackageLabel(base64Image: string, residentList?: st
   const model = "gemini-3-flash-preview";
   
   const residentContext = residentList && residentList.length > 0 
-    ? `\nCONTEXTO: Os seguintes moradores estão cadastrados neste condomínio. Use esta lista para priorizar o match de Nome e Unidade:\n${residentList.join('\n')}`
+    ? `\nCONTEXTO: Os seguintes moradores estão cadastrados neste condomínio. Use esta lista para tentar encontrar o melhor match, mesmo que o nome na etiqueta esteja abreviado ou com pequenos erros:\n${residentList.join('\n')}`
     : '';
 
-  const prompt = `Extraia os dados essenciais desta etiqueta de encomenda para o sistema "Portaria Inteligente":
-  - recipientName: Nome e sobrenome do morador (destinatário).
-  - unitDetails: Número da unidade/casa e tipo (Apartamento, Casa, etc).
+  const prompt = `Analise esta etiqueta de encomenda e identifique o morador destinatário.
   
-  Ignore completamente CEP, cidade, estado, endereço completo, códigos de rastreio e transportadora.
+  OBJETIVO:
+  - Identificar o nome do morador (mesmo que parcial ou aproximado).
+  - Identificar a unidade (casa/apto).
+  
+  REGRAS:
+  - Seja tolerante com erros de OCR ou abreviações.
+  - Se houver uma lista de moradores no contexto, tente associar a etiqueta a um deles.
+  - Extraia o que for possível, mesmo que incompleto.
+  
   ${residentContext}
-  Retorne apenas o JSON conforme o esquema definido.`;
+  
+  Retorne o JSON conforme o esquema.`;
 
   try {
     const response = await ai.models.generateContent({
@@ -104,9 +153,20 @@ export async function analyzePackageLabel(base64Image: string, residentList?: st
                 complement: { type: Type.STRING },
                 confidence: { type: Type.NUMBER }
               }
+            },
+            carrier: {
+              type: Type.OBJECT,
+              properties: {
+                value: { type: Type.STRING }
+              }
+            },
+            trackingNumber: {
+              type: Type.OBJECT,
+              properties: {
+                value: { type: Type.STRING }
+              }
             }
-          },
-          required: ["recipientName", "unitDetails"]
+          }
         }
       },
     });

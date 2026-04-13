@@ -18,20 +18,18 @@ import {
   Hash,
   Info,
   Zap,
-  ZapOff,
-  Copy,
-  MessageCircle
+  ZapOff
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { Profile, Morador, CondominiumSettings } from '../types';
 import toast from 'react-hot-toast';
 import { logAction } from '../services/auditService';
-import { analyzePackageLabel, extractBasicText } from '../services/geminiService';
+import { getRawTextFromImage } from '../services/geminiService';
+import { parseLabelText } from '../services/labelParser';
 import { findMatchingResidents, ScoredResident } from '../services/residentMatcher';
 import { formatResidentAddress } from '../lib/residentUtils';
 import { motion, AnimatePresence } from 'motion/react';
 import { generatePickupCode, prepareWhatsAppNotification, sendWhatsAppMessage } from '../services/whatsappService';
-import { QRCodeSVG } from 'qrcode.react';
 
 interface PackageNewProps {
   user: Profile;
@@ -72,9 +70,6 @@ export default function PackageNew({ user }: PackageNewProps) {
   const [allCondoResidents, setAllCondoResidents] = useState<Morador[]>([]);
   const [cameraActive, setCameraActive] = useState(false);
   const [flashOn, setFlashOn] = useState(false);
-  const [showSuccessModal, setShowSuccessModal] = useState(false);
-  const [lastSavedPackage, setLastSavedPackage] = useState<any>(null);
-  const [currentMessage, setCurrentMessage] = useState('');
   const [condoSettings, setCondoSettings] = useState<CondominiumSettings | null>(null);
   const [isAmbiguous, setIsAmbiguous] = useState(false);
   const [statusMessage, setStatusMessage] = useState('Lendo dados...');
@@ -211,7 +206,7 @@ export default function PackageNew({ user }: PackageNewProps) {
   const processImage = async (base64: string) => {
     setStep('analyzing');
     setLoading(true);
-    setStatusMessage('Lendo nome...');
+    setStatusMessage('Extraindo texto...');
     
     try {
       let finalBase64 = base64;
@@ -219,15 +214,14 @@ export default function PackageNew({ user }: PackageNewProps) {
       // Otimização: Redimensionar e comprimir antes de enviar para IA
       try {
         const { compressImage } = await import('../lib/imageUtils');
-        finalBase64 = await compressImage(base64, 900, 0.65);
+        finalBase64 = await compressImage(base64, 1000, 0.7); // Qualidade um pouco maior para OCR bruto
       } catch (err) {
         console.warn('Falha ao comprimir imagem:', err);
       }
 
-      // 1. Inicia o upload em segundo plano (não bloqueia)
+      // 1. Inicia o upload em segundo plano
       const uploadPromise = (async () => {
         try {
-          // Usamos a imagem original (base64) para o histórico/conferência
           const res = await fetch(base64);
           const blob = await res.blob();
           const file = new File([blob], "package_original.jpg", { type: "image/jpeg" });
@@ -249,106 +243,43 @@ export default function PackageNew({ user }: PackageNewProps) {
         }
       })();
 
-      // Para exibição imediata no UI, usamos a versão comprimida (mais leve)
       setPhotoUrl(finalBase64);
 
-      // 2. OCR Básico (Rápido)
-      const basicData = await extractBasicText(finalBase64);
+      // 2. Extração de Texto Bruto (OCR Simples)
+      const rawText = await getRawTextFromImage(finalBase64);
       
-      let foundStrongMatch = false;
-      let shouldCallSupportIA = true;
-      const hasInsufficientText = !basicData || (!basicData.recipientName && !basicData.unitNumber);
+      if (!rawText || rawText.length < 5) {
+        throw new Error("Nenhum texto legível encontrado na etiqueta.");
+      }
 
-      // Pre-fill carrier and tracking from basic OCR if available
-      if (basicData?.carrier) setCarrier(basicData.carrier);
-      if (basicData?.trackingNumber) setTrackingNumber(basicData.trackingNumber);
+      // 3. Processamento do Texto (Lógica Simples)
+      setStatusMessage('Processando dados...');
+      const parsedData = parseLabelText(rawText);
+      
+      if (parsedData.recipientName) setRecipientName(parsedData.recipientName);
+      if (parsedData.unitNumber) setUnitNumber(parsedData.unitNumber);
 
-      if (!hasInsufficientText && user?.condominium_id) {
+      // 4. Busca Inteligente e Cruzamento com Moradores
+      if ((parsedData.recipientName || parsedData.unitNumber) && user?.condominium_id) {
         setStatusMessage('Buscando morador...');
         const matches = await findMatchingResidents(
           user.condominium_id,
-          basicData.unitNumber || '',
-          basicData.recipientName || '',
-          { street: basicData.street }
+          parsedData.unitNumber,
+          parsedData.recipientName
         );
 
         if (matches.length > 0) {
           const topMatch = matches[0];
-          // Se for um match muito forte (exato), usamos ele e pulamos a IA completa
-          if (topMatch.score >= 180) {
+          // Se for um match forte, já selecionamos
+          if (topMatch.score >= 150) {
             setRecipientName(topMatch.resident.nome);
             setUnitNumber(topMatch.resident.unidade);
             setUnitType(topMatch.resident.unit_type || '');
-            if (basicData.carrier) setCarrier(basicData.carrier);
-            if (basicData.trackingNumber) setTrackingNumber(basicData.trackingNumber);
             handleSelectResident(topMatch.resident);
-            setStatusMessage('Morador encontrado');
-            foundStrongMatch = true;
-            shouldCallSupportIA = false;
+            setStatusMessage('Morador identificado');
           } else {
             setMatchingResidents(matches.slice(0, 3));
-            const strongCandidates = matches.filter(m => m.score >= 120);
-            if (strongCandidates.length > 1) {
-              setIsAmbiguous(true);
-              setStatusMessage('Selecione o morador');
-              // Ambiguidade forte: IA de apoio pode ajudar a desempatar
-              shouldCallSupportIA = true;
-            } else if (strongCandidates.length === 1) {
-              // Apenas um candidato razoável, mas não "perfeito"
-              // Vamos tentar a IA de apoio para ter certeza
-              shouldCallSupportIA = true;
-            }
-          }
-        }
-      }
-
-      // 3. IA de Apoio (Apenas se necessário)
-      if (shouldCallSupportIA && !foundStrongMatch) {
-        setStatusMessage(hasInsufficientText ? 'Analisando etiqueta...' : 'Refinando busca...');
-        const residentList = allCondoResidents.map(r => `${r.nome} - ${r.unidade}`);
-        const data = await analyzePackageLabel(finalBase64, residentList);
-
-        if (data) {
-          if (data.carrier?.value) setCarrier(data.carrier.value);
-          if (data.trackingNumber?.value) setTrackingNumber(data.trackingNumber.value);
-          
-          const ocrName = data.recipientName?.value || '';
-          const ocrUnit = data.unitDetails?.number || data.unitDetails?.full_string || '';
-          const ocrType = data.unitDetails?.type || '';
-          
-          if (!selectedResident) {
-            setRecipientName(ocrName);
-            setUnitNumber(ocrUnit);
-            setUnitType(ocrType);
-
-            const matches = await findMatchingResidents(
-              user.condominium_id || '',
-              data.unitDetails?.full_string || '',
-              ocrName,
-              data.unitDetails
-            );
-            
-            if (matches.length > 0) {
-              const filteredMatches = matches.filter(m => m.score >= 50).slice(0, 3);
-              setMatchingResidents(filteredMatches);
-              
-              const strongCandidates = filteredMatches.filter(m => m.score >= 120);
-              if (strongCandidates.length > 1) {
-                setIsAmbiguous(true);
-                setStatusMessage('Selecione o morador');
-              } else {
-                setIsAmbiguous(false);
-                const topMatch = filteredMatches[0];
-                if (topMatch.score >= 120) {
-                  handleSelectResident(topMatch.resident);
-                  setStatusMessage('Morador encontrado');
-                } else {
-                  setStatusMessage('Selecione o morador');
-                }
-              }
-            } else {
-              setStatusMessage('Morador não identificado');
-            }
+            setStatusMessage('Selecione o morador');
           }
         }
       }
@@ -357,7 +288,8 @@ export default function PackageNew({ user }: PackageNewProps) {
       setStep('confirmation');
     } catch (err) {
       console.error("Erro no processamento:", err);
-      setStep('manual');
+      setStep('confirmation'); 
+      toast.error("Não foi possível ler todos os dados automaticamente.");
     } finally {
       setLoading(false);
     }
@@ -478,6 +410,22 @@ export default function PackageNew({ user }: PackageNewProps) {
     }
   };
 
+  const resetForm = () => {
+    setStep('camera');
+    setSelectedResident(null);
+    setRecipientName('');
+    setUnitNumber('');
+    setUnitType('');
+    setCarrier('');
+    setTrackingNumber('');
+    setNotes('');
+    setPhotoUrl('');
+    setSearchTerm('');
+    setMatchingResidents([]);
+    setPickupCode(generatePickupCode());
+    setIsAmbiguous(false);
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedResident || !user) {
@@ -577,11 +525,39 @@ export default function PackageNew({ user }: PackageNewProps) {
         return;
       }
 
-      // 3. Notificação via WhatsApp (Fluxo em Lote)
-      // O status já foi definido como 'pending' no insert inicial.
-      // O envio será feito em lote pelo painel da portaria.
+      // 3. Notificação via WhatsApp (Execução imediata se possível)
       if (selectedResident.telefone && whatsappMessage) {
-        setCurrentMessage(whatsappMessage);
+        if (condoSettings?.whatsapp_mode === 'api_automatica') {
+          try {
+            const result = await sendWhatsAppMessage(selectedResident.telefone, whatsappMessage, user.condominium_id, {
+              api_url: condoSettings.api_url,
+              api_token: condoSettings.api_token,
+              instance_id: condoSettings.instance_id,
+              whatsapp_provider: condoSettings.whatsapp_provider
+            });
+            
+            if (result.status_envio === 'sucesso') {
+              const now = new Date().toISOString();
+              await supabase
+                .from('packages')
+                .update({ 
+                  whatsapp_status: 'enviado', 
+                  last_notification_at: now,
+                  whatsapp_sent_at: now,
+                  notification_mode: 'api'
+                })
+                .eq('id', newPackage.id);
+            }
+          } catch (err) {
+            console.error('Erro no envio automático:', err);
+          }
+        } else if (condoSettings?.whatsapp_mode === 'manual_assistido') {
+          // Se for manual assistido, abre o link em nova aba
+          const phone = selectedResident.telefone.replace(/\D/g, '');
+          const formattedPhone = phone.startsWith('55') ? phone : `55${phone}`;
+          const encodedMessage = encodeURIComponent(whatsappMessage);
+          window.open(`https://wa.me/${formattedPhone}?text=${encodedMessage}`, '_blank');
+        }
       }
 
       // Log action
@@ -604,9 +580,8 @@ export default function PackageNew({ user }: PackageNewProps) {
         console.warn('Erro ao logar ação:', logErr);
       }
 
-      setLastSavedPackage(newPackage);
-      setShowSuccessModal(true);
-      toast.success('Encomenda salva com sucesso!');
+      toast.success('Encomenda registrada com sucesso!');
+      resetForm();
     } catch (error: any) {
       toast.error('Erro inesperado: ' + error.message);
     } finally {
@@ -1013,98 +988,7 @@ export default function PackageNew({ user }: PackageNewProps) {
           )}
         </AnimatePresence>
 
-        {/* Success Modal with QR Code */}
-        <AnimatePresence>
-          {showSuccessModal && lastSavedPackage && (
-            <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-6 backdrop-blur-sm">
-              <motion.div 
-                initial={{ scale: 0.9, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                exit={{ scale: 0.9, opacity: 0 }}
-                className="bg-white rounded-[2.5rem] max-w-sm w-full p-8 text-center shadow-2xl"
-              >
-                <div className="w-20 h-20 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-6">
-                  <CheckCircle className="w-10 h-10" />
-                </div>
-                
-                <h3 className="text-2xl font-bold text-gray-900 mb-2">Encomenda Registrada!</h3>
-                <p className="text-gray-500 mb-8">A encomenda para <span className="font-semibold text-gray-900">{selectedResident?.nome}</span> foi salva com sucesso.</p>
-                
-                <div className="bg-gray-50 p-6 rounded-3xl border-2 border-dashed border-gray-200 mb-8">
-                  <div className="bg-white p-4 rounded-2xl shadow-sm inline-block mb-4">
-                    <QRCodeSVG 
-                      value={JSON.stringify({
-                        id: lastSavedPackage.id,
-                        code: lastSavedPackage.pickup_code,
-                        token: lastSavedPackage.pickup_token
-                      })} 
-                      size={180} 
-                    />
-                  </div>
-                  <div className="flex flex-col items-center">
-                    <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Código de Retirada</span>
-                    <span className="text-3xl font-black text-indigo-600 tracking-widest">{lastSavedPackage.pickup_code}</span>
-                  </div>
-                </div>
-
-                <div className="space-y-3">
-                  {selectedResident?.telefone && (
-                    <div className="grid grid-cols-2 gap-3">
-                      <button 
-                        onClick={() => {
-                          const phone = selectedResident.telefone.replace(/\D/g, '');
-                          const formattedPhone = phone.startsWith('55') ? phone : `55${phone}`;
-                          const encodedMessage = encodeURIComponent(currentMessage);
-                          window.open(`https://wa.me/${formattedPhone}?text=${encodedMessage}`, '_blank');
-                        }}
-                        className="flex items-center justify-center gap-2 bg-emerald-600 text-white py-4 rounded-2xl font-bold hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-100"
-                      >
-                        <MessageCircle className="w-5 h-5" />
-                        WhatsApp
-                      </button>
-                      <button 
-                        onClick={() => {
-                          navigator.clipboard.writeText(currentMessage);
-                          toast.success('Mensagem copiada!');
-                        }}
-                        className="flex items-center justify-center gap-2 bg-gray-100 text-gray-700 py-4 rounded-2xl font-bold hover:bg-gray-200 transition-all"
-                      >
-                        <Copy className="w-5 h-5" />
-                        Copiar
-                      </button>
-                    </div>
-                  )}
-                  <button 
-                    onClick={() => navigate('/portaria')}
-                    className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100"
-                  >
-                    Ir para Portaria
-                  </button>
-                  <button 
-                    onClick={() => {
-                      setShowSuccessModal(false);
-                      setLastSavedPackage(null);
-                      setSelectedResident(null);
-                      setRecipientName('');
-                      setUnitNumber('');
-                      setUnitType('');
-                      setCarrier('');
-                      setTrackingNumber('');
-                      setNotes('');
-                      setPhotoUrl('');
-                      setStep('manual');
-                      // Regenerate code for next one
-                      setPickupCode(generatePickupCode());
-                    }}
-                    className="w-full bg-gray-100 text-gray-600 py-4 rounded-2xl font-bold hover:bg-gray-200 transition-all"
-                  >
-                    Registrar Outra
-                  </button>
-                </div>
-              </motion.div>
-            </div>
-          )}
-        </AnimatePresence>
+        {/* Success Modal with QR Code removed for continuous flow */}
       </div>
     </div>
   );

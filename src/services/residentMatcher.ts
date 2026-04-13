@@ -154,7 +154,6 @@ export const findMatchingResidents = async (
   if (!allResidents || allResidents.length === 0) return [];
 
   // 1.5 Determine if street is a relevant differentiator
-  // If most residents share the same street, it's not useful for disambiguation
   const streetFrequency: Record<string, number> = {};
   let totalWithStreet = 0;
   allResidents.forEach(r => {
@@ -167,9 +166,6 @@ export const findMatchingResidents = async (
 
   const distinctStreets = Object.keys(streetFrequency).length;
   const maxFreq = Math.max(0, ...Object.values(streetFrequency));
-  
-  // Street is relevant ONLY if there's more than one street 
-  // AND no single street dominates too much (e.g., > 80% of those who have a street)
   const isStreetRelevant = totalWithStreet > 0 && distinctStreets > 1 && (maxFreq / totalWithStreet) < 0.8;
 
   // 2. Fetch history (last 50 packages) to boost confidence
@@ -191,7 +187,7 @@ export const findMatchingResidents = async (
     if ((unit || details) && !isLikelyTrackingCode) {
       // 1. Exact number match (Highest Priority)
       if (r.unidade && effectiveOcrNum && r.unidade.toString() === effectiveOcrNum.toString()) {
-        score += 80;
+        score += 90; // Increased from 80
         
         // 2. Unit type match (Bonus)
         if (resType && ocrType && resType === ocrType) {
@@ -199,11 +195,14 @@ export const findMatchingResidents = async (
         }
         
         // 3. Block/Tower match (Bonus)
-        if (!r.bloco || !ocrBlock || normalizeUnit(r.bloco) === ocrBlock) score += 10;
-        if (!r.lote || !ocrTower || normalizeUnit(r.lote) === ocrTower) score += 10;
+        if (!r.bloco || !ocrBlock || normalizeUnit(r.bloco) === ocrBlock) score += 15;
+        if (!r.lote || !ocrTower || normalizeUnit(r.lote) === ocrTower) score += 15;
+      } else if (r.unidade && effectiveOcrNum && r.unidade.toString().includes(effectiveOcrNum.toString())) {
+        // Partial unit match (e.g. OCR read "10" but unit is "101") - Lower score but still useful
+        score += 30;
       }
 
-      // Street match (Bonus) - Only if street is a relevant differentiator in this condo
+      // Street match (Bonus)
       if (isStreetRelevant) {
         const resStreet = normalizeName(r.street || '');
         if (resStreet && ocrStreet && (resStreet === ocrStreet || resStreet.includes(ocrStreet) || ocrStreet.includes(resStreet))) {
@@ -219,17 +218,16 @@ export const findMatchingResidents = async (
 
       // Exact match
       if (resName === normalizedOcrName) {
-        score += 100;
-        // Bonus for full name (more than one part)
+        score += 110; // Increased from 100
         if (resParts.length > 1) {
-          score += 20;
+          score += 25;
         }
       } 
       // Partial match (contains)
       else if (resName.includes(normalizedOcrName) || normalizedOcrName.includes(resName)) {
-        score += 60;
+        score += 70; // Increased from 60
         if (resName.startsWith(normalizedOcrName) || normalizedOcrName.startsWith(resName)) {
-          score += 20;
+          score += 25;
         }
         // Bonus if multiple parts match
         let partMatches = 0;
@@ -239,14 +237,14 @@ export const findMatchingResidents = async (
           }
         });
         if (partMatches > 1) {
-          score += 30;
+          score += 40; // Increased from 30
         }
       } 
       // Fuzzy match
       else {
         const distance = getLevenshteinDistance(normalizedOcrName, resName);
         if (distance <= 2) {
-          score += 80;
+          score += 85; // Increased from 80
         } else {
           // Match by parts
           let partMatches = 0;
@@ -257,7 +255,7 @@ export const findMatchingResidents = async (
           });
 
           if (partMatches > 0) {
-            score += (partMatches / Math.max(ocrParts.length, resParts.length)) * 70;
+            score += (partMatches / Math.max(ocrParts.length, resParts.length)) * 80; // Increased from 70
           }
         }
       }
@@ -268,10 +266,10 @@ export const findMatchingResidents = async (
       const residentHistory = history.filter(h => h.recipient_id === r.id);
       if (residentHistory.length > 0) {
         const unitMatch = residentHistory.some(h => normalizeUnit(h.unit_number) === normalizedOcrUnit);
-        if (unitMatch) score += 20;
+        if (unitMatch) score += 25;
         
         const nameMatch = residentHistory.some(h => normalizeName(h.recipient_name_raw) === normalizedOcrName);
-        if (nameMatch) score += 15;
+        if (nameMatch) score += 20;
       }
     }
 
@@ -279,7 +277,7 @@ export const findMatchingResidents = async (
   });
 
   // Filter and sort by score
-  const threshold = 30; 
+  const threshold = 25; // Lowered from 30 to be more tolerant
   return scoredResidents
     .filter(sr => sr.score >= threshold)
     .sort((a, b) => b.score - a.score);
