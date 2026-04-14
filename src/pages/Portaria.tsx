@@ -1023,7 +1023,9 @@ export default function Portaria({ user }: PortariaProps) {
             Ler QR Code
           </button>
           <button
-            onClick={() => navigate('/packages/new')}
+            onClick={() => {
+  console.log('Registrar encomenda clicado');
+}}
             className="flex-1 md:flex-none bg-emerald-600 text-white px-6 py-4 rounded-2xl font-bold hover:bg-emerald-700 transition-all flex items-center justify-center gap-3 shadow-lg shadow-emerald-200"
           >
             <Plus className="w-6 h-6" />
