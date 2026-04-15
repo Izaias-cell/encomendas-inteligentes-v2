@@ -2152,7 +2152,6 @@ export default function App() {
           user.condominium_id ? <Navigate to="/dashboard" /> : <SelectCondominium user={user} onUpdateUser={handleUpdateUser} />
         ) : <Navigate to="/" />
       } />
-      <Route path="/packages/new" element={<PackageNew user={user} />} />
       <Route path="*" element={
         (() => {
           const role = normalizeRole(user?.role);

@@ -11,7 +11,7 @@ const IGNORE_WORDS = [
   'VALOR', 'DECLARADO', 'PESO', 'VOLUME', 'CHAVE', 'ACESSO', 'DANFE'
 ];
 
-const UNIT_KEYWORDS = ['CASA', 'AP', 'APTO', 'APARTAMENTO', 'UNIDADE', 'UNID', 'BLOCO', 'BL', 'LOTE', 'TORRE', 'TR', 'SALA'];
+const UNIT_KEYWORDS = ['CASA', 'AP', 'APTO', 'APT', 'APARTAMENTO', 'UNIDADE', 'UNID', 'BLOCO', 'BL', 'LOTE', 'TORRE', 'TR', 'SALA'];
 const UNIT_REGEX = new RegExp(`\\b(?:${UNIT_KEYWORDS.join('|')})\\s*[:\\-]?\\s*(\\d+[A-Z]?)\\b`, 'i');
 
 export interface ParsedLabel {

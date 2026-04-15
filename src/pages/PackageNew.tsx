@@ -73,6 +73,7 @@ export default function PackageNew({ user }: PackageNewProps) {
   const [condoSettings, setCondoSettings] = useState<CondominiumSettings | null>(null);
   const [isAmbiguous, setIsAmbiguous] = useState(false);
   const [foundPartialData, setFoundPartialData] = useState(false);
+  const [isAiSearch, setIsAiSearch] = useState(false);
   const [statusMessage, setStatusMessage] = useState('Lendo dados...');
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -132,6 +133,9 @@ export default function PackageNew({ user }: PackageNewProps) {
   }, [user?.condominium_id]);
 
   const startCamera = async () => {
+    // Garantir que qualquer stream anterior seja encerrado antes de iniciar um novo
+    stopCamera();
+    
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ 
         video: { facingMode: 'environment' }, 
@@ -200,34 +204,34 @@ export default function PackageNew({ user }: PackageNewProps) {
       context.drawImage(video, 0, 0, canvas.width, canvas.height);
       const base64 = canvas.toDataURL('image/jpeg');
       stopCamera();
-      processImage(base64);
+      
+      setPhotoUrl(base64);
+      setStep('analyzing');
+      setStatusMessage('Buscando dados da etiqueta...');
+      
+      // Executa leitura com espera controlada de 3 segundos
+      processImageWithWait(base64);
     }
   };
 
   const processingRef = useRef(false);
 
-  const processImage = async (base64: string) => {
+  const processImageWithWait = async (base64: string) => {
     if (processingRef.current) return;
     processingRef.current = true;
 
-    const startTime = Date.now();
-    setStep('analyzing');
-    setLoading(true);
-    setStatusMessage('Lendo etiqueta...');
-    
     try {
       let finalBase64 = base64;
 
-      // 1. Otimização: Compressão agressiva para OCR (mais rápido)
+      // Compressão rápida
       try {
         const { compressImage } = await import('../lib/imageUtils');
-        // Reduzimos o tamanho para 800px para ser mais rápido no upload/processamento
         finalBase64 = await compressImage(base64, 800, 0.6); 
       } catch (err) {
         console.warn('Falha ao comprimir imagem:', err);
       }
 
-      // 2. Upload em segundo plano (não bloqueante)
+      // 1. Inicia upload em paralelo
       const uploadPromise = (async () => {
         try {
           const res = await fetch(base64);
@@ -247,101 +251,53 @@ export default function PackageNew({ user }: PackageNewProps) {
             setPhotoUrl(publicUrl);
           }
         } catch (storageErr) {
-          console.warn("Storage error:", storageErr);
+          // Silently fail
         }
       })();
 
-      setPhotoUrl(finalBase64);
-
-      // 3. Timeout de 5 segundos para a operação total
-      const timeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('TIMEOUT')), 5000)
-      );
-
-      // 4. Fluxo de Processamento Direto e Rápido
-      const analysisPromise = (async () => {
-        // A. Captura de Texto Bruto (OCR Simples)
+      // 2. Leitura leve com espera de até 3 segundos
+      const ocrPromise = (async () => {
         const rawText = await getRawTextFromImage(finalBase64);
-        
-        if (!rawText || rawText.length < 3) {
-          throw new Error("Nenhum texto legível encontrado.");
-        }
+        if (rawText && rawText.length >= 3) {
+          const parsedData = parseLabelText(rawText);
+          
+          if (parsedData.recipientName) setRecipientName(parsedData.recipientName);
+          if (parsedData.unitNumber) setUnitNumber(parsedData.unitNumber);
 
-        // B. Extração Direta (Sem interpretação complexa)
-        const parsedData = parseLabelText(rawText);
+          if ((parsedData.recipientName || parsedData.unitNumber) && user?.condominium_id) {
+            const matches = await findMatchingResidents(
+              user.condominium_id,
+              parsedData.unitNumber,
+              parsedData.recipientName
+            );
 
-        if (parsedData.recipientName) setRecipientName(parsedData.recipientName);
-        if (parsedData.unitNumber) setUnitNumber(parsedData.unitNumber);
-
-        // C. Cruzamento Simples com Cadastro
-        let foundMatch = false;
-        if ((parsedData.recipientName || parsedData.unitNumber) && user?.condominium_id) {
-          const matches = await findMatchingResidents(
-            user.condominium_id,
-            parsedData.unitNumber,
-            parsedData.recipientName
-          );
-
-          if (matches.length > 0) {
-            const topMatch = matches[0];
-            setMatchingResidents(matches.slice(0, 5));
-            
-            // Match forte: Seleciona direto
-            if (topMatch.score >= 150) {
-              setRecipientName(topMatch.resident.nome);
-              setUnitNumber(topMatch.resident.unidade);
-              setUnitType(topMatch.resident.unit_type || '');
-              handleSelectResident(topMatch.resident);
-              setStatusMessage('Morador identificado');
-              foundMatch = true;
-            } else {
-              // Match parcial: Sugere confirmação
-              setStatusMessage('Confirme o morador');
-              setSearchTerm(parsedData.recipientName || parsedData.unitNumber || '');
+            if (matches.length > 0) {
+              setMatchingResidents(matches.slice(0, 5));
+              setIsAiSearch(true);
+              // Pega as primeiras 3 letras do nome ou o número da casa para o campo de busca
+              const suggestion = (parsedData.recipientName?.substring(0, 3) || parsedData.unitNumber || '');
+              if (suggestion) {
+                setSearchTerm(suggestion);
+              }
             }
-          } else {
-            // Sem match: Preenche busca para ajuste manual
-            setSearchTerm(parsedData.recipientName || parsedData.unitNumber || '');
           }
         }
-
-        // Estado para mensagem de confirmação parcial
-        if (!parsedData.recipientName && !parsedData.unitNumber) {
-          setFoundPartialData(false);
-          toast.error("Não foi possível identificar dados na etiqueta.");
-        } else if (!foundMatch) {
-          setFoundPartialData(true);
-        } else {
-          setFoundPartialData(false);
-        }
-
         return true;
       })();
 
-      // Executa com limite de tempo
-      try {
-        await Promise.race([analysisPromise, timeoutPromise]);
-      } catch (raceErr: any) {
-        if (raceErr.message === 'TIMEOUT') {
-          console.warn("[PERF] Timeout de 5s atingido. Mostrando resultados parciais.");
-          // Se deu timeout, o que foi setado nos states (recipientName, unitNumber) será mostrado
-        } else {
-          throw raceErr;
-        }
-      }
+      // Aguarda OCR ou 3 segundos
+      const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve('timeout'), 3000));
+      
+      await Promise.race([ocrPromise, timeoutPromise]);
 
+      // Após 3 segundos ou OCR concluído, vai para o manual
+      setStep('manual');
       await uploadPromise;
-      setStep('confirmation');
-    } catch (err: any) {
-      console.error("[DEBUG OCR] Erro no processamento:", err);
-      setStep('confirmation'); 
-      if (err.message === "Nenhum texto legível encontrado.") {
-        toast.error("Não foi possível ler a etiqueta automaticamente.");
-      }
+    } catch (err) {
+      console.warn("[IA APOIO] Erro no processamento:", err);
+      setStep('manual');
     } finally {
-      setLoading(false);
       processingRef.current = false;
-      console.log(`[PERF] Tempo total de processamento: ${Date.now() - startTime}ms`);
     }
   };
 
@@ -404,11 +360,17 @@ export default function PackageNew({ user }: PackageNewProps) {
     return () => clearTimeout(timer);
   }, [searchTerm, user?.condominium_id, selectedResident]);
 
-  const handleSelectResident = (resident: Morador) => {
+  const handleSelectResident = async (resident: Morador, autoSave: boolean = false) => {
+    // Se for autoSave (clique na sugestão da IA), executa o submit imediatamente
+    if (autoSave) {
+      toast.loading('Registrando encomenda...', { id: 'saving-package' });
+      handleSubmit(undefined, resident);
+      return;
+    }
+
     setSelectedResident(resident);
     setRecipientName(resident.nome || '');
     setUnitNumber(resident.unidade || '');
-    // Prioritize resident data if it exists, otherwise keep current unitType (from OCR)
     if (resident.unit_type) {
       setUnitType(resident.unit_type);
     } else if (!unitType) {
@@ -450,7 +412,9 @@ export default function PackageNew({ user }: PackageNewProps) {
         }
 
         setPhotoUrl(base64);
-        processImage(base64); // Reutiliza a lógica otimizada
+        setStep('analyzing');
+        setStatusMessage('Buscando dados da etiqueta...');
+        processImageWithWait(base64); 
       };
       reader.readAsDataURL(file);
     } catch (error: any) {
@@ -475,11 +439,22 @@ export default function PackageNew({ user }: PackageNewProps) {
     setPickupCode(generatePickupCode());
     setIsAmbiguous(false);
     setFoundPartialData(false);
+    setIsAiSearch(false);
+    setLoading(false);
+    setStatusMessage('Lendo dados...');
+    
+    // Forçar reinicialização da câmera se estivermos voltando para o step camera
+    if (step !== 'camera') {
+      setTimeout(() => startCamera(), 100);
+    }
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!selectedResident || !user) {
+  const handleSubmit = async (e?: React.FormEvent, directResident?: Morador) => {
+    if (e) e.preventDefault();
+    
+    const targetResident = directResident || selectedResident;
+    
+    if (!targetResident || !user) {
       toast.error('Selecione um morador para continuar');
       return;
     }
@@ -493,7 +468,7 @@ export default function PackageNew({ user }: PackageNewProps) {
       const { data: existingPackages } = await supabase
         .from('packages')
         .select('id, pickup_code, pickup_token')
-        .eq('recipient_id', selectedResident.id)
+        .eq('recipient_id', targetResident.id)
         .eq('status', 'received')
         .order('received_at', { ascending: false });
 
@@ -515,13 +490,13 @@ export default function PackageNew({ user }: PackageNewProps) {
             pickup_code: finalPickupCode, 
             pickup_token: finalPickupToken 
           })
-          .eq('recipient_id', selectedResident.id)
+          .eq('recipient_id', targetResident.id)
           .eq('status', 'received');
       }
 
       // 1. Preparar mensagem de WhatsApp
       const whatsappMessage = prepareWhatsAppNotification(
-        selectedResident,
+        targetResident,
         condoName || 'Condomínio',
         finalPickupCode,
         notes,
@@ -532,14 +507,14 @@ export default function PackageNew({ user }: PackageNewProps) {
       // 2. Salvar a encomenda no Supabase
       const packageData = {
         condominium_id: user.condominium_id,
-        recipient_id: selectedResident.id,
-        recipient_name_raw: recipientName || selectedResident.nome,
-        unit_number: unitNumber || selectedResident.unidade || '',
-        unit_type: unitType || selectedResident.unit_type || '',
-        unit_number_val: selectedResident.unidade,
-        block: selectedResident.block || selectedResident.bloco,
-        tower: selectedResident.tower || selectedResident.lote,
-        complement: selectedResident.observacoes,
+        recipient_id: targetResident.id,
+        recipient_name_raw: recipientName || targetResident.nome,
+        unit_number: unitNumber || targetResident.unidade || '',
+        unit_type: unitType || targetResident.unit_type || '',
+        unit_number_val: targetResident.unidade,
+        block: targetResident.block || targetResident.bloco,
+        tower: targetResident.tower || targetResident.lote,
+        complement: targetResident.observacoes,
         carrier,
         tracking_code: trackingNumber,
         notes,
@@ -577,10 +552,10 @@ export default function PackageNew({ user }: PackageNewProps) {
       }
 
       // 3. Notificação via WhatsApp (Execução imediata se possível)
-      if (selectedResident.telefone && whatsappMessage) {
+      if (targetResident.telefone && whatsappMessage) {
         if (condoSettings?.whatsapp_mode === 'api_automatica') {
           try {
-            const result = await sendWhatsAppMessage(selectedResident.telefone, whatsappMessage, user.condominium_id, {
+            const result = await sendWhatsAppMessage(targetResident.telefone, whatsappMessage, user.condominium_id, {
               api_url: condoSettings.api_url,
               api_token: condoSettings.api_token,
               instance_id: condoSettings.instance_id,
@@ -604,7 +579,7 @@ export default function PackageNew({ user }: PackageNewProps) {
           }
         } else if (condoSettings?.whatsapp_mode === 'manual_assistido') {
           // Se for manual assistido, abre o link em nova aba
-          const phone = selectedResident.telefone.replace(/\D/g, '');
+          const phone = targetResident.telefone.replace(/\D/g, '');
           const formattedPhone = phone.startsWith('55') ? phone : `55${phone}`;
           const encodedMessage = encodeURIComponent(whatsappMessage);
           window.open(`https://wa.me/${formattedPhone}?text=${encodedMessage}`, '_blank');
@@ -621,8 +596,8 @@ export default function PackageNew({ user }: PackageNewProps) {
           newPackage.id, 
           null, 
           {
-            recipient: selectedResident.nome,
-            unit: selectedResident.unidade,
+            recipient: targetResident.nome,
+            unit: targetResident.unidade,
             carrier,
             pickup_code: newPackage.pickup_code || pickupCode
           }
@@ -631,10 +606,10 @@ export default function PackageNew({ user }: PackageNewProps) {
         console.warn('Erro ao logar ação:', logErr);
       }
 
-      toast.success('Encomenda registrada com sucesso!');
+      toast.success('Encomenda registrada', { id: 'saving-package' });
       resetForm();
     } catch (error: any) {
-      toast.error('Erro inesperado: ' + error.message);
+      toast.error('Erro inesperado: ' + error.message, { id: 'saving-package' });
     } finally {
       setLoading(false);
     }
@@ -654,15 +629,19 @@ export default function PackageNew({ user }: PackageNewProps) {
       <div className="bg-white border-b sticky top-0 z-10">
         <div className="max-w-2xl mx-auto px-4 h-16 flex items-center justify-between">
           <button 
-            onClick={() => navigate('/portaria')}
+            onClick={() => {
+              if (step === 'manual' || step === 'analyzing' || step === 'confirmation') {
+                resetForm();
+              } else {
+                navigate('/portaria');
+              }
+            }}
             className="p-2 hover:bg-gray-100 rounded-full transition-colors"
           >
             <ArrowLeft className="w-6 h-6 text-gray-600" />
           </button>
           <h1 className="text-lg font-semibold text-gray-900">
-            {step === 'camera' ? 'Capturar Encomenda' : 
-             step === 'analyzing' ? 'Processando...' : 
-             'Confirmar Dados'}
+            {step === 'camera' ? 'Capturar Encomenda' : 'Registrar Encomenda'}
           </h1>
           <div className="w-10" />
         </div>
@@ -708,19 +687,19 @@ export default function PackageNew({ user }: PackageNewProps) {
                   <canvas ref={canvasRef} className="hidden" />
                 </div>
                 
-                <div className="p-6 bg-gray-50 flex items-center justify-between">
-                  <button
-                    onClick={() => setStep('manual')}
-                    className="text-gray-500 font-medium hover:text-gray-700 flex items-center gap-2"
-                  >
-                    <FileText className="w-5 h-5" />
-                    Entrada Manual
-                  </button>
-                  <div className="flex items-center gap-2 text-indigo-600 font-semibold">
-                    <Sparkles className="w-5 h-5" />
-                    IA Ativa
+                  <div className="p-6 bg-gray-50 flex items-center justify-between">
+                    <button
+                      onClick={() => setStep('manual')}
+                      className="text-gray-500 font-medium hover:text-gray-700 flex items-center gap-2"
+                    >
+                      <FileText className="w-5 h-5" />
+                      Pular para Busca
+                    </button>
+                    <div className="flex items-center gap-2 text-indigo-600 font-semibold">
+                      <Zap className="w-5 h-5" />
+                      Assistente IA
+                    </div>
                   </div>
-                </div>
               </div>
 
               <div className="bg-amber-50 border border-amber-100 rounded-2xl p-4 flex gap-3">
@@ -775,7 +754,7 @@ export default function PackageNew({ user }: PackageNewProps) {
                   </div>
                   <button
                     type="button"
-                    onClick={(e) => { e.preventDefault(); setStep('camera'); }}
+                    onClick={(e) => { e.preventDefault(); resetForm(); }}
                     className="absolute top-2 right-2 p-2 bg-white/90 backdrop-blur-sm rounded-full shadow-lg hover:bg-white transition-colors"
                   >
                     <X className="w-5 h-5 text-gray-600" />
@@ -783,7 +762,7 @@ export default function PackageNew({ user }: PackageNewProps) {
                 </div>
               )}
 
-              <form onSubmit={handleSubmit} className="space-y-6">
+              <form id="package-form" onSubmit={handleSubmit} className="space-y-6">
                 {/* Resident Selection */}
                 <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
                   <div className="flex items-center justify-between mb-4">
@@ -807,95 +786,99 @@ export default function PackageNew({ user }: PackageNewProps) {
                   {!selectedResident ? (
                     <div className="space-y-4">
                       <div className="relative">
-                        <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                          <Search className="h-5 w-5 text-gray-400" />
-                        </div>
+                        <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
                         <input
+                          autoFocus
                           type="text"
+                          placeholder="Nome ou número da casa..."
                           value={searchTerm}
-                          onChange={(e) => setSearchTerm(e.target.value)}
-                          placeholder="Buscar por nome ou unidade..."
-                          className="block w-full pl-10 pr-3 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all"
+                          onChange={(e) => {
+                            setSearchTerm(e.target.value);
+                            setIsAiSearch(false);
+                          }}
+                          className="w-full pl-12 pr-4 py-4 bg-gray-50 border-2 border-transparent focus:border-indigo-500 focus:bg-white rounded-xl transition-all outline-none text-lg"
                         />
                       </div>
 
-                      {/* Partial Data Found Message */}
-                      {foundPartialData && !selectedResident && (
-                        <div className="p-3 bg-indigo-50 border border-indigo-100 rounded-xl flex items-center gap-3">
-                          <Info className="w-5 h-5 text-indigo-600 flex-shrink-0" />
-                          <p className="text-xs font-medium text-indigo-800">
-                            Identificamos dados parciais. Por favor, confirme o morador abaixo.
-                          </p>
-                        </div>
-                      )}
-
-                      {/* Ambiguity Warning */}
-                      {isAmbiguous && !selectedResident && (
-                        <div className="p-3 bg-amber-50 border border-amber-100 rounded-xl flex items-center gap-3 animate-pulse">
-                          <AlertCircle className="w-5 h-5 text-amber-600 flex-shrink-0" />
-                          <p className="text-xs font-medium text-amber-800">
-                            Mais de um morador encontrado, selecione o correto
-                          </p>
-                        </div>
-                      )}
-
                       {/* Search Results / Intelligent Suggestions */}
                       {matchingResidents.length > 0 && (
-                        <div className="space-y-2">
-                          <div className="flex items-center gap-2 text-xs font-medium text-indigo-600 uppercase tracking-wider px-1">
-                            <Sparkles className="w-3 h-3" />
-                            Busca Inteligente
-                          </div>
-                          <div className="grid gap-2">
-                            {matchingResidents.slice(0, 5).map(({ resident, score }) => (
+                        <div className="space-y-2 max-h-[300px] overflow-y-auto pr-2">
+                          {matchingResidents.slice(0, 10).map(({ resident, score }) => {
+                            // O modo de salvamento direto só ativa se for busca da IA e tiver confiança suficiente
+                            const isAutoSaveMode = isAiSearch && score >= 120;
+                            
+                            return (
                               <button
                                 key={resident.id}
                                 type="button"
-                                onClick={() => handleSelectResident(resident)}
-                                className="flex items-center justify-between p-3 bg-white border border-gray-100 rounded-xl hover:bg-indigo-50 hover:border-indigo-200 transition-all group shadow-sm"
+                                onClick={() => handleSelectResident(resident, true)}
+                                className={`w-full flex items-center justify-between p-4 rounded-xl transition-all group border ${
+                                  isAutoSaveMode 
+                                    ? 'bg-indigo-50/50 border-indigo-100 hover:bg-indigo-100/50 shadow-sm active:scale-[0.98]' 
+                                    : 'bg-gray-50 border-transparent hover:bg-indigo-50 hover:border-indigo-100 active:scale-[0.98]'
+                                }`}
                               >
                                 <div className="flex items-center gap-3">
-                                  <div className="w-10 h-10 bg-indigo-50 rounded-full flex items-center justify-center border border-indigo-100">
-                                    <User className="w-5 h-5 text-indigo-600" />
+                                  <div className={`w-10 h-10 rounded-full flex items-center justify-center border ${
+                                    isAutoSaveMode ? 'bg-white border-indigo-200' : 'bg-white border-gray-100 group-hover:border-indigo-200'
+                                  }`}>
+                                    <User className={`w-5 h-5 ${isAutoSaveMode ? 'text-indigo-600' : 'text-gray-400 group-hover:text-indigo-500'}`} />
                                   </div>
                                   <div className="text-left">
-                                    <div className="flex items-center gap-2">
-                                      <p className="font-medium text-gray-900">{resident.nome}</p>
-                                      {score >= 150 && (
-                                        <span className="bg-emerald-100 text-emerald-700 text-[8px] px-1.5 py-0.5 rounded-full font-bold uppercase tracking-wider">Forte</span>
-                                      )}
-                                    </div>
-                                    <p className="text-xs text-gray-500">
-                                      {formatResidentAddress(resident)}
-                                    </p>
+                                    <p className={`font-semibold ${isAutoSaveMode ? 'text-indigo-900' : 'text-gray-900 group-hover:text-indigo-900'}`}>{resident.nome}</p>
+                                    <p className={`text-sm ${isAutoSaveMode ? 'text-indigo-700' : 'text-gray-500'}`}>{formatResidentAddress(resident)}</p>
                                   </div>
                                 </div>
                                 <div className="flex items-center gap-2">
-                                  <CheckCircle className="w-5 h-5 text-gray-200 group-hover:text-indigo-400" />
+                                  {score >= 150 && (
+                                    <span className="px-2 py-1 bg-green-100 text-green-700 text-[10px] font-bold rounded-md uppercase">
+                                      Sugestão
+                                    </span>
+                                  )}
+                                  <Zap className="w-4 h-4 text-indigo-400 animate-pulse" />
                                 </div>
                               </button>
-                            ))}
-                          </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                      
+                      {searchTerm.length >= 2 && matchingResidents.length === 0 && (
+                        <div className="py-8 text-center">
+                          <p className="text-gray-500">Nenhum morador encontrado.</p>
                         </div>
                       )}
                     </div>
                   ) : (
-                    <div className="p-4 bg-indigo-50 rounded-2xl border border-indigo-100 flex items-center gap-4">
-                      <div className="w-14 h-14 bg-white rounded-full flex items-center justify-center border-2 border-indigo-200 shadow-sm">
-                        <User className="w-7 h-7 text-indigo-600" />
+                    <div className="p-4 bg-indigo-50 border border-indigo-100 rounded-xl flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className="w-12 h-12 bg-white rounded-full flex items-center justify-center border border-indigo-200">
+                          <User className="w-6 h-6 text-indigo-600" />
+                        </div>
+                        <div>
+                          <p className="font-bold text-indigo-900">{selectedResident.nome}</p>
+                          <p className="text-sm text-indigo-700">{formatResidentAddress(selectedResident)}</p>
+                        </div>
                       </div>
-                      <div>
-                        <h3 className="font-bold text-gray-900 text-lg">{selectedResident.nome}</h3>
-                        <p className="text-indigo-600 font-medium">
-                          {formatResidentAddress(selectedResident)}
-                        </p>
-                        <p className="text-xs text-gray-500 mt-1">{selectedResident.telefone}</p>
-                      </div>
-                      <div className="ml-auto">
-                        <CheckCircle className="w-6 h-6 text-green-500" />
-                      </div>
+                      <CheckCircle className="w-6 h-6 text-green-600 fill-green-50" />
                     </div>
                   )}
+
+                  {/* Submit Button - Repositioned for quick access */}
+                  <button
+                    type="submit"
+                    disabled={loading || !selectedResident}
+                    className="w-full mt-4 bg-indigo-600 text-white py-4 rounded-2xl font-bold shadow-xl shadow-indigo-200 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-3"
+                  >
+                    {loading ? (
+                      <Loader2 className="w-6 h-6 animate-spin" />
+                    ) : (
+                      <>
+                        <Save className="w-6 h-6" />
+                        Salvar e Notificar Morador
+                      </>
+                    )}
+                  </button>
                 </div>
 
                 {/* Package Details */}
@@ -1009,7 +992,7 @@ export default function PackageNew({ user }: PackageNewProps) {
                 </div>
 
                 {/* Pickup Code Info */}
-                <div className="bg-indigo-900 rounded-2xl p-6 text-white shadow-lg shadow-indigo-200">
+                <div className="bg-indigo-900 rounded-2xl p-6 text-white shadow-lg shadow-indigo-200 mb-24">
                   <div className="flex items-center justify-between mb-4">
                     <div className="flex items-center gap-2">
                       <Hash className="w-5 h-5 text-indigo-300" />
@@ -1029,27 +1012,10 @@ export default function PackageNew({ user }: PackageNewProps) {
                   </p>
                 </div>
 
-                {/* Submit Button */}
-                <button
-                  type="submit"
-                  disabled={loading || !selectedResident}
-                  className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-bold shadow-xl shadow-indigo-200 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-3"
-                >
-                  {loading ? (
-                    <Loader2 className="w-6 h-6 animate-spin" />
-                  ) : (
-                    <>
-                      <Save className="w-6 h-6" />
-                      Salvar e Notificar Morador
-                    </>
-                  )}
-                </button>
               </form>
             </motion.div>
           )}
         </AnimatePresence>
-
-        {/* Success Modal with QR Code removed for continuous flow */}
       </div>
     </div>
   );

@@ -59,7 +59,6 @@ export default function Portaria({ user }: PortariaProps) {
   const [searchTerm, setSearchTerm] = useState('');
   const [activeTab, setActiveTab] = useState<'pending' | 'delivered' | 'all' | 'residents'>('pending');
   const [activeResidentMenu, setActiveResidentMenu] = useState<string | null>(null);
-  
   const navigate = useNavigate();
 
   // Batch WhatsApp State
@@ -148,6 +147,7 @@ export default function Portaria({ user }: PortariaProps) {
 
   // QR Scanning State
   const [isScanning, setIsScanning] = useState(false);
+  const [cameraStarted, setCameraStarted] = useState(false);
   const [qrScanStatus, setQrScanStatus] = useState<'idle' | 'scanning' | 'validating' | 'success' | 'error'>('idle');
   const [qrPackage, setQrPackage] = useState<Package | null>(null);
   const [viewQrPackage, setViewQrPackage] = useState<Package | null>(null);
@@ -182,13 +182,13 @@ export default function Portaria({ user }: PortariaProps) {
   }, [window.location.search]);
 
   useEffect(() => {
-    if (isScanning && !qrPackage) {
+    if (isScanning && !qrPackage && !showManualInput && cameraStarted) {
       startScanning();
     } else {
       stopScanning();
     }
     return () => stopScanning();
-  }, [isScanning, qrPackage]);
+  }, [isScanning, qrPackage, showManualInput, cameraStarted]);
 
   const handleBatchSend = async () => {
     if (batchPackages.length === 0) return;
@@ -914,6 +914,11 @@ export default function Portaria({ user }: PortariaProps) {
       setIsDeliverySuccess(true);
       toast.success('Entrega confirmada com sucesso');
       
+      // Limpa o token manual imediatamente se foi via código
+      if (method === 'code' || method === 'CÓDIGO') {
+        setManualToken('');
+      }
+
       // Atualiza o estado local para refletir a mudança na lista
       setPackages(prev => prev.map((p: any) => {
         const isMatchByToken = qrPackage?.pickup_token && p.pickup_token === qrPackage.pickup_token;
@@ -929,7 +934,7 @@ export default function Portaria({ user }: PortariaProps) {
       
       fetchPendingNotices();
       
-      // Fecha o modal automaticamente após 2 segundos
+      // Fecha o modal automaticamente após 2 segundos e retorna para o painel de pendentes
       setTimeout(() => {
         setIsScanning(false);
         setQrPackage(null);
@@ -937,6 +942,10 @@ export default function Portaria({ user }: PortariaProps) {
         setIsDeliverySuccess(false);
         setDeliveryPhoto(null);
         pendingPackageRef.current = null;
+        setManualToken('');
+        setShowManualInput(false);
+        setCameraStarted(false);
+        setActiveTab('pending');
       }, 2000);
 
     } catch (error: any) {
@@ -1005,26 +1014,38 @@ export default function Portaria({ user }: PortariaProps) {
     )
   );
 
-  
   return (
-  <div className="max-w-6xl mx-auto p-6">
-      
+    <div className="max-w-6xl mx-auto p-6">
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-8">
         <div>
           <h1 className="text-3xl font-bold text-zinc-900">Painel da Portaria</h1>
           <p className="text-zinc-500">Gestão operacional de encomendas e moradores</p>
         </div>
-        <div className="flex flex-wrap gap-3 w-full md:w-auto">
-          <button
-            onClick={() => {
-              setRetrievalMethod('qr_code');
-              setIsScanning(true);
-            }}
-            className="flex-1 md:flex-none bg-white text-zinc-900 px-6 py-4 rounded-2xl font-bold hover:bg-zinc-50 transition-all flex items-center justify-center gap-3 border border-zinc-200 shadow-sm"
-          >
-            <QrCode className="w-6 h-6 text-emerald-600" />
-            Ler QR Code
-          </button>
+          <div className="flex flex-wrap gap-3 w-full md:w-auto">
+          <div className="flex flex-1 md:flex-none gap-2">
+            <button
+              onClick={() => {
+                setRetrievalMethod('manual');
+                setShowManualInput(true);
+                setIsScanning(true);
+              }}
+              className="flex-1 bg-white text-zinc-900 px-6 py-4 rounded-2xl font-bold hover:bg-zinc-50 transition-all flex items-center justify-center gap-3 border border-zinc-200 shadow-sm"
+            >
+              <Hash className="w-6 h-6 text-emerald-600" />
+              CÓDIGO DE RETIRADA
+            </button>
+            <button
+              onClick={() => {
+                setRetrievalMethod('qr_code');
+                setShowManualInput(false);
+                setIsScanning(true);
+              }}
+              className="bg-white text-zinc-900 p-4 rounded-2xl font-bold hover:bg-zinc-50 transition-all flex items-center justify-center border border-zinc-200 shadow-sm"
+              title="Escanear QR Code"
+            >
+              <QrCode className="w-6 h-6 text-emerald-600" />
+            </button>
+          </div>
           <button
             onClick={() => navigate('/packages/new')}
             className="flex-1 md:flex-none bg-emerald-600 text-white px-6 py-4 rounded-2xl font-bold hover:bg-emerald-700 transition-all flex items-center justify-center gap-3 shadow-lg shadow-emerald-200"
@@ -1149,7 +1170,7 @@ export default function Portaria({ user }: PortariaProps) {
                       <span className="text-[10px] font-bold text-zinc-400 tracking-widest uppercase">
                         {pkg.isGroup ? 'Código único de retirada' : 'Código de retirada'}
                       </span>
-                      <p className={`font-mono text-sm font-bold ${pkg.status === 'delivered' ? 'text-zinc-500' : 'text-emerald-600'}`}>
+                      <p className={`font-mono text-2xl font-black tracking-wider ${pkg.status === 'delivered' ? 'text-zinc-500' : 'text-emerald-600'}`}>
                         {pkg.pickup_code || '-'}
                       </p>
                     </div>
@@ -1225,18 +1246,34 @@ export default function Portaria({ user }: PortariaProps) {
                       Ver itens do grupo
                     </button>
                   )}
-                  <button 
-                    onClick={() => {
-                      setRetrievalMethod('qr_code');
-                      setIsScanning(true);
-                      setQrPackage(null);
-                      setQrScanStatus('idle');
-                    }}
-                    className="col-span-2 bg-zinc-100 text-zinc-600 py-4 rounded-2xl font-bold hover:bg-zinc-900 hover:text-white transition-all flex items-center justify-center gap-3 text-base"
-                  >
-                    <QrCode className="w-5 h-5" />
-                    Escanear QR Code
-                  </button>
+                  <div className="col-span-2 flex gap-2">
+                    <button 
+                      onClick={() => {
+                        setRetrievalMethod('manual');
+                        setShowManualInput(true);
+                        setIsScanning(true);
+                        setQrPackage(null);
+                        setQrScanStatus('idle');
+                      }}
+                      className="flex-1 bg-zinc-100 text-zinc-600 py-4 rounded-2xl font-bold hover:bg-zinc-900 hover:text-white transition-all flex items-center justify-center gap-3 text-base"
+                    >
+                      <Hash className="w-5 h-5" />
+                      CÓDIGO DE RETIRADA
+                    </button>
+                    <button 
+                      onClick={() => {
+                        setRetrievalMethod('qr_code');
+                        setShowManualInput(false);
+                        setIsScanning(true);
+                        setQrPackage(null);
+                        setQrScanStatus('idle');
+                      }}
+                      className="bg-zinc-100 text-zinc-600 p-4 rounded-2xl font-bold hover:bg-zinc-900 hover:text-white transition-all flex items-center justify-center"
+                      title="Escanear QR Code"
+                    >
+                      <QrCode className="w-5 h-5" />
+                    </button>
+                  </div>
                 </div>
               </div>
             ))}
@@ -1826,10 +1863,10 @@ export default function Portaria({ user }: PortariaProps) {
             <div className="p-6 flex justify-between items-center bg-zinc-900/50 backdrop-blur-md border-b border-white/5">
               <div>
                 <h3 className="text-white text-xl font-bold">
-                  {retrievalMethod === 'manual' ? 'Confirmação de Entrega' : 'Escanear QR Code'}
+                  {qrPackage ? 'Confirmação de Entrega' : 'CÓDIGO DE RETIRADA'}
                 </h3>
                 <p className="text-zinc-400 text-xs">
-                  {retrievalMethod === 'manual' ? 'Registre uma foto para confirmar a retirada' : 'Aponte a câmera para o código da encomenda'}
+                  {qrPackage ? 'Registre uma foto para confirmar a retirada' : 'Digite o código de 4 dígitos enviado ao morador'}
                 </p>
               </div>
               <button 
@@ -1841,6 +1878,8 @@ export default function Portaria({ user }: PortariaProps) {
                   setQrPackage(null); 
                   setQrScanStatus('idle'); 
                   setShowManualInput(false);
+                  setManualToken('');
+                  setCameraStarted(false);
                 }}
                 className="p-2 bg-white/10 hover:bg-white/20 rounded-full text-white transition-colors"
               >
@@ -1858,75 +1897,106 @@ export default function Portaria({ user }: PortariaProps) {
                     exit={{ opacity: 0 }}
                     className="w-full max-w-sm flex flex-col items-center"
                   >
-                    <div className="relative w-full aspect-square bg-zinc-900 rounded-3xl overflow-hidden shadow-2xl border border-white/10">
-                      <div id="qr-reader" className="w-full h-full"></div>
-                      
-                      {/* Scanner Frame Overlay */}
-                      <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-                        <div className="w-64 h-64 relative">
-                          <div className="absolute top-0 left-0 w-8 h-8 border-t-4 border-l-4 border-emerald-500 rounded-tl-lg"></div>
-                          <div className="absolute top-0 right-0 w-8 h-8 border-t-4 border-r-4 border-emerald-500 rounded-tr-lg"></div>
-                          <div className="absolute bottom-0 left-0 w-8 h-8 border-b-4 border-l-4 border-emerald-500 rounded-bl-lg"></div>
-                          <div className="absolute bottom-0 right-0 w-8 h-8 border-b-4 border-r-4 border-emerald-500 rounded-br-lg"></div>
-                          
-                          {/* Scanning Line Animation */}
-                          <motion.div 
-                            animate={{ top: ['0%', '100%', '0%'] }}
-                            transition={{ duration: 3, repeat: Infinity, ease: "linear" }}
-                            className="absolute left-0 right-0 h-0.5 bg-emerald-500/50 shadow-[0_0_15px_rgba(16,185,129,0.5)]"
-                          />
-                        </div>
-                      </div>
-
-                      {/* Validating Overlay */}
-                      {qrScanStatus === 'validating' && (
-                        <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex flex-col items-center justify-center text-white">
-                          <Loader2 className="w-12 h-12 animate-spin text-emerald-500 mb-4" />
-                          <p className="font-bold">Validando código...</p>
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="mt-8 w-full space-y-4">
-                      {!showManualInput ? (
-                        <button 
-                          onClick={() => setShowManualInput(true)}
-                          className="w-full py-4 bg-white/5 hover:bg-white/10 text-white rounded-2xl flex items-center justify-center gap-2 transition-all border border-white/10"
-                        >
-                          <Keyboard className="w-5 h-5" />
-                          Digitar código manualmente
-                        </button>
-                      ) : (
-                        <motion.div 
-                          initial={{ opacity: 0, y: 10 }}
-                          animate={{ opacity: 1, y: 0 }}
-                          className="bg-zinc-900 p-4 rounded-2xl border border-white/10 w-full"
-                        >
-                          <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-2 block">Código da Encomenda</label>
-                          <div className="flex gap-2">
-                            <input 
-                              value={manualToken}
-                              onChange={(e) => setManualToken(e.target.value)}
-                              placeholder="Ex: abc123xyz"
-                              className="flex-1 bg-zinc-800 border border-white/5 rounded-xl px-4 py-3 text-white outline-none focus:ring-2 focus:ring-emerald-500"
-                            />
+                    {showManualInput ? (
+                      <motion.div 
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="w-full flex flex-col items-center"
+                      >
+                        <div className="bg-zinc-900/50 p-8 rounded-[32px] border border-white/10 w-full shadow-2xl backdrop-blur-md">
+                          <div className="flex justify-between items-center mb-6">
+                            <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-[0.2em] block">Código de Retirada</label>
                             <button 
-                              onClick={handleManualToken}
-                              disabled={!manualToken.trim() || loading}
-                              className="bg-emerald-600 text-white p-3 rounded-xl disabled:opacity-50"
+                              onClick={() => setShowManualInput(false)}
+                              className="p-2 bg-white/5 hover:bg-white/10 rounded-xl text-emerald-500 transition-all border border-white/5"
+                              title="Usar QR Code"
                             >
-                              <Check className="w-6 h-6" />
+                              <QrCode className="w-6 h-6" />
                             </button>
                           </div>
-                          <button 
-                            onClick={() => setShowManualInput(false)}
-                            className="mt-3 text-zinc-500 text-xs hover:text-white"
-                          >
-                            Voltar para câmera
-                          </button>
-                        </motion.div>
-                      )}
-                    </div>
+                          
+                          <div className="relative w-full">
+                            <input 
+                              autoFocus
+                              type="text"
+                              inputMode="numeric"
+                              pattern="[0-9]*"
+                              maxLength={4}
+                              value={manualToken}
+                              onChange={(e) => {
+                                const val = e.target.value.replace(/\D/g, '');
+                                setManualToken(val);
+                                if (val.length === 4) {
+                                  onScanSuccess(val, 'code');
+                                }
+                              }}
+                              placeholder="0000"
+                              className="w-full bg-zinc-800/50 border-2 border-white/10 rounded-3xl px-4 py-12 text-white text-7xl font-black tracking-[0.3em] text-center outline-none focus:border-emerald-500 focus:ring-8 focus:ring-emerald-500/10 transition-all placeholder:text-zinc-800 shadow-2xl"
+                            />
+                            <div className="mt-10 flex flex-col items-center gap-2">
+                               <p className="text-emerald-500 text-sm font-black uppercase tracking-[0.2em]">Pronto para digitar</p>
+                               <p className="text-zinc-500 text-[10px] font-medium uppercase tracking-widest">O campo limpa automaticamente após o uso</p>
+                            </div>
+                          </div>
+                        </div>
+                      </motion.div>
+                    ) : (
+                      <div className="relative w-full aspect-square bg-zinc-900 rounded-3xl overflow-hidden shadow-2xl border border-white/10 flex flex-col items-center justify-center">
+                        {cameraStarted ? (
+                          <>
+                            <div id="qr-reader" className="w-full h-full"></div>
+                            
+                            {/* Scanner Frame Overlay */}
+                            <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+                              <div className="w-64 h-64 relative">
+                                <div className="absolute top-0 left-0 w-8 h-8 border-t-4 border-l-4 border-emerald-500 rounded-tl-lg"></div>
+                                <div className="absolute top-0 right-0 w-8 h-8 border-t-4 border-r-4 border-emerald-500 rounded-tr-lg"></div>
+                                <div className="absolute bottom-0 left-0 w-8 h-8 border-b-4 border-l-4 border-emerald-500 rounded-bl-lg"></div>
+                                <div className="absolute bottom-0 right-0 w-8 h-8 border-b-4 border-r-4 border-emerald-500 rounded-br-lg"></div>
+                                
+                                {/* Scanning Line Animation */}
+                                <motion.div 
+                                  animate={{ top: ['0%', '100%', '0%'] }}
+                                  transition={{ duration: 3, repeat: Infinity, ease: "linear" }}
+                                  className="absolute left-0 right-0 h-0.5 bg-emerald-500/50 shadow-[0_0_15px_rgba(16,185,129,0.5)]"
+                                />
+                              </div>
+                            </div>
+
+                            {/* Validating Overlay */}
+                            {qrScanStatus === 'validating' && (
+                              <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex flex-col items-center justify-center text-white">
+                                <Loader2 className="w-12 h-12 animate-spin text-emerald-500 mb-4" />
+                                <p className="font-bold">Validando código...</p>
+                              </div>
+                            )}
+                          </>
+                        ) : (
+                          <div className="flex flex-col items-center p-8 text-center">
+                            <div className="w-24 h-24 bg-white/5 rounded-full flex items-center justify-center mb-6 border border-white/10">
+                              <QrCode className="w-12 h-12 text-emerald-500" />
+                            </div>
+                            <h4 className="text-white text-lg font-bold mb-2">Leitor de QR Code</h4>
+                            <p className="text-zinc-500 text-sm mb-8">Clique no botão abaixo para ativar a câmera e escanear o código.</p>
+                            <button 
+                              onClick={() => setCameraStarted(true)}
+                              className="bg-emerald-600 text-white px-8 py-4 rounded-2xl font-bold hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-900/40 flex items-center gap-3"
+                            >
+                              <Camera className="w-5 h-5" />
+                              ATIVAR CÂMERA
+                            </button>
+                          </div>
+                        )}
+                        
+                        <button 
+                          onClick={() => setShowManualInput(true)}
+                          className="absolute bottom-6 left-1/2 -translate-x-1/2 px-6 py-3 bg-black/60 hover:bg-black/80 text-white rounded-xl flex items-center gap-2 transition-all border border-white/10 backdrop-blur-md text-sm font-bold"
+                        >
+                          <Keyboard className="w-4 h-4" />
+                          Digitar Código
+                        </button>
+                      </div>
+                    )}
                   </motion.div>
                 )}
 
@@ -2159,6 +2229,5 @@ export default function Portaria({ user }: PortariaProps) {
         )}
       </AnimatePresence>
     </div>
-    
   );
 }
