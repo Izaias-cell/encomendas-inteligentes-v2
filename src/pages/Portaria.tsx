@@ -2159,6 +2159,6 @@ export default function Portaria({ user }: PortariaProps) {
         )}
       </AnimatePresence>
     </div>
-    </>
+    
   );
 }
