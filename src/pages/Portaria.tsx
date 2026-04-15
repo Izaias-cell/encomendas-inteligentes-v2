@@ -59,7 +59,7 @@ export default function Portaria({ user }: PortariaProps) {
   const [searchTerm, setSearchTerm] = useState('');
   const [activeTab, setActiveTab] = useState<'pending' | 'delivered' | 'all' | 'residents'>('pending');
   const [activeResidentMenu, setActiveResidentMenu] = useState<string | null>(null);
-  const [showRegister, setShowRegister] = useState(false);
+  
   const navigate = useNavigate();
 
   // Batch WhatsApp State
