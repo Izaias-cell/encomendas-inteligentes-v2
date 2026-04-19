@@ -269,13 +269,19 @@ export default function ProfileList({ user }: ProfileListProps) {
   };
 
   const activeResidentsCount = profiles.filter(p => p.active && p.role === 'resident').length;
+  const uniqueUnitsCount = new Set(
+    profiles
+      .filter(p => p.active && p.role === 'resident' && p.unidade)
+      .map(p => `${p.unidade}-${p.block || ''}-${p.street || ''}`)
+  ).size;
 
   return (
     <div className="max-w-6xl mx-auto p-6">
       <div className="flex justify-between items-center mb-8">
         <div>
-          <h1 className="text-3xl font-bold text-zinc-900">MORADORES ({activeResidentsCount})</h1>
-          <p className="text-zinc-500">Gerencie os moradores do condomínio</p>
+          <h1 className="text-3xl font-bold text-zinc-900 uppercase">Moradores: {activeResidentsCount}</h1>
+          <h2 className="text-xl font-bold text-zinc-500 uppercase mt-1">Casas: {uniqueUnitsCount}</h2>
+          <p className="text-zinc-400 mt-2">Gerencie os moradores do condomínio</p>
         </div>
         {(user.role === 'admin' || user.role === 'sindico') && (
           <button

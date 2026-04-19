@@ -1124,6 +1124,22 @@ export default function Portaria({ user }: PortariaProps) {
         </button>
       </div>
 
+      {activeTab === 'residents' && (
+        <div className="bg-emerald-50 border border-emerald-100 rounded-2xl p-4 mb-8 flex flex-wrap gap-8">
+          <div>
+            <p className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest mb-1">Total de Moradores</p>
+            <p className="text-2xl font-bold text-emerald-900">{residents.length}</p>
+          </div>
+          <div className="w-px h-10 bg-emerald-200 hidden sm:block" />
+          <div>
+            <p className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest mb-1">Total de Casas</p>
+            <p className="text-2xl font-bold text-emerald-900">
+              {new Set(residents.filter(r => r.unidade).map(r => `${r.unidade}-${r.block || ''}-${r.street || ''}`)).size}
+            </p>
+          </div>
+        </div>
+      )}
+
       <div className="relative mb-8">
         <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-zinc-400" />
         <input
@@ -1326,8 +1342,8 @@ export default function Portaria({ user }: PortariaProps) {
         )
       ) : (
         <div className="space-y-6">
-          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-8">
-            <h2 className="text-3xl font-bold text-zinc-900">MORADORES ({residents.length})</h2>
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-4">
+            <h2 className="text-3xl font-bold text-zinc-900 uppercase">Moradores ({residents.length})</h2>
           </div>
 
           {filteredResidents.length > 0 ? (

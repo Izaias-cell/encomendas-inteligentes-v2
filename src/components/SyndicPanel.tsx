@@ -136,6 +136,7 @@ const Dashboard = ({ user, residents = [], logs = [], systemStatus }: any) => {
     notificationsSent: 0,
     failedWhatsApp: 0,
     residentsCount: 0,
+    totalUnits: 0,
     qrRetrievals: 0,
     manualRetrievals: 0,
     lastPackage: null as any
@@ -182,6 +183,7 @@ const Dashboard = ({ user, residents = [], logs = [], systemStatus }: any) => {
         notificationsSent: (logs || []).filter((l: any) => l.status_envio === 'sucesso' || l.status === 'sent').length,
         failedWhatsApp: (logs || []).filter((l: any) => l.status_envio === 'erro' || l.status === 'failed').length,
         residentsCount: (residents || []).filter((r: any) => r.ativo).length,
+        totalUnits: new Set((residents || []).filter((r: any) => r.ativo && r.unidade).map((r: any) => `${r.unidade}-${r.block || ''}-${r.street || ''}`)).size,
         qrRetrievals: pkgs.filter((p: any) => p.delivery_method === 'qr_code').length,
         manualRetrievals: pkgs.filter((p: any) => 
           p.status === 'delivered' && 
@@ -275,8 +277,11 @@ const Dashboard = ({ user, residents = [], logs = [], systemStatus }: any) => {
               <Users className="w-5 h-5" />
             </div>
           </div>
-          <p className="text-zinc-500 text-xs font-bold uppercase tracking-wider">MORADORES ({stats.residentsCount})</p>
-          <h3 className="text-3xl font-bold text-zinc-900">{stats.residentsCount}</h3>
+          <p className="text-zinc-500 text-xs font-bold uppercase tracking-wider">Cadastro</p>
+          <div className="flex flex-col">
+            <h3 className="text-2xl font-bold text-zinc-900 leading-tight">Moradores: {stats.residentsCount}</h3>
+            <h3 className="text-xl font-bold text-zinc-400 leading-tight">Casas: {stats.totalUnits}</h3>
+          </div>
         </Card>
 
         <Card className="bg-indigo-50 border-indigo-100 lg:col-span-2">
