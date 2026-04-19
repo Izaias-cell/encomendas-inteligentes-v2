@@ -1,27 +1,31 @@
+const PORTEIRO_MANUAL_KEY = 'porteiro_manual';
+
 /**
- * Determina o porteiro de plantão com base no dia do mês e horário.
- * 
- * DIAS PARES:
- * - Marcos → 07:00 às 19:00
- * - Izaias → 19:00 às 07:00
- * 
- * DIAS ÍMPARES:
- * - Bruno → 07:00 às 19:00
- * - Marisa → 19:00 às 07:00
+ * Retorna o porteiro selecionado manualmente no localStorage.
  */
 export const getCurrentPorter = (): string => {
-  const now = new Date();
-  const day = now.getDate();
-  const hour = now.getHours();
-
-  const isEvenDay = day % 2 === 0;
-  const isDayShift = hour >= 7 && hour < 19;
-
-  if (isEvenDay) {
-    return isDayShift ? 'Marcos' : 'Izaias';
-  } else {
-    return isDayShift ? 'Bruno' : 'Marisa';
+  // 1. Verificamos se existe uma seleção manual no localStorage
+  const manualPorter = localStorage.getItem(PORTEIRO_MANUAL_KEY);
+  if (manualPorter) {
+    return manualPorter;
   }
+
+  // 2. Fallback caso não haja seleção ainda
+  return 'Selecione o Porteiro';
+};
+
+/**
+ * Salva a seleção manual do porteiro.
+ */
+export const setManualPorter = (name: string): void => {
+  localStorage.setItem(PORTEIRO_MANUAL_KEY, name);
+};
+
+/**
+ * Limpa a seleção manual do porteiro, voltando para o automático.
+ */
+export const clearManualPorter = (): void => {
+  localStorage.removeItem(PORTEIRO_MANUAL_KEY);
 };
 
 /**

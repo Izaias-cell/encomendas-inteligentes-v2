@@ -40,7 +40,7 @@ import { QRCodeSVG } from 'qrcode.react';
 import { formatDate, formatSafeDateTime } from '../lib/dateUtils';
 import { getResidentAddressLines, formatPackageUnit } from '../lib/residentUtils';
 import { ptBR } from 'date-fns/locale';
-import { getCurrentPorter } from '../lib/porterUtils';
+import { getCurrentPorter, setManualPorter, clearManualPorter } from '../lib/porterUtils';
 
 import toast from 'react-hot-toast';
 import { logAction } from '../services/auditService';
@@ -192,13 +192,6 @@ export default function Portaria({ user }: PortariaProps) {
     fetchData();
     fetchPendingNotices();
     fetchCondoName();
-    
-    // Atualizar o porteiro a cada minuto para garantir que a troca de turno apareça
-    const interval = setInterval(() => {
-      setCurrentPorter(getCurrentPorter());
-    }, 60000);
-    
-    return () => clearInterval(interval);
   }, [user.condominium_id]);
 
   useEffect(() => {
@@ -1052,10 +1045,14 @@ export default function Portaria({ user }: PortariaProps) {
             <p className="text-zinc-500 font-medium truncate max-w-[60%] md:max-w-none">{condoName}</p>
             <button 
               onClick={() => setShowPorterModal(true)}
-              className="flex items-center gap-2.5 text-zinc-400 text-[10px] md:text-xs font-semibold uppercase tracking-widest flex-shrink-0 whitespace-nowrap hover:bg-zinc-50 px-3 py-1.5 rounded-xl border border-transparent hover:border-zinc-100 transition-all active:scale-95"
+              className={`flex items-center gap-2.5 text-[10px] md:text-xs font-semibold uppercase tracking-widest flex-shrink-0 whitespace-nowrap px-3 py-1.5 rounded-xl border transition-all active:scale-95 ${
+                currentPorter === 'Selecione o Porteiro' 
+                  ? 'bg-amber-50 text-amber-600 border-amber-200 animate-pulse' 
+                  : 'text-zinc-400 hover:bg-zinc-50 border-transparent hover:border-zinc-100'
+              }`}
               title="Trocar Porteiro"
             >
-              <User className="w-4 h-4" />
+              <User className={`w-4 h-4 ${currentPorter === 'Selecione o Porteiro' ? 'text-amber-500' : ''}`} />
               <span>Porteiro: {currentPorter}</span>
             </button>
           </div>
@@ -1827,6 +1824,7 @@ export default function Portaria({ user }: PortariaProps) {
                       key={porter}
                       onClick={() => {
                         setCurrentPorter(porter);
+                        setManualPorter(porter);
                         setShowPorterModal(false);
                         toast.success(`Porteiro alterado para ${porter}`);
                       }}
@@ -1841,7 +1839,7 @@ export default function Portaria({ user }: PortariaProps) {
                     </button>
                   ))}
                 </div>
-                
+
                 <button
                   onClick={() => setShowPorterModal(false)}
                   className="w-full mt-6 py-4 bg-zinc-900 text-white rounded-2xl font-bold hover:bg-zinc-800 transition-all"

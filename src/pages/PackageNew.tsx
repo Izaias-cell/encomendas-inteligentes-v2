@@ -655,7 +655,7 @@ export default function PackageNew({ user }: PackageNewProps) {
             {step === 'camera' ? 'Capturar Encomenda' : 'Registrar Encomenda'}
             <div className="flex items-center justify-center gap-1.5 mt-0.5">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-              <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-wider">
+              <span className={`text-[10px] font-bold uppercase tracking-wider ${getCurrentPorter() === 'Selecione o Porteiro' ? 'text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200' : 'text-emerald-600'}`}>
                 Porteiro: {getCurrentPorter()}
               </span>
             </div>
