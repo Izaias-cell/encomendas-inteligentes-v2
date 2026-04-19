@@ -16,6 +16,8 @@ export interface Profile {
   complement?: string;
   active: boolean;
   must_change_password?: boolean;
+  horario_inicio?: string;
+  horario_fim?: string;
   created_by?: string;
   updated_by?: string;
   created_at: string;
@@ -83,6 +85,9 @@ export interface Package {
   received_at: string;
   delivered_at?: string;
   received_by: string;
+  porter_name?: string;
+  recebido_por?: string;
+  entregue_por?: string;
   registered_by?: string;
   created_by?: string;
   delivered_by?: string;

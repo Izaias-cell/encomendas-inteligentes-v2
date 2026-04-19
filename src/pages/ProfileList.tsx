@@ -338,12 +338,7 @@ export default function ProfileList({ user }: ProfileListProps) {
                         <div className="absolute right-0 mt-2 w-56 bg-white rounded-2xl shadow-2xl border border-zinc-100 py-2 z-20 overflow-hidden animate-in fade-in zoom-in duration-200 origin-top-right">
                           <button
                             onClick={() => {
-                              if (profile.role === 'resident') {
-                                navigate('/portaria?tab=residents');
-                                toast.success("Localize o morador e clique em Editar");
-                              } else {
-                                handleOpenEditModal(profile);
-                              }
+                              handleOpenEditModal(profile);
                               setActiveResidentMenu(null);
                             }}
                             className="w-full px-4 py-3 text-left text-sm font-bold text-zinc-700 hover:bg-zinc-50 flex items-center gap-3 transition-colors"

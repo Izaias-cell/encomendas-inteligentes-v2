@@ -118,6 +118,25 @@ export const getLevenshteinDistance = (a: string, b: string): number => {
   return matrix[a.length][b.length];
 };
 
+/**
+ * Extrai o primeiro nome e o sobrenome (última palavra)
+ */
+/**
+ * Extrai o primeiro nome
+ */
+const getFirstName = (fullName: string) => {
+  const normalized = normalizeName(fullName);
+  const parts = normalized.split(' ').filter(p => p.length > 0);
+  return parts[0] || '';
+};
+
+/**
+ * Extrai as N primeiras letras de uma string
+ */
+const getFirstNLetters = (text: string, n: number) => {
+  return text.substring(0, n).toUpperCase();
+};
+
 export const findMatchingResidents = async (
   condominiumId: string,
   unit: string,
@@ -128,22 +147,6 @@ export const findMatchingResidents = async (
     return [];
   }
 
-  const normalizedOcrUnit = normalizeUnit(unit || '');
-  const normalizedOcrName = normalizeName(name || '');
-  const ocrStreet = normalizeName(details?.street || '');
-  
-  const ocrNum = details?.number || (unit?.match(/\d+/) ? unit.match(/\d+/)![0] : '');
-  
-  // AVOID MISASSOCIATION: If the unit number looks like a tracking code or logistical text, ignore it
-  const logisticalPrefixes = ['BR', 'CR', 'FA', 'PR', 'NF', 'ROTA', 'STOP', 'PARADA', 'PEDIDO', 'HUB', 'PAC'];
-  const isLogisticalText = unit && logisticalPrefixes.some(p => unit.toUpperCase().startsWith(p));
-  const isLikelyTrackingCode = (ocrNum && ocrNum.length > 6) || isLogisticalText;
-  const effectiveOcrNum = isLikelyTrackingCode ? '' : ocrNum;
-
-  const ocrType = normalizeUnit(details?.type || '');
-  const ocrBlock = normalizeUnit(details?.block || '');
-  const ocrTower = normalizeUnit(details?.tower || '');
-
   // 1. Fetch all active residents for the condominium
   const { data: allResidents } = await supabase
     .from('moradores')
@@ -153,132 +156,78 @@ export const findMatchingResidents = async (
 
   if (!allResidents || allResidents.length === 0) return [];
 
-  // 1.5 Determine if street is a relevant differentiator
-  const streetFrequency: Record<string, number> = {};
-  let totalWithStreet = 0;
-  allResidents.forEach(r => {
-    const s = (r.street || '').trim().toUpperCase();
-    if (s) {
-      streetFrequency[s] = (streetFrequency[s] || 0) + 1;
-      totalWithStreet++;
-    }
-  });
+  const normalizedOcrName = normalizeName(name || '').toUpperCase();
+  const normalizedOcrUnit = normalizeUnit(unit || '').toLowerCase();
+  
+  // Se tivermos detalhes da unidade (número isolado), usamos também
+  const ocrUnitNum = details?.number ? normalizeUnit(details.number).toLowerCase() : '';
 
-  const distinctStreets = Object.keys(streetFrequency).length;
-  const maxFreq = Math.max(0, ...Object.values(streetFrequency));
-  const isStreetRelevant = totalWithStreet > 0 && distinctStreets > 1 && (maxFreq / totalWithStreet) < 0.8;
+  // 2. Extrair Primeiro Nome do OCR
+  const ocrFirstName = getFirstName(normalizedOcrName);
+  const ocrF3Name = getFirstNLetters(ocrFirstName, 3);
+  const ocrF4Name = getFirstNLetters(ocrFirstName, 4);
 
-  // 2. Fetch history (last 50 packages) to boost confidence
-  const { data: history } = await supabase
-    .from('packages')
-    .select('recipient_id, unit_number, recipient_name_raw')
-    .eq('condominium_id', condominiumId)
-    .order('received_at', { ascending: false })
-    .limit(50);
-
-  // Scoring system for residents
   const scoredResidents = allResidents.map(r => {
     let score = 0;
-    const resName = normalizeName(r.nome || '');
-    const resUnit = normalizeUnit(r.unidade || '');
-    const resType = normalizeUnit(r.unit_type || '');
+    const resFullName = (r.nome || '').toUpperCase();
+    const resUnit = normalizeUnit(r.unidade || '').toLowerCase();
+
+    // 1. Primeiro Nome do morador cadastrado
+    const resFirstName = getFirstName(resFullName);
+
+    // 2. Extrair letras para desempate
+    const resF3Name = getFirstNLetters(resFirstName, 3);
+    const resF4Name = getFirstNLetters(resFirstName, 4);
+
+    // 3. MATCHING LÓGICA (Requisito: 3 letras nome + unidade facultativa)
+    const unitMatches = resUnit && (normalizedOcrUnit === resUnit || normalizedOcrUnit.includes(resUnit) || (ocrUnitNum && ocrUnitNum === resUnit));
     
-    // A. Unit Matching (High Priority)
-    if ((unit || details) && !isLikelyTrackingCode) {
-      // 1. Exact number match (Highest Priority)
-      if (r.unidade && effectiveOcrNum && r.unidade.toString() === effectiveOcrNum.toString()) {
-        score += 90; // Increased from 80
-        
-        // 2. Unit type match (Bonus)
-        if (resType && ocrType && resType === ocrType) {
-          score += 40;
-        }
-        
-        // 3. Block/Tower match (Bonus)
-        if (!r.bloco || !ocrBlock || normalizeUnit(r.bloco) === ocrBlock) score += 15;
-        if (!r.lote || !ocrTower || normalizeUnit(r.lote) === ocrTower) score += 15;
-      } else if (r.unidade && effectiveOcrNum && r.unidade.toString().includes(effectiveOcrNum.toString())) {
-        // Partial unit match (e.g. OCR read "10" but unit is "101") - Lower score but still useful
-        score += 30;
-      }
+    // Match de 3 letras (Base principal)
+    const name3Matches = resF3Name.length >= 3 && ocrF3Name === resF3Name;
+    
+    // Match de 4 letras (Desempate de ambiguidade)
+    const name4Matches = resF4Name.length >= 4 && ocrF4Name === resF4Name;
 
-      // Street match (Bonus)
-      if (isStreetRelevant) {
-        const resStreet = normalizeName(r.street || '');
-        if (resStreet && ocrStreet && (resStreet === ocrStreet || resStreet.includes(ocrStreet) || ocrStreet.includes(resStreet))) {
-          score += 50;
-        }
-      }
+    // CÁLCULO DE SCORE
+    
+    // Prioridade Máxima: Unidade + Nome (4 letras)
+    if (unitMatches && name4Matches) {
+      score += 300; // Seleção automática imediata
+    } 
+    // Alta: Unidade + Nome (3 letras)
+    else if (unitMatches && name3Matches) {
+      score += 250; 
+    }
+    // Alta/Média: Apenas Unidade (Se detectada claramente)
+    else if (unitMatches && normalizedOcrUnit.length > 0) {
+      score += 150;
+    }
+    // Média: Apenas Nome (4 letras)
+    else if (name4Matches) {
+      score += 100;
+    }
+    // Base: Apenas Nome (3 letras)
+    else if (name3Matches) {
+      score += 80;
+    }
+    // Fallback: Nome contém as 3 letras mas não no início
+    else if (resF3Name.length >= 3 && normalizedOcrName.includes(resF3Name)) {
+      score += 40;
     }
 
-    // B. Name Matching
-    if (normalizedOcrName) {
-      const ocrParts = normalizedOcrName.split(' ').filter(p => p.length > 1);
-      const resParts = resName.split(' ').filter(p => p.length > 1);
-
-      // Exact match
-      if (resName === normalizedOcrName) {
-        score += 110; // Increased from 100
-        if (resParts.length > 1) {
-          score += 25;
-        }
-      } 
-      // Partial match (contains)
-      else if (resName.includes(normalizedOcrName) || normalizedOcrName.includes(resName)) {
-        score += 70; // Increased from 60
-        if (resName.startsWith(normalizedOcrName) || normalizedOcrName.startsWith(resName)) {
-          score += 25;
-        }
-        // Bonus if multiple parts match
-        let partMatches = 0;
-        ocrParts.forEach(op => {
-          if (resParts.some(rp => rp === op)) {
-            partMatches++;
-          }
-        });
-        if (partMatches > 1) {
-          score += 40; // Increased from 30
-        }
-      } 
-      // Fuzzy match
-      else {
-        const distance = getLevenshteinDistance(normalizedOcrName, resName);
-        if (distance <= 2) {
-          score += 85; // Increased from 80
-        } else {
-          // Match by parts
-          let partMatches = 0;
-          ocrParts.forEach(op => {
-            if (resParts.some(rp => rp === op || rp.startsWith(op) || op.startsWith(rp))) {
-              partMatches++;
-            }
-          });
-
-          if (partMatches > 0) {
-            score += (partMatches / Math.max(ocrParts.length, resParts.length)) * 80; // Increased from 70
-          }
-        }
-      }
-    }
-
-    // C. History Boost
-    if (history && history.length > 0) {
-      const residentHistory = history.filter(h => h.recipient_id === r.id);
-      if (residentHistory.length > 0) {
-        const unitMatch = residentHistory.some(h => normalizeUnit(h.unit_number) === normalizedOcrUnit);
-        if (unitMatch) score += 25;
-        
-        const nameMatch = residentHistory.some(h => normalizeName(h.recipient_name_raw) === normalizedOcrName);
-        if (nameMatch) score += 20;
-      }
+    // SEGURANÇA: Se a unidade foi detectada e NÃO bate, penaliza fortemente
+    if (normalizedOcrUnit && resUnit && !unitMatches) {
+      score = Math.max(0, score - 200);
     }
 
     return { resident: r, score };
   });
 
-  // Filter and sort by score
-  const threshold = 25; // Lowered from 30 to be more tolerant
-  return scoredResidents
-    .filter(sr => sr.score >= threshold)
+  // Ordenar pelo maior score e filtrar os que não tiveram match significativo
+  const sortedMatches = scoredResidents
+    .filter(sr => sr.score >= 40)
     .sort((a, b) => b.score - a.score);
+
+  return sortedMatches;
 };
+

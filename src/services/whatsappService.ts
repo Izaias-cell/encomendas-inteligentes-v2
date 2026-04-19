@@ -154,16 +154,24 @@ export async function sendWhatsAppMessage(
   }
 
   // Use provided config or fallback to hardcoded (for backward compatibility/default)
-  const apiUrl = config?.api_url || "https://api.z-api.io/instances/3F0CA22AFB9F62F46D76D268A7BECB03/token/851123DB426AFD0E08384D87/send-text";
+  let finalApiUrl = config?.api_url || "https://api.z-api.io";
   const apiToken = config?.api_token || "F3cec1a5aa2b14f0cbc667b86c75de2ebS";
+  const instanceId = config?.instance_id || "3F0CA22AFB9F62F46D76D268A7BECB03";
+
+  // If it's pure Z-API and we have instance/token, construct the standard send-text endpoint
+  if (finalApiUrl.includes('api.z-api.io') && instanceId && apiToken) {
+    if (!finalApiUrl.includes('/instances/')) {
+      finalApiUrl = `${finalApiUrl.replace(/\/$/, '')}/instances/${instanceId}/token/${apiToken}/send-text`;
+    }
+  }
 
   console.log("Enviando WhatsApp via API:", {
     phone: normalizedPhone,
-    apiUrl: apiUrl.split('/token/')[0] + '/...' // Hide token in logs
+    apiUrl: finalApiUrl.split('/token/')[0] + '/...' // Hide token in logs
   });
 
   try {
-    const response = await fetch(apiUrl, {
+    const response = await fetch(finalApiUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

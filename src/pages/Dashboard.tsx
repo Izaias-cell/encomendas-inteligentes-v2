@@ -19,7 +19,10 @@ import {
   Search,
   Settings,
   Shield,
-  History
+  History,
+  Trash2,
+  AlertTriangle,
+  X
 } from 'lucide-react';
 
 import { normalizeRole } from '../lib/authUtils';
@@ -35,11 +38,31 @@ export default function Dashboard({ user }: DashboardProps) {
     delivered: 0
   });
   const [loading, setLoading] = useState(true);
+  const [showClearModal, setShowClearModal] = useState(false);
+  const [clearing, setClearing] = useState(false);
+  const [condoName, setCondoName] = useState('');
   const navigate = useNavigate();
 
   useEffect(() => {
     fetchStats();
+    fetchCondoName();
   }, [user.condominium_id]);
+
+  const fetchCondoName = async () => {
+    if (!user.condominium_id) return;
+    try {
+      const { data, error } = await supabase
+        .from('condominiums')
+        .select('name')
+        .eq('id', user.condominium_id)
+        .maybeSingle();
+      
+      if (error) throw error;
+      if (data) setCondoName(data.name);
+    } catch (error) {
+      console.error('Erro ao buscar nome do condomínio:', error);
+    }
+  };
 
   const fetchStats = async () => {
     if (!user.condominium_id) return;
@@ -74,6 +97,54 @@ export default function Dashboard({ user }: DashboardProps) {
       console.error('Erro ao buscar estatísticas:', error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleClearTestData = async () => {
+    if (!user.condominium_id) return;
+    
+    // Security check: Only admin can execute
+    if (normalizeRole(user.role) !== 'admin') {
+      toast.error('Apenas administradores podem realizar esta ação.');
+      return;
+    }
+    
+    setClearing(true);
+    try {
+      // 1. Excluir logs de retirada primeiro (devido a FKs se houver, embora schema não mostre ON DELETE CASCADE explícito)
+      const { error: logsError } = await supabase
+        .from('retrieval_logs')
+        .delete()
+        .eq('condominium_id', user.condominium_id);
+      
+      if (logsError) console.warn('Erro ao limpar logs:', logsError);
+
+      // 2. Excluir TODAS as encomendas do condomínio
+      const { error: pkgError } = await supabase
+        .from('packages')
+        .delete()
+        .eq('condominium_id', user.condominium_id);
+
+      if (pkgError) throw pkgError;
+
+      // 3. Excluir moradores de teste
+      // Buscamos moradores que tenham "teste" no nome ou observações
+      const { error: resError } = await supabase
+        .from('moradores')
+        .delete()
+        .eq('condominium_id', user.condominium_id)
+        .or('nome.ilike.%teste%,observacoes.ilike.%teste%');
+
+      if (resError) console.warn('Erro ao limpar moradores de teste:', resError);
+
+      toast.success('Limpeza concluída com sucesso.');
+      setShowClearModal(false);
+      fetchStats();
+    } catch (error: any) {
+      console.error('Erro na limpeza:', error);
+      toast.error('Erro ao realizar limpeza: ' + error.message);
+    } finally {
+      setClearing(false);
     }
   };
 
@@ -117,8 +188,19 @@ export default function Dashboard({ user }: DashboardProps) {
   return (
     <div className="max-w-6xl mx-auto p-6">
       <div className="mb-10">
-        <h1 className="text-3xl font-bold text-zinc-900 mb-2">Olá, {user.full_name}!</h1>
-        <p className="text-zinc-500">Bem-vindo ao painel de controle da Portaria Inteligente.</p>
+        {(() => {
+          const role = normalizeRole(user.role);
+          if (role === 'sindico') {
+            return <h1 className="text-3xl font-bold text-zinc-900 mb-2">{condoName || 'Carregando...'}</h1>;
+          }
+          return (
+            <>
+              <h1 className="text-3xl font-bold text-zinc-900 mb-2">Olá, {user.full_name}!</h1>
+              {role === 'admin' && <p className="text-zinc-500">Gerenciamento completo do sistema</p>}
+              {role === 'porteiro' && <p className="text-zinc-500">Agilidade no registro, recebimento e entrega!</p>}
+            </>
+          );
+        })()}
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
@@ -204,6 +286,17 @@ export default function Dashboard({ user }: DashboardProps) {
           );
         })()}
 
+        {/* Admin Only Actions */}
+        {normalizeRole(user.role) === 'admin' && (
+          <ActionCard 
+            title="Limpar Dados" 
+            description="Remova moradores de teste e todas as encomendas para iniciar o uso real." 
+            icon={Trash2} 
+            onClick={() => setShowClearModal(true)}
+            color="bg-amber-100 text-amber-600"
+          />
+        )}
+
         {/* Resident Actions */}
         {normalizeRole(user.role) === 'resident' && (
           <ActionCard 
@@ -215,6 +308,50 @@ export default function Dashboard({ user }: DashboardProps) {
           />
         )}
       </div>
+
+      {/* Modal de Confirmação de Limpeza */}
+      {showClearModal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white rounded-3xl w-full max-w-md shadow-2xl animate-in zoom-in-95 duration-200 overflow-hidden">
+            <div className="p-8">
+              <div className="w-16 h-16 bg-amber-100 text-amber-600 rounded-2xl flex items-center justify-center mb-6">
+                <AlertTriangle className="w-8 h-8" />
+              </div>
+              
+              <h3 className="text-2xl font-bold text-zinc-900 mb-4">Confirmar Limpeza</h3>
+              
+              <p className="text-zinc-600 leading-relaxed mb-8">
+                Deseja realmente limpar os dados de teste? Esta ação excluirá os moradores marcados com <span className="font-bold text-zinc-900">'teste'</span> e apagará <span className="font-bold text-zinc-900">todos os registros de encomendas</span> do sistema. Os moradores reais permanecerão cadastrados.
+              </p>
+
+              <div className="flex flex-col gap-3">
+                <button
+                  onClick={handleClearTestData}
+                  disabled={clearing}
+                  className="w-full bg-amber-600 text-white py-4 rounded-2xl font-bold hover:bg-amber-700 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  {clearing ? (
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                  ) : (
+                    <>
+                      <Trash2 className="w-5 h-5" />
+                      Confirmar e Limpar
+                    </>
+                  )}
+                </button>
+                
+                <button
+                  onClick={() => setShowClearModal(false)}
+                  disabled={clearing}
+                  className="w-full bg-zinc-100 text-zinc-600 py-4 rounded-2xl font-bold hover:bg-zinc-200 transition-all disabled:opacity-50"
+                >
+                  Cancelar
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

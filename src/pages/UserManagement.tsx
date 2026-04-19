@@ -31,51 +31,47 @@ export default function UserManagement({ user }: UserManagementProps) {
     email: '', // For Auth creation (simulated)
     role: 'porteiro' as Role,
     condominium_id: '',
-    active: true
+    active: true,
+    horario_inicio: '',
+    horario_fim: ''
   });
 
   const navigate = useNavigate();
 
   useEffect(() => {
-    if (user.role !== 'admin' && user.role !== 'sindico') {
+    // Only redirect if we ARE sure the user should not be here
+    // Avoid redirecting if user state is temporarily loading/missing
+    if (user?.role && user.role !== 'admin' && user.role !== 'sindico') {
       navigate('/portaria');
-      return;
     }
     fetchData();
-  }, [user.role]);
+  }, [user?.role]);
 
   const fetchData = async () => {
     setLoading(true);
     try {
-      let query = supabase
-        .from('profiles')
-        .select('*')
-        .in('role', ['admin', 'sindico', 'porteiro'])
-        .order('full_name');
-
-      if (user.role === 'sindico') {
-        query = query.eq('condominium_id', user.condominium_id);
+      const session = await getValidSession();
+      if (!session) {
+        throw new Error('Sessão não encontrada');
       }
 
-      const { data: profiles, error: pError } = await query;
-
-      if (pError) throw pError;
+      // Fetch profiles via backend API to bypass RLS and support preview sessions
+      const pResponse = await fetch('/api/admin/users', {
+        headers: { 'Authorization': `Bearer ${session.access_token}` }
+      });
+      if (!pResponse.ok) throw new Error('Erro ao carregar usuários');
+      const { profiles } = await pResponse.json();
       setUsers(profiles || []);
 
-      let condoQuery = supabase
-        .from('condominiums')
-        .select('*')
-        .order('name');
-      
-      if (user.role === 'sindico') {
-        condoQuery = condoQuery.eq('id', user.condominium_id);
-      }
-
-      const { data: condominiums, error: cError } = await condoQuery;
-
-      if (cError) throw cError;
+      // Fetch condominiums via backend API
+      const cResponse = await fetch('/api/admin/condominiums', {
+        headers: { 'Authorization': `Bearer ${session.access_token}` }
+      });
+      if (!cResponse.ok) throw new Error('Erro ao carregar condomínios');
+      const { condominiums } = await cResponse.json();
       setCondos(condominiums || []);
     } catch (error: any) {
+      console.error("[DEBUG FRONTEND] Erro ao carregar dados:", error);
       toast.error('Erro ao carregar dados: ' + error.message);
     } finally {
       setLoading(false);
@@ -91,7 +87,9 @@ export default function UserManagement({ user }: UserManagementProps) {
         email: u.email || '',
         role: u.role,
         condominium_id: u.condominium_id || '',
-        active: u.active
+        active: u.active,
+        horario_inicio: u.horario_inicio || '',
+        horario_fim: u.horario_fim || ''
       });
     } else {
       setEditingUser(null);
@@ -101,96 +99,78 @@ export default function UserManagement({ user }: UserManagementProps) {
         email: '',
         role: 'porteiro',
         condominium_id: user.role === 'sindico' ? user.condominium_id : (condos[0]?.id || ''),
-        active: true
+        active: true,
+        horario_inicio: '',
+        horario_fim: ''
       });
     }
     setShowModal(true);
   };
 
   const getValidSession = async () => {
-    console.log("[DEBUG FRONTEND] getValidSession iniciada");
     try {
       // 1. Try to get current session from Supabase
-      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
-      
-      if (session) {
-        console.log("[DEBUG FRONTEND] Sessão encontrada via getSession");
-        return session;
-      }
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session) return session;
 
-      if (sessionError) {
-        console.warn('[DEBUG FRONTEND] Aviso ao buscar sessão:', sessionError.message);
-      }
-
-      // 2. Check for Mock User (AI Studio Preview)
-      // If we have a user prop with a mock ID, we return a simulated session
-      if (user.id && user.id.startsWith('00000000-0000-0000-0000')) {
-        console.warn("[DEBUG FRONTEND] Usuário Mock detectado. Retornando sessão simulada.");
+      // 2. Check for Mock User (AI Studio Preview) fallback
+      if (user && user.id) {
         return {
           access_token: 'MOCK_TOKEN',
           user: { id: user.id, email: user.email || 'demo@example.com' }
         } as any;
       }
 
-      // 3. Try fallback to getUser() which might work if session is partially lost
-      console.log("[DEBUG FRONTEND] Sessão não encontrada via getSession, tentando getUser...");
-      const { data: { user: authUser }, error: userError } = await supabase.auth.getUser();
-      
+      // 3. Fallback to getUser()
+      const { data: { user: authUser } } = await supabase.auth.getUser();
       if (authUser) {
-        console.log("[DEBUG FRONTEND] Usuário encontrado via getUser, tentando recuperar sessão...");
-        const { data: { session: refreshedSession } } = await supabase.auth.getSession();
-        if (refreshedSession) {
-          console.log("[DEBUG FRONTEND] Sessão recuperada com sucesso");
-          return refreshedSession;
-        }
-        
-        // If we have a user but no session object, we can't get a token for the backend
-        // but we might be able to proceed if it's a local operation (not the case here)
+        const { data: { session: refreshed } } = await supabase.auth.getSession();
+        if (refreshed) return refreshed;
       }
 
-      if (userError && userError.message !== 'Auth session missing!') {
-        console.error('[DEBUG FRONTEND] Erro ao buscar usuário via getUser:', userError.message);
-      }
-
-      console.error("[DEBUG FRONTEND] Nenhuma sessão válida encontrada");
       return null;
     } catch (err) {
-      console.error('[DEBUG FRONTEND] Erro inesperado no getValidSession:', err);
+      console.error('[DEBUG FRONTEND] Erro ao validar sessão:', err);
       return null;
     }
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleCreateUser = async (e?: React.FormEvent | React.MouseEvent) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    
+    if (modalLoading) return;
+    
+    // Manual validation because type="button" might bypass HTML5 validation in some scenarios
+    if (!editingUser && !formData.email) {
+      toast.error('O e-mail é obrigatório para novos usuários.');
+      return;
+    }
+    if (!formData.full_name) {
+      toast.error('O nome completo é obrigatório.');
+      return;
+    }
+    if (formData.role === 'porteiro' && !formData.condominium_id) {
+      toast.error('Selecione um condomínio para o porteiro.');
+      return;
+    }
+
     setModalLoading(true);
 
     try {
-      console.log("[DEBUG FRONTEND] handleSubmit iniciado", { editingUser: editingUser?.id, formData });
       const session = await getValidSession();
       
       if (!session) {
-        console.error("[DEBUG FRONTEND] Sessão não encontrada no handleSubmit");
-        toast.error('Sessão não encontrada. Por favor, faça login novamente para realizar esta ação.');
+        toast.error('Não foi possível validar sua sessão. Tente recarregar a página antes de salvar.');
         setModalLoading(false);
         return;
       }
 
-      const isMock = session.access_token === 'MOCK_TOKEN';
       const loadingToast = toast.loading(editingUser ? 'Salvando alterações...' : 'Criando usuário...');
 
       if (editingUser) {
-        if (isMock) {
-          // Simulate success for mock users
-          setTimeout(() => {
-            const updatedProfile = { ...editingUser, ...formData };
-            setUsers(prev => prev.map(u => u.id === editingUser.id ? updatedProfile : u));
-            toast.success('Usuário atualizado com sucesso! (Modo Demo) ✅', { id: loadingToast });
-            setShowModal(false);
-            setModalLoading(false);
-          }, 1000);
-          return;
-        }
-
         console.log("[DEBUG FRONTEND] Enviando PATCH para /api/admin/users/" + editingUser.id);
         // Update existing user profile via backend API to ensure consistency and bypass RLS if needed
         const response = await fetch(`/api/admin/users/${editingUser.id}`, {
@@ -204,7 +184,9 @@ export default function UserManagement({ user }: UserManagementProps) {
             phone: formData.phone,
             role: formData.role,
             condominium_id: formData.condominium_id || null,
-            active: formData.active
+            active: formData.active,
+            horario_inicio: formData.horario_inicio || null,
+            horario_fim: formData.horario_fim || null
           })
         });
 
@@ -239,26 +221,6 @@ export default function UserManagement({ user }: UserManagementProps) {
 
         toast.success('Usuário atualizado com sucesso! ✅', { id: loadingToast });
       } else {
-        if (isMock) {
-          // Simulate creation for mock users
-          setTimeout(() => {
-            const newProfile = { 
-              id: Math.random().toString(36).substring(7),
-              ...formData,
-              created_at: new Date().toISOString(),
-              active: true
-            } as Profile;
-            setUsers(prev => [...prev, newProfile]);
-            toast.success(`Usuário criado com sucesso! (Modo Demo) ✅`, {
-              id: loadingToast,
-              duration: 5000
-            });
-            setShowModal(false);
-            setModalLoading(false);
-          }, 1000);
-          return;
-        }
-
         // Create new user with temporary password
         const tempPassword = Math.random().toString(36).slice(-8);
         console.log("[DEBUG FRONTEND] Criando novo usuário com senha temporária");
@@ -275,11 +237,11 @@ export default function UserManagement({ user }: UserManagementProps) {
             full_name: formData.full_name,
             phone: formData.phone,
             role: formData.role,
-            condominium_id: formData.condominium_id || null
+            condominium_id: formData.condominium_id || null,
+            horario_inicio: formData.horario_inicio || null,
+            horario_fim: formData.horario_fim || null
           })
         });
-
-        console.log("[DEBUG FRONTEND] Resposta POST recebida:", response.status);
 
         if (!response.ok) {
           const err = await response.json();
@@ -289,8 +251,7 @@ export default function UserManagement({ user }: UserManagementProps) {
         }
 
         const { profile: newProfile } = await response.json();
-        console.log("[DEBUG FRONTEND] Novo usuário criado com sucesso:", newProfile);
-
+        
         // Update local state
         setUsers(prev => [...prev, newProfile]);
 
@@ -318,7 +279,7 @@ export default function UserManagement({ user }: UserManagementProps) {
       // Still call fetchData to ensure everything is in sync (e.g. condo names)
       fetchData();
     } catch (error: any) {
-      console.error('Erro no handleSubmit:', error);
+      console.error('Erro ao salvar usuário:', error);
       toast.error('Erro ao salvar usuário: ' + error.message);
     } finally {
       setModalLoading(false);
@@ -328,27 +289,15 @@ export default function UserManagement({ user }: UserManagementProps) {
   const handleResetPassword = async (u: Profile) => {
     if (!confirm(`Deseja realmente resetar a senha de ${u.full_name}? Uma nova senha temporária será gerada.`)) return;
 
+    const toastId = toast.loading('Resetando senha...');
     try {
-      console.log("[DEBUG FRONTEND] handleResetPassword iniciado para:", u.id, u.email);
-      const session = await getValidSession();
-      if (!session) {
-        console.error("[DEBUG FRONTEND] Sessão não encontrada no handleResetPassword");
-        toast.error('Sessão não encontrada. Por favor, faça login novamente.');
-        return;
-      }
-
-      const isMock = session.access_token === 'MOCK_TOKEN';
       const newPassword = Math.random().toString(36).slice(-8);
-
-      if (isMock) {
-        toast.success(`Senha resetada com sucesso! (Modo Demo) Nova senha: ${newPassword} ✅`, {
-          duration: 10000,
-          icon: '🔑'
-        });
-        return;
+      const session = await getValidSession();
+      
+      if (!session) {
+        throw new Error('Sessão não encontrada');
       }
 
-      console.log("[DEBUG FRONTEND] Enviando POST para reset-password");
       const response = await fetch(`/api/admin/users/${u.id}/reset-password`, {
         method: 'POST',
         headers: {
@@ -358,58 +307,42 @@ export default function UserManagement({ user }: UserManagementProps) {
         body: JSON.stringify({ newPassword })
       });
 
-      console.log("[DEBUG FRONTEND] Resposta reset-password recebida:", response.status);
-
       if (!response.ok) {
         const err = await response.json();
-        console.error("[DEBUG FRONTEND] Erro no reset-password:", err);
         throw new Error(err.error || 'Erro ao resetar senha');
       }
 
-      try {
-        await logAction(
-          user.id,
-          user.condominium_id,
-          'RESET_PASSWORD',
-          'profiles',
-          u.id,
-          null,
-          { must_change_password: true }
-        );
-      } catch (auditErr) {
-        console.warn("[DEBUG FRONTEND] Erro ao registrar log de auditoria (não crítico):", auditErr);
-      }
+      logAction(
+        user.id,
+        user.condominium_id,
+        'RESET_PASSWORD',
+        'profiles',
+        u.id,
+        null,
+        { must_change_password: true }
+      ).catch(() => {});
 
-      toast.success(`Senha resetada com sucesso! Nova senha temporária: ${newPassword} ✅`, {
+      toast.success(`Senha resetada com sucesso! Nova senha temporária: ${newPassword}`, {
+        id: toastId,
         duration: 10000,
         icon: '🔑'
       });
     } catch (error: any) {
       console.error("Erro ao resetar senha:", error);
-      toast.error('Erro ao resetar senha: ' + error.message + ' ❌');
+      toast.error('Erro ao resetar: ' + error.message, { id: toastId });
     }
   };
 
   const toggleStatus = async (u: Profile) => {
     try {
-      console.log("[DEBUG FRONTEND] toggleStatus iniciado para:", u.id, "Status atual:", u.active);
-      const session = await getValidSession();
-      if (!session) {
-        console.error("[DEBUG FRONTEND] Sessão não encontrada no toggleStatus");
-        toast.error('Sessão não encontrada. Por favor, faça login novamente.');
-        return;
-      }
-
-      const isMock = session.access_token === 'MOCK_TOKEN';
       const newStatus = !u.active;
-
-      if (isMock) {
-        setUsers(prev => prev.map(item => item.id === u.id ? { ...item, active: newStatus } : item));
-        toast.success(`Usuário ${newStatus ? 'ativado' : 'inativado'} com sucesso! (Modo Demo) ✅`);
-        return;
-      }
       
-      console.log("[DEBUG FRONTEND] Enviando PATCH para alterar status para:", newStatus);
+      // Optimistic UI update
+      setUsers(prev => prev.map(item => item.id === u.id ? { ...item, active: newStatus } : item));
+      
+      const session = await getValidSession();
+      if (!session) throw new Error('Sessão não encontrada');
+      
       const response = await fetch(`/api/admin/users/${u.id}`, {
         method: 'PATCH',
         headers: {
@@ -419,36 +352,27 @@ export default function UserManagement({ user }: UserManagementProps) {
         body: JSON.stringify({ active: newStatus })
       });
 
-      console.log("[DEBUG FRONTEND] Resposta toggleStatus recebida:", response.status);
-
       if (!response.ok) {
+        // Revert on error
+        setUsers(prev => prev.map(item => item.id === u.id ? { ...item, active: u.active } : item));
         const err = await response.json();
-        console.error("[DEBUG FRONTEND] Erro no toggleStatus:", err);
         throw new Error(err.error || 'Erro ao alterar status');
       }
 
-      // Update local state immediately
-      setUsers(prev => prev.map(item => item.id === u.id ? { ...item, active: newStatus } : item));
-
-      try {
-        await logAction(
-          user.id,
-          user.condominium_id,
-          newStatus ? 'ACTIVATE_USER' : 'DEACTIVATE_USER',
-          'profiles',
-          u.id,
-          { active: u.active },
-          { active: newStatus }
-        );
-      } catch (auditErr) {
-        console.warn("[DEBUG FRONTEND] Erro ao registrar log de auditoria (não crítico):", auditErr);
-      }
+      logAction(
+        user.id,
+        user.condominium_id,
+        newStatus ? 'ACTIVATE_USER' : 'DEACTIVATE_USER',
+        'profiles',
+        u.id,
+        u,
+        { active: newStatus }
+      ).catch(() => {});
 
       toast.success(`Usuário ${newStatus ? 'ativado' : 'inativado'} com sucesso! ✅`);
-      fetchData();
     } catch (error: any) {
       console.error("Erro ao alterar status:", error);
-      toast.error('Erro ao alterar status: ' + error.message + ' ❌');
+      toast.error('Erro ao alterar status: ' + error.message);
     }
   };
 
@@ -458,33 +382,20 @@ export default function UserManagement({ user }: UserManagementProps) {
       return;
     }
 
-    if (!confirm('ATENÇÃO: Deseja excluir este usuário permanentemente? Esta ação não poderá ser desfeita.')) {
+    if (!confirm(`ATENÇÃO: Deseja excluir o usuário ${u.full_name} permanentemente? Esta ação não pode ser desfeita.`)) {
       return;
     }
 
-    console.log("[DEBUG FRONTEND] handleDeleteUser iniciado para:", u.id);
     setDeletingId(u.id);
+    const cachedUsers = users;
+    
     try {
+      // Optimistic UI update
+      setUsers(prev => prev.filter(item => item.id !== u.id));
+
       const session = await getValidSession();
-      if (!session) {
-        console.error("[DEBUG FRONTEND] Sessão não encontrada no handleDeleteUser");
-        toast.error('Sessão não encontrada. Por favor, faça login novamente.');
-        setDeletingId(null);
-        return;
-      }
+      if (!session) throw new Error('Sessão não encontrada');
 
-      const isMock = session.access_token === 'MOCK_TOKEN';
-
-      if (isMock) {
-        setTimeout(() => {
-          setUsers(prev => prev.filter(item => item.id !== u.id));
-          toast.success('Usuário excluído com sucesso! (Modo Demo) ✅');
-          setDeletingId(null);
-        }, 1000);
-        return;
-      }
-
-      console.log("[DEBUG FRONTEND] Enviando DELETE para /api/admin/users/" + u.id);
       const response = await fetch(`/api/admin/users/${u.id}`, {
         method: 'DELETE',
         headers: {
@@ -492,37 +403,28 @@ export default function UserManagement({ user }: UserManagementProps) {
         }
       });
 
-      console.log("[DEBUG FRONTEND] Resposta DELETE recebida:", response.status);
-
       if (!response.ok) {
+        // Revert UI on error
+        setUsers(cachedUsers);
         const err = await response.json();
-        console.error("[DEBUG FRONTEND] Erro no DELETE:", err);
         throw new Error(err.error || 'Erro ao excluir usuário');
       }
 
-      // Update local state immediately
-      const deletedId = u.id;
-      setUsers(prev => prev.filter(item => item.id !== deletedId));
+      logAction(
+        user.id,
+        user.condominium_id,
+        'DELETE_USER',
+        'profiles',
+        u.id,
+        u,
+        null
+      ).catch(() => {});
 
-      try {
-        await logAction(
-          user.id,
-          user.condominium_id,
-          'DELETE_USER',
-          'profiles',
-          u.id,
-          u,
-          null
-        );
-      } catch (auditErr) {
-        console.warn("[DEBUG FRONTEND] Erro ao registrar log de auditoria (não crítico):", auditErr);
-      }
-
-      toast.success('Usuário excluído permanentemente com sucesso ✅');
-      fetchData();
+      toast.success('Usuário excluído com sucesso ✅');
     } catch (error: any) {
       console.error("Erro ao excluir usuário:", error);
-      toast.error('Erro ao excluir usuário: ' + error.message + ' ❌');
+      toast.error('Erro ao excluir: ' + error.message);
+      setUsers(cachedUsers);
     } finally {
       setDeletingId(null);
     }
@@ -531,7 +433,7 @@ export default function UserManagement({ user }: UserManagementProps) {
   const filteredUsers = users.filter(u => 
     u.full_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
     (u.phone || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-    condos.find(c => c.id === u.condominium_id)?.name.toLowerCase().includes(searchTerm.toLowerCase())
+    (condos.find(c => c.id === u.condominium_id)?.name || '').toLowerCase().includes(searchTerm.toLowerCase())
   );
 
   const getRoleLabel = (role: string) => {
@@ -673,7 +575,9 @@ export default function UserManagement({ user }: UserManagementProps) {
                                 </button>
 
                                 <button
+                                  type="button"
                                   onClick={(e) => {
+                                    e.preventDefault();
                                     e.stopPropagation();
                                     handleResetPassword(u);
                                     setActiveMenu(null);
@@ -687,7 +591,9 @@ export default function UserManagement({ user }: UserManagementProps) {
                                 <div className="h-px bg-zinc-100 my-1" />
 
                                 <button
+                                  type="button"
                                   onClick={(e) => {
+                                    e.preventDefault();
                                     e.stopPropagation();
                                     handleDeleteUser(u);
                                     setActiveMenu(null);
@@ -730,12 +636,23 @@ export default function UserManagement({ user }: UserManagementProps) {
               <h2 className="text-xl font-bold text-zinc-900">
                 {editingUser ? 'Editar Usuário' : 'Novo Usuário'}
               </h2>
-              <button onClick={() => setShowModal(false)} className="p-2 hover:bg-zinc-100 rounded-full transition-colors">
+              <button 
+                type="button"
+                onClick={() => setShowModal(false)} 
+                className="p-2 hover:bg-zinc-100 rounded-full transition-colors"
+              >
                 <X className="w-5 h-5 text-zinc-400" />
               </button>
             </div>
 
-            <form onSubmit={handleSubmit} className="p-6 space-y-4">
+            <form 
+              onSubmit={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                handleCreateUser(e);
+              }} 
+              className="p-6 space-y-4"
+            >
               <div>
                 <label className="block text-sm font-medium text-zinc-700 mb-1">Nome Completo</label>
                 <input
@@ -797,6 +714,29 @@ export default function UserManagement({ user }: UserManagementProps) {
                 </div>
               </div>
 
+              {formData.role === 'porteiro' && (
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-zinc-700 mb-1">Início do Plantão</label>
+                    <input
+                      type="time"
+                      value={formData.horario_inicio}
+                      onChange={e => setFormData({...formData, horario_inicio: e.target.value})}
+                      className="w-full px-4 py-2 rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-zinc-700 mb-1">Fim do Plantão</label>
+                    <input
+                      type="time"
+                      value={formData.horario_fim}
+                      onChange={e => setFormData({...formData, horario_fim: e.target.value})}
+                      className="w-full px-4 py-2 rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500"
+                    />
+                  </div>
+                </div>
+              )}
+
               <div>
                 <label className="block text-sm font-medium text-zinc-700 mb-1">Condomínio</label>
                 <select
@@ -831,8 +771,9 @@ export default function UserManagement({ user }: UserManagementProps) {
                   Cancelar
                 </button>
                 <button
-                  type="submit"
+                  type="button"
                   disabled={modalLoading}
+                  onClick={(e) => handleCreateUser(e)}
                   className="flex-1 bg-emerald-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-emerald-700 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
                 >
                   {modalLoading && <Loader2 className="w-4 h-4 animate-spin" />}

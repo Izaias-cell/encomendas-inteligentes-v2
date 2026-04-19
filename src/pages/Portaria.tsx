@@ -40,6 +40,7 @@ import { QRCodeSVG } from 'qrcode.react';
 import { formatDate, formatSafeDateTime } from '../lib/dateUtils';
 import { getResidentAddressLines, formatPackageUnit } from '../lib/residentUtils';
 import { ptBR } from 'date-fns/locale';
+import { getCurrentPorter } from '../lib/porterUtils';
 
 import toast from 'react-hot-toast';
 import { logAction } from '../services/auditService';
@@ -71,6 +72,25 @@ export default function Portaria({ user }: PortariaProps) {
   const [batchProgress, setBatchProgress] = useState({ current: 0, total: 0 });
   const [manualIndex, setManualIndex] = useState(0);
   const [batchPackages, setBatchPackages] = useState<Package[]>([]);
+  const [condoName, setCondoName] = useState('');
+  const [currentPorter, setCurrentPorter] = useState(getCurrentPorter());
+  const [showPorterModal, setShowPorterModal] = useState(false);
+
+  const fetchCondoName = async () => {
+    if (!user.condominium_id) return;
+    try {
+      const { data, error } = await supabase
+        .from('condominiums')
+        .select('name')
+        .eq('id', user.condominium_id)
+        .maybeSingle();
+      
+      if (error) throw error;
+      if (data) setCondoName(data.name);
+    } catch (error) {
+      console.error('Erro ao buscar nome do condomínio:', error);
+    }
+  };
 
   const fetchPendingNotices = async () => {
     if (!user?.condominium_id) return;
@@ -171,6 +191,14 @@ export default function Portaria({ user }: PortariaProps) {
   useEffect(() => {
     fetchData();
     fetchPendingNotices();
+    fetchCondoName();
+    
+    // Atualizar o porteiro a cada minuto para garantir que a troca de turno apareça
+    const interval = setInterval(() => {
+      setCurrentPorter(getCurrentPorter());
+    }, 60000);
+    
+    return () => clearInterval(interval);
   }, [user.condominium_id]);
 
   useEffect(() => {
@@ -873,6 +901,7 @@ export default function Portaria({ user }: PortariaProps) {
           delivered_at: new Date().toISOString(),
           delivery_method: finalMethod,
           ...(authUser?.id ? { delivered_by: authUser.id } : {}),
+          entregue_por: currentPorter, // Novo campo solicitado
           pickup_qr_code: 'used',
           delivered_to_name: 'Morador (Confirmado)',
           ...(finalPhotoUrl ? { delivery_photo_url: finalPhotoUrl } : {}),
@@ -1017,9 +1046,20 @@ export default function Portaria({ user }: PortariaProps) {
   return (
     <div className="max-w-6xl mx-auto p-6">
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-8">
-        <div>
-          <h1 className="text-3xl font-bold text-zinc-900">Painel da Portaria</h1>
-          <p className="text-zinc-500">Gestão operacional de encomendas e moradores</p>
+        <div className="flex-1">
+          <h1 className="text-3xl font-bold text-zinc-900 uppercase">PAINEL DA PORTARIA</h1>
+          <div className="flex items-center justify-between gap-8 mt-1 border-b border-zinc-100 pb-2">
+            <p className="text-zinc-500 font-medium truncate max-w-[60%] md:max-w-none">{condoName}</p>
+            <button 
+              onClick={() => setShowPorterModal(true)}
+              className="flex items-center gap-2.5 text-zinc-400 text-[10px] md:text-xs font-semibold uppercase tracking-widest flex-shrink-0 whitespace-nowrap hover:bg-zinc-50 px-3 py-1.5 rounded-xl border border-transparent hover:border-zinc-100 transition-all active:scale-95"
+              title="Trocar Porteiro"
+            >
+              <User className="w-4 h-4" />
+              <span>Porteiro: {currentPorter}</span>
+            </button>
+          </div>
+          <p className="text-zinc-400 text-sm mt-2">Agilidade no registro, recebimento e entrega!</p>
         </div>
           <div className="flex flex-wrap gap-3 w-full md:w-auto">
           <div className="flex flex-1 md:flex-none gap-2">
@@ -1762,6 +1802,57 @@ export default function Portaria({ user }: PortariaProps) {
           </motion.div>
         </div>
       )}
+
+      {/* Modal de Seleção de Porteiro */}
+      <AnimatePresence>
+        {showPorterModal && (
+          <div className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-zinc-900/80 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-sm overflow-hidden"
+            >
+              <div className="p-8">
+                <div className="flex justify-between items-center mb-6">
+                  <h3 className="text-xl font-bold text-zinc-900">Selecionar Porteiro</h3>
+                  <button onClick={() => setShowPorterModal(false)} className="p-2 hover:bg-zinc-100 rounded-full transition-colors text-zinc-400">
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+                
+                <div className="grid grid-cols-1 gap-3">
+                  {['Marcos', 'Izaias', 'Bruno', 'Marisa', 'Outro'].map((porter) => (
+                    <button
+                      key={porter}
+                      onClick={() => {
+                        setCurrentPorter(porter);
+                        setShowPorterModal(false);
+                        toast.success(`Porteiro alterado para ${porter}`);
+                      }}
+                      className={`w-full py-4 px-6 rounded-2xl font-bold transition-all text-left flex items-center justify-between border ${
+                        currentPorter === porter 
+                          ? 'bg-emerald-50 border-emerald-200 text-emerald-700' 
+                          : 'bg-zinc-50 border-zinc-100 text-zinc-600 hover:bg-zinc-100 hover:border-zinc-200'
+                      }`}
+                    >
+                      {porter}
+                      {currentPorter === porter && <Check className="w-5 h-5" />}
+                    </button>
+                  ))}
+                </div>
+                
+                <button
+                  onClick={() => setShowPorterModal(false)}
+                  className="w-full mt-6 py-4 bg-zinc-900 text-white rounded-2xl font-bold hover:bg-zinc-800 transition-all"
+                >
+                  Fechar
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* Modal de Confirmação de Exclusão de Morador */}
       <AnimatePresence>

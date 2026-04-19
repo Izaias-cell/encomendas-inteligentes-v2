@@ -545,9 +545,7 @@ const PackagesList = ({ user, counts: externalCounts }: any) => {
           *, 
           package_id:id, 
           recipient_name:recipient_name_raw, 
-          unit_label:unit_number,
-          registrar:profiles!packages_created_by_fkey(full_name),
-          deliverer:profiles!packages_delivered_by_fkey(full_name)
+          unit_label:unit_number
         `)
         .eq('condominium_id', user.condominium_id)
         .order('received_at', { ascending: false });
@@ -717,8 +715,8 @@ const PackagesList = ({ user, counts: externalCounts }: any) => {
       formatPackageUnit(pkg) || "",
       formatSafeDateTime(pkg.received_at) || "",
       pkg.delivered_at ? formatSafeDateTime(pkg.delivered_at) : "Pendente",
-      pkg.registrar?.full_name || pkg.porter_name || "-",
-      pkg.delivered_at ? (pkg.deliverer?.full_name || "-") : "-",
+      pkg.registrar?.full_name || pkg.recebido_por || pkg.porter_name || "-",
+      pkg.delivered_at ? (pkg.deliverer?.full_name || pkg.entregue_por || "-") : "-",
       pkg.delivered_at ? getDeliveryMethodLabel(pkg.delivery_method) : "-"
     ]);
 
@@ -972,7 +970,7 @@ const PackagesList = ({ user, counts: externalCounts }: any) => {
               </div>
               <div>
                 <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest block mb-1">Registrado por</label>
-                <p className="text-sm text-zinc-900">{selectedPackage.registered_by_name || 'Portaria'}</p>
+                <p className="text-sm text-zinc-900">{selectedPackage.registered_by_name || selectedPackage.recebido_por || selectedPackage.porter_name || 'Portaria'}</p>
                 <p className="text-[10px] text-zinc-500 mt-0.5">Em {formatSafeDateTime(selectedPackage.received_at)}</p>
               </div>
               <div>
@@ -985,9 +983,9 @@ const PackagesList = ({ user, counts: externalCounts }: any) => {
                     <p className="text-xs text-zinc-500">
                       Forma: {getDeliveryMethodLabel(selectedPackage.delivery_method)}
                     </p>
-                    {selectedPackage.delivered_by_name && (
+                    {selectedPackage.delivered_by_name || selectedPackage.entregue_por && (
                       <p className="text-xs text-zinc-400 italic">
-                        Baixa por: {selectedPackage.delivered_by_name}
+                        Baixa por: {selectedPackage.delivered_by_name || selectedPackage.entregue_por}
                       </p>
                     )}
                   </div>
@@ -1265,11 +1263,12 @@ const HistoryTab = ({ user }: any) => {
         .from('packages')
         .select(`
           *, 
-          registrar:profiles!packages_created_by_fkey(full_name),
-          deliverer:profiles!packages_delivered_by_fkey(full_name)
+          package_id:id,
+          recipient_name:recipient_name_raw, 
+          unit_label:unit_number
         `)
         .eq('condominium_id', user.condominium_id)
-        .order('created_at', { ascending: false });
+        .order('received_at', { ascending: false });
 
       if (error) {
         console.error('Erro Supabase ao buscar histórico:', error);
@@ -1294,18 +1293,22 @@ const HistoryTab = ({ user }: any) => {
 
   const filtered = packages.filter(pkg => {
     const matchesSearch = 
+      pkg.recipient_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
       pkg.recipient_name_raw?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      pkg.unit_label?.includes(searchTerm) ||
       pkg.unit_number?.includes(searchTerm);
     
     if (!matchesSearch) return false;
 
     if (dateRange.start) {
-      const start = startOfDay(new Date(dateRange.start));
-      if (new Date(pkg.created_at) < start) return false;
+      const start = new Date(dateRange.start);
+      start.setHours(0, 0, 0, 0);
+      if (new Date(pkg.received_at) < start) return false;
     }
     if (dateRange.end) {
-      const end = endOfDay(new Date(dateRange.end));
-      if (new Date(pkg.created_at) > end) return false;
+      const end = new Date(dateRange.end);
+      end.setHours(23, 59, 59, 999);
+      if (new Date(pkg.received_at) > end) return false;
     }
 
     return true;
@@ -1372,8 +1375,8 @@ const HistoryTab = ({ user }: any) => {
       formatPackageUnit(pkg) || "",
       formatSafeDateTime(pkg.received_at) || "",
       pkg.delivered_at ? formatSafeDateTime(pkg.delivered_at) : "Pendente",
-      pkg.registrar?.full_name || pkg.porter_name || "-",
-      pkg.delivered_at ? (pkg.deliverer?.full_name || "-") : "-",
+      pkg.registrar?.full_name || pkg.recebido_por || pkg.porter_name || "-",
+      pkg.delivered_at ? (pkg.deliverer?.full_name || pkg.entregue_por || "-") : "-",
       pkg.delivered_at ? getDeliveryMethodLabel(pkg.delivery_method) : "-"
     ]);
 

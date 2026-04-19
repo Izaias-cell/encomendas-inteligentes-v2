@@ -27,6 +27,7 @@ import UserManagement from './pages/UserManagement';
 import PackageList from './pages/PackageList';
 import PackageNew from './pages/PackageNew';
 import Portaria from './pages/Portaria';
+import Settings from './pages/Settings';
 import ChangePassword from './pages/ChangePassword';
 
 // --- Types ---
@@ -234,8 +235,8 @@ const LoginPage = ({ onLogin }: any) => {
           <div className="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
             <Package className="w-8 h-8" />
           </div>
-          <h1 className="text-2xl font-bold text-zinc-900">Portaria Inteligente</h1>
-          <p className="text-zinc-500">Gestão moderna de encomendas</p>
+          <h1 className="text-2xl font-bold text-zinc-900">Encomendas Inteligentes</h1>
+          <p className="text-zinc-500">Gestão inteligente de encomendas para condomínios</p>
         </div>
 
         {error && (
@@ -2348,6 +2349,12 @@ const AppLayout = ({ user, loading, setUser, handleLogout }: any) => {
           <Route path="/users" element={<UserManagement user={user} />} />
           <Route path="/packages" element={<PackageList user={user} />} />
           <Route path="/packages/new" element={<PackageNew user={user} />} />
+          <Route path="/settings" element={
+            (() => {
+              const role = normalizeRole(user.role);
+              return role === 'admin' || role === 'sindico' ? <Settings user={user} /> : <Navigate to="/dashboard" />;
+            })()
+          } />
           
           <Route path="/" element={
             (() => {

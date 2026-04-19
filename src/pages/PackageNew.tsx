@@ -6,7 +6,6 @@ import {
   Building2, 
   Truck, 
   Camera, 
-  Save, 
   ArrowLeft, 
   Search, 
   Loader2, 
@@ -18,12 +17,14 @@ import {
   Hash,
   Info,
   Zap,
-  ZapOff
+  ZapOff,
+  ChevronRight
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { Profile, Morador, CondominiumSettings } from '../types';
 import toast from 'react-hot-toast';
 import { logAction } from '../services/auditService';
+import { getCurrentPorter } from '../lib/porterUtils';
 import { getRawTextFromImage } from '../services/geminiService';
 import { parseLabelText } from '../services/labelParser';
 import { findMatchingResidents, ScoredResident } from '../services/residentMatcher';
@@ -54,7 +55,6 @@ export default function PackageNew({ user }: PackageNewProps) {
   const [step, setStep] = useState<Step>('camera');
   const [loading, setLoading] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
-  const [residents, setResidents] = useState<Morador[]>([]);
   const [selectedResident, setSelectedResident] = useState<Morador | null>(null);
   const [matchingResidents, setMatchingResidents] = useState<ScoredResident[]>([]);
   
@@ -71,25 +71,41 @@ export default function PackageNew({ user }: PackageNewProps) {
   const [cameraActive, setCameraActive] = useState(false);
   const [flashOn, setFlashOn] = useState(false);
   const [condoSettings, setCondoSettings] = useState<CondominiumSettings | null>(null);
-  const [isAmbiguous, setIsAmbiguous] = useState(false);
   const [foundPartialData, setFoundPartialData] = useState(false);
   const [isAiSearch, setIsAiSearch] = useState(false);
   const [statusMessage, setStatusMessage] = useState('Lendo dados...');
+  const [allResidents, setAllResidents] = useState<Morador[]>([]);
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  // Fetch settings on mount
+  // Heurística de gênero para diferenciação visual (lilás para feminino)
+  const isFemale = (name?: string) => {
+    if (!name) return false;
+    const first = name.trim().split(' ')[0].toLowerCase().replace(/[^a-zÀ-ÿ]/g, '');
+    return first.endsWith('a') || first.endsWith('e');
+  };
+
+  // Fetch residents and settings on mount
   useEffect(() => {
-    const fetchSettings = async () => {
+    const fetchData = async () => {
       if (!user?.condominium_id) return;
-      const { data } = await supabase
+      
+      const { data: settings } = await supabase
         .from('condominium_settings')
         .select('*')
         .eq('condominium_id', user.condominium_id)
         .maybeSingle();
-      if (data) setCondoSettings(data);
+      if (settings) setCondoSettings(settings);
+
+      const { data: residentsList } = await supabase
+        .from('moradores')
+        .select('*')
+        .eq('condominium_id', user.condominium_id)
+        .eq('ativo', true)
+        .order('nome');
+      if (residentsList) setAllResidents(residentsList);
     };
-    fetchSettings();
+    fetchData();
   }, [user?.condominium_id]);
 
   // Auto-trigger camera on mount
@@ -272,12 +288,23 @@ export default function PackageNew({ user }: PackageNewProps) {
             );
 
             if (matches.length > 0) {
+              const topMatch = matches[0];
               setMatchingResidents(matches.slice(0, 5));
               setIsAiSearch(true);
-              // Pega as primeiras 3 letras do nome ou o número da casa para o campo de busca
-              const suggestion = (parsedData.recipientName?.substring(0, 3) || parsedData.unitNumber || '');
-              if (suggestion) {
-                setSearchTerm(suggestion);
+              
+              // Auto-seleção se confiança for ALTA (Unidade + Nome ou Unidade detectada com precisão)
+              if (topMatch.score >= 200) {
+                handleSelectResident(topMatch.resident);
+                toast.success(`Identificado: ${topMatch.resident.nome}`, { 
+                  icon: '🤖',
+                  duration: 2500
+                });
+              } else {
+                // Se não auto-selecionou, coloca o nome no campo para facilitar a busca manual se necessário
+                const suggestion = (parsedData.recipientName || parsedData.unitNumber || '');
+                if (suggestion && suggestion.length >= 2) {
+                  setSearchTerm(suggestion);
+                }
               }
             }
           }
@@ -318,11 +345,11 @@ export default function PackageNew({ user }: PackageNewProps) {
   // Search residents
   useEffect(() => {
     const searchResidents = async () => {
-      if (searchTerm.length < 2 || selectedResident) {
-        if (searchTerm.length < 2) {
-          setResidents([]);
-          setMatchingResidents([]);
-        }
+      if (selectedResident) return;
+
+      // If empty search, show some default residents (browse mode)
+      if (!searchTerm && !foundPartialData) {
+        setMatchingResidents(allResidents.slice(0, 10).map(r => ({ resident: r, score: 0 })));
         return;
       }
 
@@ -337,37 +364,22 @@ export default function PackageNew({ user }: PackageNewProps) {
       if (matches.length > 0) {
         setMatchingResidents(matches);
         
-        // Check for ambiguity
-        const strongCandidates = matches.filter(m => m.score >= 120);
-        if (strongCandidates.length > 1) {
-          setIsAmbiguous(true);
-        } else {
-          setIsAmbiguous(false);
-          // Auto-select if extremely high confidence (exact match)
-          const topMatch = matches[0];
-          if (topMatch.score >= 180 && searchTerm.length >= 3) {
-            handleSelectResident(topMatch.resident);
-            toast.success(`Morador encontrado: ${topMatch.resident.nome}`, { icon: '🔍' });
-          }
+        // Auto-select if extremely high confidence (exact match)
+        const topMatch = matches[0];
+        if (topMatch.score >= 180 && searchTerm.length >= 3 && !isAiSearch) {
+          handleSelectResident(topMatch.resident);
+          toast.success(`Morador encontrado: ${topMatch.resident.nome}`, { icon: '🔍' });
         }
       } else {
         setMatchingResidents([]);
-        setIsAmbiguous(false);
       }
     };
 
     const timer = setTimeout(searchResidents, 300);
     return () => clearTimeout(timer);
-  }, [searchTerm, user?.condominium_id, selectedResident]);
+  }, [searchTerm, user?.condominium_id, selectedResident, allResidents, foundPartialData, isAiSearch]);
 
-  const handleSelectResident = async (resident: Morador, autoSave: boolean = false) => {
-    // Se for autoSave (clique na sugestão da IA), executa o submit imediatamente
-    if (autoSave) {
-      toast.loading('Registrando encomenda...', { id: 'saving-package' });
-      handleSubmit(undefined, resident);
-      return;
-    }
-
+  const handleSelectResident = async (resident: Morador) => {
     setSelectedResident(resident);
     setRecipientName(resident.nome || '');
     setUnitNumber(resident.unidade || '');
@@ -377,9 +389,7 @@ export default function PackageNew({ user }: PackageNewProps) {
       setUnitType('');
     }
     setSearchTerm(resident.nome || '');
-    setResidents([]);
     setMatchingResidents([]);
-    setIsAmbiguous(false);
   };
 
   const handleClearResident = () => {
@@ -387,7 +397,6 @@ export default function PackageNew({ user }: PackageNewProps) {
     // Não limpamos recipientName e unitNumber para que o porteiro possa ver o que o OCR leu
     setSearchTerm('');
     setMatchingResidents([]);
-    setIsAmbiguous(false);
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -437,7 +446,6 @@ export default function PackageNew({ user }: PackageNewProps) {
     setSearchTerm('');
     setMatchingResidents([]);
     setPickupCode(generatePickupCode());
-    setIsAmbiguous(false);
     setFoundPartialData(false);
     setIsAiSearch(false);
     setLoading(false);
@@ -459,6 +467,7 @@ export default function PackageNew({ user }: PackageNewProps) {
       return;
     }
 
+    toast.loading('Registrando encomenda...', { id: 'saving-package' });
     setLoading(true);
     try {
       // Obter o usuário logado para capturar o ID se disponível (opcional)
@@ -521,6 +530,8 @@ export default function PackageNew({ user }: PackageNewProps) {
         photo_url: photoUrl,
         received_by: user.id,
         received_at: new Date().toISOString(),
+        porter_name: getCurrentPorter(), // Nome legível para auditoria rápida
+        recebido_por: getCurrentPorter(), // Novo campo solicitado
         created_by: user.id,
         ...(authUser?.id ? { registered_by: authUser.id } : {}),
         pickup_code: finalPickupCode,
@@ -640,8 +651,14 @@ export default function PackageNew({ user }: PackageNewProps) {
           >
             <ArrowLeft className="w-6 h-6 text-gray-600" />
           </button>
-          <h1 className="text-lg font-semibold text-gray-900">
+          <h1 className="text-lg font-semibold text-gray-900 leading-tight text-center">
             {step === 'camera' ? 'Capturar Encomenda' : 'Registrar Encomenda'}
+            <div className="flex items-center justify-center gap-1.5 mt-0.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-wider">
+                Porteiro: {getCurrentPorter()}
+              </span>
+            </div>
           </h1>
           <div className="w-10" />
         </div>
@@ -802,40 +819,66 @@ export default function PackageNew({ user }: PackageNewProps) {
 
                       {/* Search Results / Intelligent Suggestions */}
                       {matchingResidents.length > 0 && (
-                        <div className="space-y-2 max-h-[300px] overflow-y-auto pr-2">
-                          {matchingResidents.slice(0, 10).map(({ resident, score }) => {
-                            // O modo de salvamento direto só ativa se for busca da IA e tiver confiança suficiente
-                            const isAutoSaveMode = isAiSearch && score >= 120;
+                        <div className="space-y-3 max-h-[400px] overflow-y-auto pr-2 pb-2 scroll-smooth custom-scrollbar">
+                          <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest px-1">
+                            {!searchTerm ? 'Moradores (A-Z)' : 'Resultados da Busca'}
+                          </p>
+                          {matchingResidents.slice(0, 15).map(({ resident, score }, index) => {
+                            // Destaque para o primeiro da lista se houver score
+                            const isBest = searchTerm && index === 0 && score >= 80;
                             
                             return (
                               <button
                                 key={resident.id}
                                 type="button"
-                                onClick={() => handleSelectResident(resident, true)}
-                                className={`w-full flex items-center justify-between p-4 rounded-xl transition-all group border ${
-                                  isAutoSaveMode 
-                                    ? 'bg-indigo-50/50 border-indigo-100 hover:bg-indigo-100/50 shadow-sm active:scale-[0.98]' 
-                                    : 'bg-gray-50 border-transparent hover:bg-indigo-50 hover:border-indigo-100 active:scale-[0.98]'
+                                onClick={() => handleSelectResident(resident)}
+                                className={`w-full flex items-center justify-between p-4 rounded-2xl transition-all border-2 text-left outline-none hover:shadow-lg active:scale-[0.98] cursor-pointer touch-manipulation group ${
+                                  isBest 
+                                    ? (isFemale(resident.nome) ? 'bg-violet-50 border-violet-200 shadow-md ring-1 ring-violet-200' : 'bg-indigo-50 border-indigo-200 shadow-md ring-1 ring-indigo-200')
+                                    : (isFemale(resident.nome) ? 'bg-white border-gray-100 hover:border-violet-200 hover:bg-violet-50 active:bg-violet-100' : 'bg-white border-gray-100 hover:border-indigo-100 hover:bg-gray-50 active:bg-indigo-50')
                                 }`}
                               >
-                                <div className="flex items-center gap-3">
-                                  <div className={`w-10 h-10 rounded-full flex items-center justify-center border ${
-                                    isAutoSaveMode ? 'bg-white border-indigo-200' : 'bg-white border-gray-100 group-hover:border-indigo-200'
+                                <div className="flex items-center gap-4">
+                                  <div className={`w-12 h-12 rounded-full flex items-center justify-center border shadow-sm shrink-0 transition-colors ${
+                                    isBest 
+                                      ? (isFemale(resident.nome) ? 'bg-violet-500 border-violet-400' : 'bg-indigo-600 border-indigo-500')
+                                      : (isFemale(resident.nome) ? 'bg-violet-50 border-violet-100 group-hover:bg-violet-100' : 'bg-gray-50 border-gray-100 group-hover:bg-indigo-50')
                                   }`}>
-                                    <User className={`w-5 h-5 ${isAutoSaveMode ? 'text-indigo-600' : 'text-gray-400 group-hover:text-indigo-500'}`} />
+                                    <User className={`w-6 h-6 ${isBest ? 'text-white' : (isFemale(resident.nome) ? 'text-violet-400 group-hover:text-violet-600' : 'text-gray-400 group-hover:text-indigo-600')}`} />
                                   </div>
-                                  <div className="text-left">
-                                    <p className={`font-semibold ${isAutoSaveMode ? 'text-indigo-900' : 'text-gray-900 group-hover:text-indigo-900'}`}>{resident.nome}</p>
-                                    <p className={`text-sm ${isAutoSaveMode ? 'text-indigo-700' : 'text-gray-500'}`}>{formatResidentAddress(resident)}</p>
+                                  <div>
+                                    <div className="flex items-center gap-2">
+                                      <p className={`font-bold text-lg leading-tight transition-colors ${
+                                        isFemale(resident.nome) ? 'text-gray-900 group-hover:text-violet-900' : 'text-gray-900 group-hover:text-indigo-900'
+                                      }`}>
+                                        {resident.nome}
+                                      </p>
+                                      {isBest && <Zap className={`w-3.5 h-3.5 ${isFemale(resident.nome) ? 'text-violet-500 fill-violet-500' : 'text-amber-500 fill-amber-500'}`} />}
+                                    </div>
+                                    <p className={`text-sm font-medium ${
+                                      isBest 
+                                        ? (isFemale(resident.nome) ? 'text-violet-700' : 'text-indigo-700') 
+                                        : 'text-gray-500'
+                                    }`}>
+                                      {formatResidentAddress(resident)}
+                                    </p>
                                   </div>
                                 </div>
-                                <div className="flex items-center gap-2">
-                                  {score >= 150 && (
-                                    <span className="px-2 py-1 bg-green-100 text-green-700 text-[10px] font-bold rounded-md uppercase">
-                                      Sugestão
+                                
+                                <div className="flex flex-col items-end gap-1 shrink-0">
+                                  {score >= 250 && (
+                                    <span className="px-2 py-0.5 bg-green-500 text-white text-[9px] font-black rounded-full uppercase tracking-tighter">
+                                      Exato
                                     </span>
                                   )}
-                                  <Zap className="w-4 h-4 text-indigo-400 animate-pulse" />
+                                  {score >= 150 && score < 250 && (
+                                    <span className="px-2 py-0.5 bg-amber-100 text-amber-700 text-[9px] font-black rounded-full uppercase tracking-tighter">
+                                      Sugerido
+                                    </span>
+                                  )}
+                                  {!searchTerm && (
+                                    <ChevronRight className="w-5 h-5 text-gray-300 group-hover:text-indigo-400 transition-colors" />
+                                  )}
                                 </div>
                               </button>
                             );
@@ -850,35 +893,39 @@ export default function PackageNew({ user }: PackageNewProps) {
                       )}
                     </div>
                   ) : (
-                    <div className="p-4 bg-indigo-50 border border-indigo-100 rounded-xl flex items-center justify-between">
-                      <div className="flex items-center gap-3">
-                        <div className="w-12 h-12 bg-white rounded-full flex items-center justify-center border border-indigo-200">
-                          <User className="w-6 h-6 text-indigo-600" />
+                    <button 
+                      type="button"
+                      onClick={() => handleSubmit()}
+                      disabled={loading}
+                      className={`w-full p-6 border-2 rounded-2xl flex items-center justify-between transition-all active:scale-[0.98] group cursor-pointer text-left outline-none relative overflow-hidden shadow-lg ${
+                        isFemale(selectedResident.nome)
+                          ? 'bg-violet-500 border-violet-400 hover:bg-violet-600 hover:border-violet-500 shadow-violet-100'
+                          : 'bg-indigo-600 border-indigo-500 hover:bg-indigo-700 hover:border-indigo-600 shadow-indigo-100'
+                      }`}
+                      title="Clique para Salvar e Notificar Morador"
+                    >
+                      {/* Subtle background glow effect */}
+                      <div className="absolute top-0 right-0 w-32 h-32 bg-white/5 rounded-full -mr-16 -mt-16 blur-2xl group-hover:bg-white/10 transition-colors" />
+                      
+                      <div className="flex items-center gap-4 relative z-10">
+                        <div className="w-14 h-14 bg-white/10 rounded-full flex items-center justify-center border border-white/20 group-hover:bg-white/20 transition-all">
+                          {loading ? (
+                            <Loader2 className="w-7 h-7 text-white animate-spin" />
+                          ) : (
+                            <User className="w-7 h-7 text-white" />
+                          )}
                         </div>
                         <div>
-                          <p className="font-bold text-indigo-900">{selectedResident.nome}</p>
-                          <p className="text-sm text-indigo-700">{formatResidentAddress(selectedResident)}</p>
+                          <p className="font-bold text-white text-lg leading-tight">{selectedResident.nome}</p>
+                          <p className={`text-sm opacity-90 ${isFemale(selectedResident.nome) ? 'text-violet-100' : 'text-indigo-100'}`}>{formatResidentAddress(selectedResident)}</p>
+                          <p className={`text-[10px] font-black mt-1 uppercase tracking-widest ${isFemale(selectedResident.nome) ? 'text-violet-200' : 'text-indigo-200'}`}>Toque para Confirmar</p>
                         </div>
                       </div>
-                      <CheckCircle className="w-6 h-6 text-green-600 fill-green-50" />
-                    </div>
+                      <div className="flex items-center justify-center p-3 bg-white/10 rounded-xl border border-white/20 group-hover:bg-emerald-500 group-hover:border-emerald-400 transition-all">
+                        <CheckCircle className="w-6 h-6 text-white" />
+                      </div>
+                    </button>
                   )}
-
-                  {/* Submit Button - Repositioned for quick access */}
-                  <button
-                    type="submit"
-                    disabled={loading || !selectedResident}
-                    className="w-full mt-4 bg-indigo-600 text-white py-4 rounded-2xl font-bold shadow-xl shadow-indigo-200 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-3"
-                  >
-                    {loading ? (
-                      <Loader2 className="w-6 h-6 animate-spin" />
-                    ) : (
-                      <>
-                        <Save className="w-6 h-6" />
-                        Salvar e Notificar Morador
-                      </>
-                    )}
-                  </button>
                 </div>
 
                 {/* Package Details */}

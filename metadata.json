@@ -1,5 +1,5 @@
 {
-  "name": "Portaria Inteligente",
+  "name": "Encomendas Inteligentes",
   "description": "SaaS para gestão de encomendas em condomínios com leitura de etiquetas por IA e notificações via WhatsApp.",
   "requestFramePermissions": [
     "camera"
