@@ -741,29 +741,48 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
       // Obter o usuário logado para capturar o ID se disponível (opcional)
       const { data: { user: authUser } } = await supabase.auth.getUser();
 
-      const { error } = await supabase
-        .from('packages')
-        .update({ 
-          status: 'delivered', 
-          delivered_at: new Date().toISOString(),
-          ...(authUser?.id ? { delivered_by: authUser.id } : {}),
-          pickup_qr_code: 'used',
-          delivered_to_name: 'Morador (Confirmado)',
-          ...(deliveryPhoto ? { delivery_photo_url: deliveryPhoto } : {})
-        })
-        .eq('id', qrPackage.id);
+      const pickupCode = qrPackage.pickup_code;
 
-      if (error) throw error;
+const { data: packagesToUpdate, error: fetchError } = await supabase
+  .from('packages')
+  .select('id')
+  .eq('pickup_code', pickupCode)
+  .eq('status', 'pending');
+
+if (fetchError) throw fetchError;
+
+const ids = (packagesToUpdate || []).map((p) => p.id);
+
+if (!ids.length) {
+  throw new Error('Nenhuma encomenda pendente encontrada para este código.');
+}
+
+const { error } = await supabase
+  .from('packages')
+  .update({
+    status: 'delivered',
+    delivered_at: new Date().toISOString(),
+    ...(authUser?.id ? { delivered_by: authUser.id } : {}),
+    pickup_qr_code: 'used',
+    delivered_to_name: 'Morador (Confirmado)',
+    ...(deliveryPhoto ? { delivery_photo_url: deliveryPhoto } : {})
+  })
+  .in('id', ids);
+
+if (error) throw error;
 
       // Log retrieval
-      await supabase.from('retrieval_logs').insert([{
-        package_id: qrPackage.id,
-        porter_id: user.id,
-        condominium_id: user.condominium_id,
-        delivery_method: 'qr_code',
-        token_used: qrPackage.pickup_token,
-        status: 'success'
-      }]);
+      await supabase.from('retrieval_logs').insert(
+  ids.map((id) => ({
+    package_id: id,
+    porter_id: user.id,
+    condominium_id: user.condominium_id,
+    delivery_method: 'qr_code',
+    token_used: qrPackage.pickup_token,
+    status: 'success'
+  }))
+);
+        
 
       toast.success("Retirada confirmada com sucesso!");
       setQrScanStatus('success');
