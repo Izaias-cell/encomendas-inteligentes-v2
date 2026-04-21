@@ -741,13 +741,13 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
       // Obter o usuário logado para capturar o ID se disponível (opcional)
       const { data: { user: authUser } } = await supabase.auth.getUser();
 
-      const pickupCode = qrPackage.pickup_code;
+      const pickupCode = qrPackage.pickup_code?.trim();
 
 const { data: packagesToUpdate, error: fetchError } = await supabase
   .from('packages')
   .select('id')
   .eq('pickup_code', pickupCode)
-  .eq('status', 'pending');
+  .in('status', ['pending', 'received']);
 
 if (fetchError) throw fetchError;
 
