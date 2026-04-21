@@ -14,6 +14,9 @@ export interface WhatsAppVariables {
   observacao?: string;
   pickup_token?: string;
   quantidade_encomendas?: number;
+  tipo_notificacao?: 'disponivel' | 'retirada';
+  retirado_por?: string;
+  hora_retirada?: string;
 }
 
 /**
@@ -45,30 +48,35 @@ export const formatUnit = (resident: Morador): string => {
  * Assembles the WhatsApp message from variables following the "Encomendas Inteligentes" standard
  */
 export const assembleWhatsAppMessage = (vars: WhatsAppVariables): string => {
-  const BASE_URL = (typeof process !== 'undefined' && process.env?.APP_URL) || 
-                   (typeof import.meta !== 'undefined' && import.meta.env?.VITE_APP_URL) || 
-                   "https://encomendas-inteligentes-v2.vercel.app";
-  const linkRetirada = vars.pickup_token 
-    ? `${BASE_URL}/retirada?token=${vars.pickup_token}`
-    : `${BASE_URL}/retirada?code=${vars.codigo_retirada}`;
+  const isRetirada = vars.tipo_notificacao === 'retirada';
+  const qty = vars.quantidade_encomendas || 1;
+  const isPlural = qty > 1;
   
-  // Limpeza rigorosa da observação (Tipo da encomenda)
-  const cleanObs = vars.observacao ? vars.observacao
-    .replace(/FAVOR DESCONSIDERAR[!]?/gi, '')
-    .replace(/Corpo da mensagem enviada[👇]?/gi, '')
-    .replace(/MENSAGEM DE TESTE/gi, '')
-    .replace(/\s\s+/g, ' ')
-    .trim() : 'Encomenda';
+  const quantityText = `*(${qty} ${isPlural ? 'encomendas' : 'encomenda'})*`;
+
+  const statusLine = isRetirada
+    ? `📦 Sua${isPlural ? 's' : ''} encomenda${isPlural ? 's' : ''} ${isPlural ? 'foram' : 'foi'} retirada${isPlural ? 's' : ''} ${quantityText}`
+    : `📦 Sua${isPlural ? 's' : ''} encomenda${isPlural ? 's' : ''} já está${isPlural ? 'ão' : ''} disponível${isPlural ? 'is' : ''} na portaria ${quantityText}`;
 
   const lines = [
-    `${vars.saudacao}, ${vars.nome_morador}! 📦`,
+    `${vars.saudacao}, ${vars.nome_morador} 👋`,
     '',
-    `Chegou uma encomenda para sua unidade ${vars.unidade}${vars.bloco_torre ? ` ${vars.bloco_torre}` : ''}${vars.quantidade_encomendas && vars.quantidade_encomendas > 1 ? ` (${vars.quantidade_encomendas} encomendas)` : ''}.`,
+    statusLine,
     '',
-    `Clique no link abaixo para visualizar seu código de retirada e apresentar na portaria:`,
-    '',
-    `${linkRetirada}`
   ];
+
+  if (isRetirada) {
+    lines.push(`⏰ Retirada realizada às ${vars.hora_retirada || vars.hora_recebimento}`);
+    lines.push(`👤 Retirado por ${vars.retirado_por || 'morador'}`);
+    lines.push('');
+    lines.push(`Qualquer dúvida estamos à disposição.`);
+  } else {
+    lines.push(`*🔐 CÓDIGO DE RETIRADA*`);
+    lines.push('');
+    lines.push(`👉 *${vars.codigo_retirada}*`);
+    lines.push('');
+    lines.push(`Por favor, apresente este código ao porteiro no momento da retirada.`);
+  }
 
   return lines.join('\n');
 };
@@ -82,7 +90,10 @@ export const prepareWhatsAppNotification = (
   pickupCode: string,
   observation?: string,
   pickupToken?: string,
-  packageCount?: number
+  packageCount?: number,
+  notificationType: 'disponivel' | 'retirada' = 'disponivel',
+  retiradoPor?: string,
+  horaRetirada?: string
 ): string | null => {
   // Do not notify inactive residents
   if (!resident.ativo) return null;
@@ -103,7 +114,10 @@ export const prepareWhatsAppNotification = (
     nome_condominio: condoName,
     observacao: observation,
     pickup_token: pickupToken,
-    quantidade_encomendas: packageCount
+    quantidade_encomendas: packageCount,
+    tipo_notificacao: notificationType,
+    retirado_por: retiradoPor,
+    hora_retirada: horaRetirada
   };
 
   return assembleWhatsAppMessage(vars);
@@ -153,33 +167,32 @@ export async function sendWhatsAppMessage(
     return { error: 'Telefone inválido', httpStatus: 400 };
   }
 
-  // Use provided config or fallback to hardcoded (for backward compatibility/default)
-  let finalApiUrl = config?.api_url || "https://api.z-api.io";
-  const apiToken = config?.api_token || "F3cec1a5aa2b14f0cbc667b86c75de2ebS";
-  const instanceId = config?.instance_id || "3F0CA22AFB9F62F46D76D268A7BECB03";
+  console.log("Enviando mensagem para:", normalizedPhone);
 
-  // If it's pure Z-API and we have instance/token, construct the standard send-text endpoint
-  if (finalApiUrl.includes('api.z-api.io') && instanceId && apiToken) {
-    if (!finalApiUrl.includes('/instances/')) {
-      finalApiUrl = `${finalApiUrl.replace(/\/$/, '')}/instances/${instanceId}/token/${apiToken}/send-text`;
-    }
+  // Use provided config or fallback to hardcoded
+  let baseApiUrl = (config?.api_url || "https://api.z-api.io").replace(/\/$/, '');
+  const apiToken = (config?.api_token || "F3cec1a5aa2b14f0cbc667b86c75de2ebS").trim();
+  const instanceId = (config?.instance_id || "3F0CA22AFB9F62F46D76D268A7BECB03").trim();
+
+  // Construct the standard Z-API send-text endpoint
+  // https://api.z-api.io/instances/{ID}/token/{TOKEN}/send-text
+  let finalApiUrl = "";
+  if (baseApiUrl.includes('/instances/')) {
+    // If the user already provided a full URL, use it but ensure it's clean
+    finalApiUrl = baseApiUrl;
+  } else {
+    finalApiUrl = `${baseApiUrl}/instances/${instanceId}/token/${apiToken}/send-text`;
   }
-
-  console.log("Enviando WhatsApp via API:", {
-    phone: normalizedPhone,
-    apiUrl: finalApiUrl.split('/token/')[0] + '/...' // Hide token in logs
-  });
 
   try {
     const response = await fetch(finalApiUrl, {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
-        "Client-Token": apiToken
+        "Content-Type": "application/json"
       },
       body: JSON.stringify({
         phone: normalizedPhone,
-        message: message
+        message: message.trim()
       })
     });
 

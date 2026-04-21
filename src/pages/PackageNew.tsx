@@ -18,7 +18,10 @@ import {
   Info,
   Zap,
   ZapOff,
-  ChevronRight
+  ChevronRight,
+  Save,
+  Send,
+  ArrowRight
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { Profile, Morador, CondominiumSettings } from '../types';
@@ -75,6 +78,7 @@ export default function PackageNew({ user }: PackageNewProps) {
   const [isAiSearch, setIsAiSearch] = useState(false);
   const [statusMessage, setStatusMessage] = useState('Lendo dados...');
   const [allResidents, setAllResidents] = useState<Morador[]>([]);
+  const [isWaitingForReturn, setIsWaitingForReturn] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -84,6 +88,21 @@ export default function PackageNew({ user }: PackageNewProps) {
     const first = name.trim().split(' ')[0].toLowerCase().replace(/[^a-zÀ-ÿ]/g, '');
     return first.endsWith('a') || first.endsWith('e');
   };
+
+  // Detect context return for individual flow
+  useEffect(() => {
+    const handleFocus = () => {
+      if (isWaitingForReturn) {
+        setIsWaitingForReturn(false);
+        resetForm();
+        // Feedback visual de que está pronto para o próximo
+        toast.success('Câmera aberta para o próximo registro', { icon: '📸' });
+      }
+    };
+
+    window.addEventListener('focus', handleFocus);
+    return () => window.removeEventListener('focus', handleFocus);
+  }, [isWaitingForReturn]);
 
   // Fetch residents and settings on mount
   useEffect(() => {
@@ -237,9 +256,10 @@ export default function PackageNew({ user }: PackageNewProps) {
     processingRef.current = true;
 
     try {
+      setStatusMessage('Comprimindo foto...');
       let finalBase64 = base64;
 
-      // Compressão rápida
+      // Compressão obrigatória para reduzir peso no mobile
       try {
         const { compressImage } = await import('../lib/imageUtils');
         finalBase64 = await compressImage(base64, 800, 0.6); 
@@ -247,12 +267,12 @@ export default function PackageNew({ user }: PackageNewProps) {
         console.warn('Falha ao comprimir imagem:', err);
       }
 
-      // 1. Inicia upload em paralelo
+      // 1. Inicia upload em paralelo usando a imagem comprimida
       const uploadPromise = (async () => {
         try {
-          const res = await fetch(base64);
+          const res = await fetch(finalBase64);
           const blob = await res.blob();
-          const file = new File([blob], "package_original.jpg", { type: "image/jpeg" });
+          const file = new File([blob], "package_photo.jpg", { type: "image/jpeg" });
           const fileName = `${Date.now()}_${Math.random().toString(36).substring(7)}.jpg`;
           const filePath = `package-photos/${fileName}`;
           
@@ -267,12 +287,13 @@ export default function PackageNew({ user }: PackageNewProps) {
             setPhotoUrl(publicUrl);
           }
         } catch (storageErr) {
-          // Silently fail
+          console.error('Erro no upload paralelo:', storageErr);
         }
       })();
 
       // 2. Leitura leve com espera de até 3 segundos
       const ocrPromise = (async () => {
+        setStatusMessage('Buscando dados da etiqueta...');
         const rawText = await getRawTextFromImage(finalBase64);
         if (rawText && rawText.length >= 3) {
           const parsedData = parseLabelText(rawText);
@@ -295,10 +316,7 @@ export default function PackageNew({ user }: PackageNewProps) {
               // Auto-seleção se confiança for ALTA (Unidade + Nome ou Unidade detectada com precisão)
               if (topMatch.score >= 200) {
                 handleSelectResident(topMatch.resident);
-                toast.success(`Identificado: ${topMatch.resident.nome}`, { 
-                  icon: '🤖',
-                  duration: 2500
-                });
+                // Notificação de sucesso removida conforme solicitado
               } else {
                 // Se não auto-selecionou, coloca o nome no campo para facilitar a busca manual se necessário
                 const suggestion = (parsedData.recipientName || parsedData.unitNumber || '');
@@ -306,8 +324,18 @@ export default function PackageNew({ user }: PackageNewProps) {
                   setSearchTerm(suggestion);
                 }
               }
+            } else {
+              // Morador não encontrado após leitura
+              toast.error('Morador não identificado. Verifique unidade e nome.', { 
+                icon: '👤'
+              });
             }
           }
+        } else {
+          // Erro no reconhecimento
+          toast.error('Erro no reconhecimento da etiqueta. Tente enquadrar melhor.', { 
+            icon: '🚫' 
+          });
         }
         return true;
       })();
@@ -368,7 +396,7 @@ export default function PackageNew({ user }: PackageNewProps) {
         const topMatch = matches[0];
         if (topMatch.score >= 180 && searchTerm.length >= 3 && !isAiSearch) {
           handleSelectResident(topMatch.resident);
-          toast.success(`Morador encontrado: ${topMatch.resident.nome}`, { icon: '🔍' });
+          // Notificação de sucesso removida conforme solicitado
         }
       } else {
         setMatchingResidents([]);
@@ -390,6 +418,24 @@ export default function PackageNew({ user }: PackageNewProps) {
     }
     setSearchTerm(resident.nome || '');
     setMatchingResidents([]);
+
+    // Check for existing pending packages to reuse code/token
+    try {
+      const { data: existing } = await supabase
+        .from('packages')
+        .select('pickup_code, pickup_token')
+        .eq('recipient_id', resident.id)
+        .eq('status', 'received')
+        .order('received_at', { ascending: false })
+        .limit(1);
+
+      if (existing && existing.length > 0) {
+        if (existing[0].pickup_code) setPickupCode(existing[0].pickup_code);
+        // Token isn't in state but used in handleSubmit, it handles it there
+      }
+    } catch (err) {
+      console.warn("Erro ao buscar código existente:", err);
+    }
   };
 
   const handleClearResident = () => {
@@ -457,7 +503,7 @@ export default function PackageNew({ user }: PackageNewProps) {
     }
   };
 
-  const handleSubmit = async (e?: React.FormEvent, directResident?: Morador) => {
+  const handleSubmit = async (e?: React.FormEvent, directResident?: Morador, shouldNotify: boolean = false) => {
     if (e) e.preventDefault();
     
     const targetResident = directResident || selectedResident;
@@ -503,15 +549,15 @@ export default function PackageNew({ user }: PackageNewProps) {
           .eq('status', 'received');
       }
 
-      // 1. Preparar mensagem de WhatsApp
-      const whatsappMessage = prepareWhatsAppNotification(
+      // 1. Preparar a notificação
+      const directMessage = prepareWhatsAppNotification(
         targetResident,
-        condoName || 'Condomínio',
+        condoName,
         finalPickupCode,
-        notes,
+        carrier,
         finalPickupToken,
         totalPackages
-      );
+      ) || `Olá, ${targetResident.nome}! Sua encomenda chegou na portaria. Código: ${finalPickupCode}`;
 
       // 2. Salvar a encomenda no Supabase
       const packageData = {
@@ -539,8 +585,8 @@ export default function PackageNew({ user }: PackageNewProps) {
         pickup_qr_code: 'active',
         qr_code_generated_at: new Date().toISOString(),
         status: 'received',
-        whatsapp_status: whatsappMessage ? 'pendente' : 'no_recipient',
-        whatsapp_message: whatsappMessage
+        whatsapp_status: targetResident.telefone ? 'pendente' : 'no_recipient',
+        whatsapp_message: directMessage
       };
 
       const { data: newPackage, error: insertError } = await supabase
@@ -562,15 +608,20 @@ export default function PackageNew({ user }: PackageNewProps) {
         return;
       }
 
-      // 3. Notificação via WhatsApp (Execução imediata se possível)
-      if (targetResident.telefone && whatsappMessage) {
-        if (condoSettings?.whatsapp_mode === 'api_automatica') {
+      // 3. Notificação via WhatsApp (Apenas se solicitado e morador tiver telefone)
+      if (shouldNotify && targetResident.telefone) {
+        // Verifica se a API está configurada e ativa
+        const apiActive = condoSettings?.whatsapp_mode === 'api_automatica' && 
+                        condoSettings?.api_url && 
+                        condoSettings?.api_token;
+
+        if (apiActive) {
           try {
-            const result = await sendWhatsAppMessage(targetResident.telefone, whatsappMessage, user.condominium_id, {
-              api_url: condoSettings.api_url,
-              api_token: condoSettings.api_token,
-              instance_id: condoSettings.instance_id,
-              whatsapp_provider: condoSettings.whatsapp_provider
+            const result = await sendWhatsAppMessage(targetResident.telefone, directMessage, user.condominium_id, {
+              api_url: condoSettings?.api_url,
+              api_token: condoSettings?.api_token,
+              instance_id: condoSettings?.instance_id,
+              whatsapp_provider: condoSettings?.whatsapp_provider
             });
             
             if (result.status_envio === 'sucesso') {
@@ -584,15 +635,25 @@ export default function PackageNew({ user }: PackageNewProps) {
                   notification_mode: 'api'
                 })
                 .eq('id', newPackage.id);
+              
+              toast.success('Notificação enviada via WhatsApp', { icon: '📱' });
+            } else {
+              console.warn('Falha no envio da Z-API:', result.error);
+              toast.error('Aviso: Falha no envio automático do WhatsApp', { duration: 3000 });
             }
           } catch (err) {
             console.error('Erro no envio automático:', err);
+            toast.error('Erro ao conectar com API de WhatsApp');
           }
-        } else if (condoSettings?.whatsapp_mode === 'manual_assistido') {
-          // Se for manual assistido, abre o link em nova aba
+        }
+
+        // Fallback manual apenas se explicitamente em modo manual
+        if (condoSettings?.whatsapp_mode === 'manual_assistido' || !apiActive) {
           const phone = targetResident.telefone.replace(/\D/g, '');
           const formattedPhone = phone.startsWith('55') ? phone : `55${phone}`;
-          const encodedMessage = encodeURIComponent(whatsappMessage);
+          const encodedMessage = encodeURIComponent(directMessage);
+          
+          setIsWaitingForReturn(true); // Ativa detecção de retorno para abrir câmera
           window.open(`https://wa.me/${formattedPhone}?text=${encodedMessage}`, '_blank');
         }
       }
@@ -893,38 +954,33 @@ export default function PackageNew({ user }: PackageNewProps) {
                       )}
                     </div>
                   ) : (
-                    <button 
-                      type="button"
-                      onClick={() => handleSubmit()}
-                      disabled={loading}
-                      className={`w-full p-6 border-2 rounded-2xl flex items-center justify-between transition-all active:scale-[0.98] group cursor-pointer text-left outline-none relative overflow-hidden shadow-lg ${
-                        isFemale(selectedResident.nome)
-                          ? 'bg-violet-500 border-violet-400 hover:bg-violet-600 hover:border-violet-500 shadow-violet-100'
-                          : 'bg-indigo-600 border-indigo-500 hover:bg-indigo-700 hover:border-indigo-600 shadow-indigo-100'
-                      }`}
-                      title="Clique para Salvar e Notificar Morador"
-                    >
-                      {/* Subtle background glow effect */}
-                      <div className="absolute top-0 right-0 w-32 h-32 bg-white/5 rounded-full -mr-16 -mt-16 blur-2xl group-hover:bg-white/10 transition-colors" />
-                      
-                      <div className="flex items-center gap-4 relative z-10">
-                        <div className="w-14 h-14 bg-white/10 rounded-full flex items-center justify-center border border-white/20 group-hover:bg-white/20 transition-all">
-                          {loading ? (
-                            <Loader2 className="w-7 h-7 text-white animate-spin" />
-                          ) : (
-                            <User className="w-7 h-7 text-white" />
-                          )}
+                    <div className="space-y-5">
+                      {/* Card do Morador Selecionado (Clickable to save) */}
+                      <button
+                        type="button"
+                        onClick={() => handleSubmit(undefined, undefined, false)}
+                        disabled={loading}
+                        className={`w-full px-4 py-5 rounded-2xl border-2 flex items-center justify-between shadow-sm transition-all active:scale-[0.97] text-left group ${
+                          isFemale(selectedResident.nome) 
+                            ? 'bg-violet-50 border-violet-100 text-violet-900 hover:bg-violet-100 hover:border-violet-200' 
+                            : 'bg-indigo-50 border-indigo-100 text-indigo-900 hover:bg-indigo-100 hover:border-indigo-200'
+                        }`}
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className={`w-10 h-10 rounded-full flex items-center justify-center border transition-colors ${
+                            isFemale(selectedResident.nome) ? 'bg-violet-100 border-violet-200 group-hover:bg-violet-200' : 'bg-indigo-100 border-indigo-200 group-hover:bg-indigo-200'
+                          }`}>
+                            <User className={`w-5 h-5 ${isFemale(selectedResident.nome) ? 'text-violet-500' : 'text-indigo-600'}`} />
+                          </div>
+                          <div>
+                            <p className="font-bold text-sm leading-none mb-1">{selectedResident.nome}</p>
+                            <p className="text-[10px] font-medium opacity-70 mb-0.5">{formatResidentAddress(selectedResident)}</p>
+                            <p className={`text-[9px] font-black uppercase tracking-widest ${isFemale(selectedResident.nome) ? 'text-violet-400' : 'text-indigo-400'}`}>Toque para Registrar</p>
+                          </div>
                         </div>
-                        <div>
-                          <p className="font-bold text-white text-lg leading-tight">{selectedResident.nome}</p>
-                          <p className={`text-sm opacity-90 ${isFemale(selectedResident.nome) ? 'text-violet-100' : 'text-indigo-100'}`}>{formatResidentAddress(selectedResident)}</p>
-                          <p className={`text-[10px] font-black mt-1 uppercase tracking-widest ${isFemale(selectedResident.nome) ? 'text-violet-200' : 'text-indigo-200'}`}>Toque para Confirmar</p>
-                        </div>
-                      </div>
-                      <div className="flex items-center justify-center p-3 bg-white/10 rounded-xl border border-white/20 group-hover:bg-emerald-500 group-hover:border-emerald-400 transition-all">
-                        <CheckCircle className="w-6 h-6 text-white" />
-                      </div>
-                    </button>
+                        <CheckCircle className={`w-5 h-5 ${isFemale(selectedResident.nome) ? 'text-violet-400' : 'text-indigo-400'}`} />
+                      </button>
+                    </div>
                   )}
                 </div>
 
