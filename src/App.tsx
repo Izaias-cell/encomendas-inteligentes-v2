@@ -741,78 +741,29 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
       // Obter o usuário logado para capturar o ID se disponível (opcional)
       const { data: { user: authUser } } = await supabase.auth.getUser();
 
-      const pickupCode = qrPackage.pickup_code?.trim();
+      const { error } = await supabase
+        .from('packages')
+        .update({ 
+          status: 'delivered', 
+          delivered_at: new Date().toISOString(),
+          ...(authUser?.id ? { delivered_by: authUser.id } : {}),
+          pickup_qr_code: 'used',
+          delivered_to_name: 'Morador (Confirmado)',
+          ...(deliveryPhoto ? { delivery_photo_url: deliveryPhoto } : {})
+        })
+        .eq('id', qrPackage.id);
 
-if (!pickupCode) {
-  throw new Error('Código de retirada inválido');
-}
-
-const { data: packagesToUpdate, error: fetchError } = await supabase
-  .from('packages')
-  .select('id, pickup_code, status')
-  .ilike('pickup_code', `%${pickupCode}%`)
-  .in('status', ['pending', 'received']);
-
-if (fetchError) throw fetchError;
-
-console.log('pickupCode usado:', pickupCode);
-console.log('packages encontrados para baixa:', packagesToUpdate);
-
-const ids = (packagesToUpdate || []).map((p) => p.id);
-
-console.log('ids para atualizar:', ids);
-
-if (!ids.length) {
-  throw new Error('Nenhuma encomenda pendente encontrada para este código.');
-}
-
-const updatePayload = {
-  status: 'delivered',
-  delivered_at: new Date().toISOString(),
-  ...(authUser?.id ? { delivered_by: authUser.id } : {}),
-  pickup_qr_code: 'used',
-  delivered_to_name: 'Morador (Confirmado)',
-  ...(deliveryPhoto ? { delivery_photo_url: deliveryPhoto } : {})
-};
-
-console.log('payload update:', updatePayload);
-
-const { data: updatedRows, error: updateError } = await supabase
-  .from('packages')
-  .update(updatePayload)
-  .in('id', ids)
-  .select('id, status, pickup_code');
-
-if (updateError) throw updateError;
-
-console.log('linhas realmente atualizadas:', updatedRows);
-
-const { data: remainingPending, error: remainingError } = await supabase
-  .from('packages')
-  .select('id, pickup_code, status')
-  .eq('pickup_code', pickupCode)
-  .in('status', ['pending', 'received']);
-
-if (remainingError) throw remainingError;
-
-console.log('ainda pendentes após update:', remainingPending);
-
-if ((remainingPending || []).length > 0) {
-  throw new Error('Ainda restaram encomendas pendentes após a baixa.');
-}
+      if (error) throw error;
 
       // Log retrieval
-    await supabase.from('retrieval_logs').insert(
-  (updatedRows || []).map((item) => ({
-    package_id: item.id,
-    porter_id: user.id,
-    condominium_id: user.condominium_id,
-    delivery_method: 'qr_code',
-    token_used: qrPackage.pickup_token,
-    status: 'success'
-  }))
-);
-        
+      await supabase.from('retrieval_logs').insert([{
+        package_id: qrPackage.id,
+        porter_id: user.id,
+        condominium_id: user.condominium_id,
+        delivery_method: 'qr_code',
+        token_used: qrPackage.pickup_token,
+        status: 'success'
+      }]);
 
       toast.success("Retirada confirmada com sucesso!");
       setQrScanStatus('success');

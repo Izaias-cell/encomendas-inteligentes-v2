@@ -17,6 +17,7 @@ export interface WhatsAppVariables {
   tipo_notificacao?: 'disponivel' | 'retirada';
   retirado_por?: string;
   hora_retirada?: string;
+  photo_url?: string;
 }
 
 /**
@@ -31,8 +32,11 @@ export const generatePickupCode = (): string => {
  */
 export const getGreeting = (): string => {
   const hour = new Date().getHours();
-  if (hour >= 5 && hour < 12) return 'Bom dia';
+  // 06:00 até 11:59 → Bom dia
+  if (hour >= 6 && hour < 12) return 'Bom dia';
+  // 12:00 até 17:59 → Boa tarde
   if (hour >= 12 && hour < 18) return 'Boa tarde';
+  // 18:00 até 05:59 → Boa noite
   return 'Boa noite';
 };
 
@@ -52,30 +56,41 @@ export const assembleWhatsAppMessage = (vars: WhatsAppVariables): string => {
   const qty = vars.quantidade_encomendas || 1;
   const isPlural = qty > 1;
   
-  const quantityText = `*(${qty} ${isPlural ? 'encomendas' : 'encomenda'})*`;
+  if (isRetirada) {
+    const quantityText = `*(${qty} ${isPlural ? 'encomendas' : 'encomenda'})*`;
+    const statusLine = `📦 Sua${isPlural ? 's' : ''} encomenda${isPlural ? 's' : ''} ${isPlural ? 'foram' : 'foi'} retirada${isPlural ? 's' : ''} ${quantityText}`;
 
-  const statusLine = isRetirada
-    ? `📦 Sua${isPlural ? 's' : ''} encomenda${isPlural ? 's' : ''} ${isPlural ? 'foram' : 'foi'} retirada${isPlural ? 's' : ''} ${quantityText}`
-    : `📦 Sua${isPlural ? 's' : ''} encomenda${isPlural ? 's' : ''} já está${isPlural ? 'ão' : ''} disponível${isPlural ? 'is' : ''} na portaria ${quantityText}`;
+    return [
+      `${vars.saudacao}, ${vars.nome_morador}!`,
+      '',
+      statusLine,
+      '',
+      `📍 ${vars.unidade}`,
+      `🕒 ${vars.hora_retirada || vars.hora_recebimento}`,
+      `👤 Retirado por: *${vars.retirado_por || 'morador'}*`,
+      '',
+      `Qualquer dúvida estamos à disposição.`,
+      `*${vars.nome_condominio}*`
+    ].join('\n');
+  }
 
+  // Modelo padronizado solicitado pelo usuário para encomendas recebidas
   const lines = [
-    `${vars.saudacao}, ${vars.nome_morador} 👋`,
+    `${vars.saudacao}, ${vars.nome_morador}!`,
     '',
-    statusLine,
+    `📦 Sua encomenda chegou!`,
     '',
+    `📍 ${vars.unidade}`,
+    `📦 Código: *${vars.codigo_retirada}*`,
+    `🕒 ${vars.data_recebimento} às ${vars.hora_recebimento}`,
+    '',
+    `Por gentileza, apresente o código para retirada.`,
   ];
 
-  if (isRetirada) {
-    lines.push(`⏰ Retirada realizada às ${vars.hora_retirada || vars.hora_recebimento}`);
-    lines.push(`👤 Retirado por ${vars.retirado_por || 'morador'}`);
+  if (vars.photo_url) {
     lines.push('');
-    lines.push(`Qualquer dúvida estamos à disposição.`);
-  } else {
-    lines.push(`*🔐 CÓDIGO DE RETIRADA*`);
-    lines.push('');
-    lines.push(`👉 *${vars.codigo_retirada}*`);
-    lines.push('');
-    lines.push(`Por favor, apresente este código ao porteiro no momento da retirada.`);
+    lines.push(`📸 Foto: CLIQUE PARA VER SUA ENCOMENDA 👇`);
+    lines.push(vars.photo_url);
   }
 
   return lines.join('\n');
@@ -93,7 +108,8 @@ export const prepareWhatsAppNotification = (
   packageCount?: number,
   notificationType: 'disponivel' | 'retirada' = 'disponivel',
   retiradoPor?: string,
-  horaRetirada?: string
+  horaRetirada?: string,
+  photoUrl?: string
 ): string | null => {
   // Do not notify inactive residents
   if (!resident.ativo) return null;
@@ -117,7 +133,8 @@ export const prepareWhatsAppNotification = (
     quantidade_encomendas: packageCount,
     tipo_notificacao: notificationType,
     retirado_por: retiradoPor,
-    hora_retirada: horaRetirada
+    hora_retirada: horaRetirada,
+    photo_url: photoUrl
   };
 
   return assembleWhatsAppMessage(vars);
@@ -126,12 +143,15 @@ export const prepareWhatsAppNotification = (
 /**
  * Generates a WhatsApp wa.me link for manual sending
  */
-export const getWhatsAppLink = (phone: string, message: string): string => {
+export const getWhatsAppLink = (phone: string, message: string, photoUrl?: string): string => {
   let normalizedPhone = phone.replace(/\D/g, '');
   if (normalizedPhone.length > 0 && !normalizedPhone.startsWith('55')) {
     normalizedPhone = '55' + normalizedPhone;
   }
+  
+  // A mensagem já inclui o link da foto se disponível (conforme assembleWhatsAppMessage)
   const encodedMessage = encodeURIComponent(message);
+  
   return `https://wa.me/${normalizedPhone}?text=${encodedMessage}`;
 };
 
@@ -147,6 +167,7 @@ export async function sendWhatsAppMessage(
     api_token?: string;
     instance_id?: string;
     whatsapp_provider?: string;
+    photo_url?: string;
   }
 ) {
   if (!message || message.trim() === "") {
@@ -174,26 +195,34 @@ export async function sendWhatsAppMessage(
   const apiToken = (config?.api_token || "F3cec1a5aa2b14f0cbc667b86c75de2ebS").trim();
   const instanceId = (config?.instance_id || "3F0CA22AFB9F62F46D76D268A7BECB03").trim();
 
-  // Construct the standard Z-API send-text endpoint
-  // https://api.z-api.io/instances/{ID}/token/{TOKEN}/send-text
+  const hasImage = !!config?.photo_url;
   let finalApiUrl = "";
+  
   if (baseApiUrl.includes('/instances/')) {
-    // If the user already provided a full URL, use it but ensure it's clean
     finalApiUrl = baseApiUrl;
   } else {
-    finalApiUrl = `${baseApiUrl}/instances/${instanceId}/token/${apiToken}/send-text`;
+    const endpoint = hasImage ? 'send-image' : 'send-text';
+    finalApiUrl = `${baseApiUrl}/instances/${instanceId}/token/${apiToken}/${endpoint}`;
   }
 
   try {
+    const body = hasImage 
+      ? {
+          phone: normalizedPhone,
+          image: config.photo_url,
+          caption: message.trim()
+        }
+      : {
+          phone: normalizedPhone,
+          message: message.trim()
+        };
+
     const response = await fetch(finalApiUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({
-        phone: normalizedPhone,
-        message: message.trim()
-      })
+      body: JSON.stringify(body)
     });
 
     const data = await response.json();

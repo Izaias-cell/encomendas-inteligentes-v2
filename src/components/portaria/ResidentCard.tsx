@@ -103,7 +103,9 @@ const ResidentCard: React.FC<ResidentCardProps> = ({
         <div className="flex items-center gap-3 text-zinc-500 text-sm">
           <Home className="w-4 h-4 flex-shrink-0" />
           <p className="font-medium">
-            {resident.unidade} {resident.unit_type === 'house' ? 'Casa' : 'Apto'}
+            {resident.unit_type
+              ? `${resident.unidade} ${resident.unit_type}`
+              : resident.unidade}
           </p>
         </div>
         {(resident.block || resident.street) && (

@@ -33,7 +33,7 @@ import { parseLabelText } from '../services/labelParser';
 import { findMatchingResidents, ScoredResident } from '../services/residentMatcher';
 import { formatResidentAddress } from '../lib/residentUtils';
 import { motion, AnimatePresence } from 'motion/react';
-import { generatePickupCode, prepareWhatsAppNotification, sendWhatsAppMessage } from '../services/whatsappService';
+import { generatePickupCode, prepareWhatsAppNotification, sendWhatsAppMessage, getWhatsAppLink } from '../services/whatsappService';
 
 interface PackageNewProps {
   user: Profile;
@@ -313,29 +313,16 @@ export default function PackageNew({ user }: PackageNewProps) {
               setMatchingResidents(matches.slice(0, 5));
               setIsAiSearch(true);
               
-              // Auto-seleção se confiança for ALTA (Unidade + Nome ou Unidade detectada com precisão)
               if (topMatch.score >= 200) {
                 handleSelectResident(topMatch.resident);
-                // Notificação de sucesso removida conforme solicitado
               } else {
-                // Se não auto-selecionou, coloca o nome no campo para facilitar a busca manual se necessário
                 const suggestion = (parsedData.recipientName || parsedData.unitNumber || '');
                 if (suggestion && suggestion.length >= 2) {
                   setSearchTerm(suggestion);
                 }
               }
-            } else {
-              // Morador não encontrado após leitura
-              toast.error('Morador não identificado. Verifique unidade e nome.', { 
-                icon: '👤'
-              });
             }
           }
-        } else {
-          // Erro no reconhecimento
-          toast.error('Erro no reconhecimento da etiqueta. Tente enquadrar melhor.', { 
-            icon: '🚫' 
-          });
         }
         return true;
       })();
@@ -556,7 +543,11 @@ export default function PackageNew({ user }: PackageNewProps) {
         finalPickupCode,
         carrier,
         finalPickupToken,
-        totalPackages
+        totalPackages,
+        'disponivel',
+        undefined,
+        undefined,
+        photoUrl
       ) || `Olá, ${targetResident.nome}! Sua encomenda chegou na portaria. Código: ${finalPickupCode}`;
 
       // 2. Salvar a encomenda no Supabase
@@ -621,7 +612,8 @@ export default function PackageNew({ user }: PackageNewProps) {
               api_url: condoSettings?.api_url,
               api_token: condoSettings?.api_token,
               instance_id: condoSettings?.instance_id,
-              whatsapp_provider: condoSettings?.whatsapp_provider
+              whatsapp_provider: condoSettings?.whatsapp_provider,
+              photo_url: photoUrl
             });
             
             if (result.status_envio === 'sucesso') {
@@ -649,12 +641,10 @@ export default function PackageNew({ user }: PackageNewProps) {
 
         // Fallback manual apenas se explicitamente em modo manual
         if (condoSettings?.whatsapp_mode === 'manual_assistido' || !apiActive) {
-          const phone = targetResident.telefone.replace(/\D/g, '');
-          const formattedPhone = phone.startsWith('55') ? phone : `55${phone}`;
-          const encodedMessage = encodeURIComponent(directMessage);
+          const whatsappLink = getWhatsAppLink(targetResident.telefone, directMessage, photoUrl || undefined);
           
           setIsWaitingForReturn(true); // Ativa detecção de retorno para abrir câmera
-          window.open(`https://wa.me/${formattedPhone}?text=${encodedMessage}`, '_blank');
+          window.open(whatsappLink, '_blank');
         }
       }
 
@@ -1105,7 +1095,7 @@ export default function PackageNew({ user }: PackageNewProps) {
                   </div>
                   <div className="flex items-center justify-center gap-4">
                     {pickupCode.split('').map((digit, i) => (
-                      <div key={i} className="w-12 h-16 bg-white/10 rounded-xl flex items-center justify-center text-3xl font-bold border border-white/20">
+                      <div key={i} className="w-14 h-20 bg-white/20 rounded-2xl flex items-center justify-center text-5xl font-black border-2 border-white/30 shadow-lg">
                         {digit}
                       </div>
                     ))}

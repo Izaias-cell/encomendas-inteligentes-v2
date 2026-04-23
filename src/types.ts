@@ -13,6 +13,7 @@ export interface Profile {
   unit_number_val?: string;
   block?: string;
   tower?: string;
+  street?: string;
   complement?: string;
   active: boolean;
   must_change_password?: boolean;

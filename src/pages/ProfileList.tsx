@@ -23,7 +23,11 @@ export default function ProfileList({ user }: ProfileListProps) {
     full_name: '',
     phone: '',
     role: 'porteiro' as any,
-    active: true
+    active: true,
+    unidade: '',
+    unit_type: '',
+    block: '',
+    street: ''
   });
   const [condoSettings, setCondoSettings] = useState<any>(null);
   const navigate = useNavigate();
@@ -49,7 +53,7 @@ export default function ProfileList({ user }: ProfileListProps) {
       // Fetch residents from moradores
       let query = supabase
         .from('moradores')
-        .select('*')
+        .select('id, nome, unidade, unit_type, block, street, telefone, ativo, created_at, condominium_id')
         .eq('condominium_id', user.condominium_id);
       
       if (condoSettings?.light_mode_enabled) {
@@ -198,7 +202,11 @@ export default function ProfileList({ user }: ProfileListProps) {
       full_name: profile.full_name,
       phone: profile.phone || '',
       role: profile.role,
-      active: profile.active
+      active: profile.active,
+      unidade: profile.unidade || '',
+      unit_type: profile.unit_type || '',
+      block: profile.block || '',
+      street: profile.street || ''
     });
     setShowEditModal(true);
   };
@@ -209,24 +217,41 @@ export default function ProfileList({ user }: ProfileListProps) {
     
     setModalLoading(true);
     try {
-      const { error } = await supabase
-        .from('profiles')
-        .update({
-          full_name: formData.full_name,
-          phone: formData.phone,
-          role: formData.role,
-          active: formData.active,
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', editingProfile.id);
+      if (editingProfile.role === 'resident') {
+        const { error } = await supabase
+          .from('moradores')
+          .update({
+            nome: formData.full_name,
+            telefone: formData.phone,
+            unidade: formData.unidade || editingProfile.unidade,
+            unit_type: (formData.unit_type || editingProfile.unit_type),
+            block: formData.block || editingProfile.block,
+            street: formData.street || editingProfile.street,
+            ativo: formData.active
+          })
+          .eq('id', editingProfile.id);
 
-      if (error) throw error;
+        if (error) throw error;
+      } else {
+        const { error } = await supabase
+          .from('profiles')
+          .update({
+            full_name: formData.full_name,
+            phone: formData.phone,
+            role: formData.role,
+            active: formData.active,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', editingProfile.id);
+
+        if (error) throw error;
+      }
 
       await logAction(
         user.id,
         user.condominium_id,
         'UPDATE_PROFILE',
-        'profiles',
+        editingProfile.role === 'resident' ? 'moradores' : 'profiles',
         editingProfile.id,
         editingProfile,
         formData

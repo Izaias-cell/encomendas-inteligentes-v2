@@ -30,19 +30,23 @@ const PackageItem: React.FC<PackageItemProps> = ({
   return (
     <div className="bg-white rounded-3xl border border-zinc-100 shadow-sm p-6 hover:shadow-md transition-all group">
       <div className="flex justify-between items-start mb-4">
-        <div className="w-12 h-12 bg-zinc-50 text-emerald-600 rounded-2xl flex items-center justify-center group-hover:bg-emerald-100 transition-colors relative overflow-hidden">
-          {pkg.photo_url ? (
-            <img 
-              src={pkg.photo_url} 
-              alt="Etiqueta" 
-              className="w-full h-full object-cover rounded-2xl"
-              referrerPolicy="no-referrer"
-            />
-          ) : (
-            <PackageIcon className="w-6 h-6" />
-          )}
+        <div className={`w-14 h-14 rounded-2xl flex items-center justify-center relative transition-colors shrink-0 ${pkg.status === 'delivered' ? 'bg-emerald-50' : 'bg-zinc-100 group-hover:bg-zinc-200'}`}>
+          <div className="relative">
+            <svg viewBox="0 0 24 24" fill="none" className="w-10 h-10 drop-shadow-sm">
+              <rect x="2" y="5" width="20" height="16" rx="2" fill="#FBBF24" />
+              <rect x="10" y="5" width="4" height="8" fill="#FFFFFF" fillOpacity="0.9" />
+              <rect x="5" y="15" width="6" height="1" rx="0.5" fill="#4B5563" fillOpacity="0.7" />
+              <rect x="5" y="17" width="6" height="1" rx="0.5" fill="#4B5563" fillOpacity="0.7" />
+              <rect x="5" y="19" width="6" height="1" rx="0.5" fill="#4B5563" fillOpacity="0.7" />
+            </svg>
+            {pkg.status === 'delivered' && (
+              <div className="absolute -bottom-1 -right-1 bg-emerald-500 rounded-full w-6 h-6 flex items-center justify-center border-2 border-white shadow-sm scale-110">
+                <CheckCircle className="w-4 h-4 text-white" />
+              </div>
+            )}
+          </div>
           {pkg.isGroup && (
-            <span className="absolute -top-1 -right-1 bg-emerald-600 text-white text-[10px] font-bold w-5 h-5 rounded-full flex items-center justify-center border-2 border-white shadow-sm z-10">
+            <span className={`absolute -top-3 -right-3 text-white text-sm font-bold w-9 h-9 rounded-full flex items-center justify-center border-2 border-white shadow-lg z-10 group-hover:scale-110 transition-transform ${pkg.status === 'delivered' ? 'bg-[#3B82F6]' : 'bg-emerald-500 shadow-[0_4px_12px_rgba(5,150,105,0.3)]'}`}>
               {pkg.count}
             </span>
           )}
@@ -90,7 +94,10 @@ const PackageItem: React.FC<PackageItemProps> = ({
               {pkg.isGroup ? 'Código único de retirada' : 'Código de retirada'}
             </span>
             <button
-              onClick={() => {
+              type="button"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
                 if (pkg.status === 'delivered') return;
                 setQrPackage(pkg);
                 handleDeliver(pkg.package_id || pkg.id, 'code', undefined, pkg);
@@ -114,7 +121,9 @@ const PackageItem: React.FC<PackageItemProps> = ({
 
           {!pkg.isGroup && pkg.photo_url && (
             <button
+              type="button"
               onClick={(e) => {
+                e.preventDefault();
                 e.stopPropagation();
                 onViewLabel?.(pkg.photo_url);
               }}
@@ -149,7 +158,11 @@ const PackageItem: React.FC<PackageItemProps> = ({
       <div className="grid grid-cols-2 gap-3">
         <button 
           type="button"
-          onClick={() => onDeliverWithPhoto(pkg)}
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onDeliverWithPhoto(pkg);
+          }}
           disabled={pkg.status === 'delivered'}
           className={`col-span-2 py-4 rounded-2xl font-bold transition-all flex items-center justify-center gap-3 text-base shadow-lg ${pkg.status === 'delivered' ? 'bg-zinc-50 text-zinc-400 cursor-not-allowed' : 'bg-emerald-600 text-white hover:bg-emerald-700 shadow-emerald-900/20'}`}
         >
@@ -158,7 +171,12 @@ const PackageItem: React.FC<PackageItemProps> = ({
         </button>
         {pkg.isGroup && (
           <button 
-            onClick={() => onViewPhotos?.(pkg)}
+            type="button"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onViewPhotos?.(pkg);
+            }}
             className="col-span-2 bg-zinc-50 text-emerald-600 py-3 rounded-xl font-bold hover:bg-emerald-50 transition-all flex items-center justify-center gap-2 text-sm border border-emerald-100/50"
           >
             <Layers className="w-4 h-4" />
@@ -167,7 +185,12 @@ const PackageItem: React.FC<PackageItemProps> = ({
         )}
         <div className="col-span-2 flex gap-2">
           <button 
-            onClick={onCodeRetrieval}
+            type="button"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onCodeRetrieval();
+            }}
             className="flex-1 bg-zinc-100 text-zinc-600 py-4 rounded-2xl font-bold hover:bg-zinc-900 hover:text-white transition-all flex items-center justify-center gap-3 text-base"
           >
             <Hash className="w-5 h-5" />

@@ -4,7 +4,7 @@ export const getResidentAddressLines = (resident: Morador | any) => {
   const lines: string[] = [];
   
   // Line 1: unit_type + unit_number
-  const unitType = resident.unit_type || 'Unidade';
+  const unitType = resident.unit_type || '';
   const unitNumber = resident.unit_number || resident.unidade || '';
   lines.push(`${unitType} ${unitNumber}`.trim());
   

@@ -197,10 +197,23 @@ export default function PackageList({ user }: PackageListProps) {
               className={`bg-white rounded-3xl border border-zinc-100 shadow-sm p-6 hover:shadow-md transition-all group ${pkg.status !== 'delivered' ? 'cursor-pointer border-emerald-100' : ''}`}
             >
               <div className="flex justify-between items-start mb-4">
-                <div className="w-12 h-12 bg-zinc-50 text-emerald-600 rounded-2xl flex items-center justify-center group-hover:bg-emerald-100 transition-colors relative">
-                  <PackageIcon className="w-6 h-6" />
+                <div className={`w-14 h-14 rounded-2xl flex items-center justify-center relative transition-colors shrink-0 ${pkg.status === 'delivered' ? 'bg-emerald-50' : 'bg-zinc-100 group-hover:bg-zinc-200'}`}>
+                  <div className="relative">
+                    <svg viewBox="0 0 24 24" fill="none" className="w-10 h-10 drop-shadow-sm">
+                      <rect x="2" y="5" width="20" height="16" rx="2" fill="#FBBF24" />
+                      <rect x="10" y="5" width="4" height="8" fill="#FFFFFF" fillOpacity="0.9" />
+                      <rect x="5" y="15" width="6" height="1" rx="0.5" fill="#4B5563" fillOpacity="0.7" />
+                      <rect x="5" y="17" width="6" height="1" rx="0.5" fill="#4B5563" fillOpacity="0.7" />
+                      <rect x="5" y="19" width="6" height="1" rx="0.5" fill="#4B5563" fillOpacity="0.7" />
+                    </svg>
+                    {pkg.status === 'delivered' && (
+                      <div className="absolute -bottom-1 -right-1 bg-emerald-500 rounded-full w-6 h-6 flex items-center justify-center border-2 border-white shadow-sm scale-110">
+                        <CheckCircle className="w-4 h-4 text-white" />
+                      </div>
+                    )}
+                  </div>
                   {pkg.isGroup && (
-                    <span className="absolute -top-2 -right-2 bg-emerald-600 text-white text-[10px] font-bold w-5 h-5 rounded-full flex items-center justify-center border-2 border-white shadow-sm">
+                    <span className={`absolute -top-3 -right-3 text-white text-sm font-bold w-9 h-9 rounded-full flex items-center justify-center border-2 border-white shadow-lg z-10 group-hover:scale-110 transition-transform ${pkg.status === 'delivered' ? 'bg-[#3B82F6]' : 'bg-emerald-500 shadow-[0_4px_12px_rgba(5,150,105,0.3)]'}`}>
                       {pkg.count}
                     </span>
                   )}
