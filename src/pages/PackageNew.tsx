@@ -187,25 +187,55 @@ export default function PackageNew({ user }: PackageNewProps) {
     
     try {
       let stream: MediaStream;
+      
+      // 1. Tenta identificar a câmera traseira pelo label (mais robusto em alguns Androids)
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ 
-          video: { 
-            facingMode: { ideal: 'environment' },
-            width: { ideal: 1920, min: 1280 },
-            height: { ideal: 1080, min: 720 }
-          }, 
-          audio: false 
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videoDevices = devices.filter(device => device.kind === 'videoinput');
+        
+        // Procura labels que indiquem câmera traseira
+        const backCamera = videoDevices.find(device => {
+          const label = device.label.toLowerCase();
+          return label.includes('back') || label.includes('traseira') || label.includes('rear') || label.includes('environment');
         });
-      } catch (err) {
-        console.warn("Retrying camera with exact environment mode...");
-        stream = await navigator.mediaDevices.getUserMedia({ 
-          video: { 
-            facingMode: { exact: 'environment' },
-            width: { ideal: 1280 },
-            height: { ideal: 720 }
-          }, 
-          audio: false 
-        });
+
+        if (backCamera) {
+          console.log("Câmera traseira identificada por ID:", backCamera.label);
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              deviceId: { exact: backCamera.deviceId },
+              width: { ideal: 1920, min: 1280 },
+              height: { ideal: 1080, min: 720 }
+            },
+            audio: false
+          });
+        } else {
+          // Se não achar por label, tenta o modo padrão environment
+          throw new Error("Nenhuma câmera traseira identificada por label");
+        }
+      } catch (labelErr) {
+        console.warn("Falha ao selecionar por label ou ID. Usando facingMode...", labelErr);
+        // Fallback robusto usando facingMode
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({ 
+            video: { 
+              facingMode: { exact: 'environment' },
+              width: { ideal: 1920, min: 1280 },
+              height: { ideal: 1080, min: 720 }
+            }, 
+            audio: false 
+          });
+        } catch (err) {
+          console.warn("Retrying camera with ideal environment mode...");
+          stream = await navigator.mediaDevices.getUserMedia({ 
+            video: { 
+              facingMode: 'environment',
+              width: { ideal: 1280 },
+              height: { ideal: 720 }
+            }, 
+            audio: false 
+          });
+        }
       }
       
       if (videoRef.current) {
@@ -352,8 +382,8 @@ export default function PackageNew({ user }: PackageNewProps) {
           const parsedData = await extractBasicText(finalBase64);
           
           if (parsedData) {
-            const nameToUse = parsedData.nome;
-            const unitToUse = parsedData.casa;
+            const nameToUse = parsedData.nome_detectado;
+            const unitToUse = parsedData.casa_detectada;
             const confidence = parsedData.confianca as 'alta' | 'media' | 'baixa';
             
             setOcrConfidence(confidence);
@@ -380,11 +410,25 @@ export default function PackageNew({ user }: PackageNewProps) {
                 } else {
                   // Se for sugestão, preenchemos o termo de busca para mostrar os cards
                   setSearchTerm(nameToUse || unitToUse || '');
+                  // Se encontrou algo, garantimos que não fique em 'baixa' total
+                  if (confidence === 'baixa') setOcrConfidence('media');
                 }
               } else if (unitToUse) {
                 // Se identificou a casa mas não achou morador exato, mostra moradores daquela casa
                 setSearchTerm(unitToUse);
                 setIsManualUnitSearch(true);
+                
+                // Buscar moradores desta unidade manualmente para mostrar nos cards
+                const normalizedUnitSearch = unitToUse.toLowerCase().replace(/[^0-9]/g, '');
+                const houseMatches = allResidents
+                  .filter(r => (r.unidade || '').toLowerCase().includes(normalizedUnitSearch))
+                  .map(r => ({ resident: r, score: 100 }));
+                
+                if (houseMatches.length > 0) {
+                  setMatchingResidents(houseMatches);
+                  // Se encontrou moradores na casa, não é confiança 'baixa'
+                  setOcrConfidence('media');
+                }
               }
             } else if (confidence === 'baixa') {
               // Se não achou nada e a confiança é baixa, forçamos o estado de baixa
@@ -979,7 +1023,7 @@ export default function PackageNew({ user }: PackageNewProps) {
                             <p className="text-gray-500 text-xs mt-1">Identificando morador automaticamente...</p>
                           </div>
                         </div>
-                      ) : ocrConfidence === 'baixa' ? (
+                      ) : (ocrConfidence === 'baixa' && matchingResidents.length === 0) ? (
                         <div className="py-2 space-y-4">
                           <div className="bg-amber-50 border border-amber-100 rounded-2xl p-6 text-center">
                             <div className="w-12 h-12 bg-amber-100 rounded-full flex items-center justify-center mx-auto mb-4">
@@ -1055,6 +1099,12 @@ export default function PackageNew({ user }: PackageNewProps) {
                         </div>
                       ) : (
                         <>
+                          {ocrConfidence === 'baixa' && matchingResidents.length > 0 && (
+                            <div className="bg-amber-50 border border-amber-100 rounded-2xl p-4 mb-4 flex items-center gap-3 animate-in fade-in slide-in-from-top-2">
+                              <AlertCircle className="w-5 h-5 text-amber-600 shrink-0" />
+                              <p className="text-xs text-amber-800 font-medium">Possível leitura parcial. Verifique se o morador está na lista abaixo.</p>
+                            </div>
+                          )}
                           <div className="flex items-center gap-2">
                         <button
                           type="button"

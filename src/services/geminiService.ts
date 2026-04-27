@@ -42,19 +42,26 @@ export async function getRawTextFromImage(base64Image: string): Promise<string |
 export async function extractBasicText(base64Image: string) {
   const model = "gemini-3-flash-preview";
   
-  const prompt = `Extrair informações de uma etiqueta de encomenda.
+  const prompt = `Analise a etiqueta de encomenda nesta imagem e extraia as informações seguindo estas etapas:
 
-Retorne apenas:
-- nome do destinatário (parcial ou completo)
-- número da casa/unidade (se identificado claramente)
+1. TEXTO BRUTO: Extraia TODO o texto visível na imagem de forma literal.
+2. DESTINATÁRIO: Identifique o nome do destinatário. 
+   - DICA: Geralmente está próximo à palavra "DESTINATÁRIO", "Destinatário" ou "NOME".
+3. UNIDADE/CASA: Identifique o número da casa ou unidade.
+   - Procure por termos como "Casa", "C.", "UN", "Unidade", "Lote" seguidos de um número.
+   - Exemplo: "Casa 241", "C241", "C-241".
 
-Regras:
-- Ignorar completamente: códigos de rastreio, códigos de barras, transportadora, CEP, cidade, endereço completo
-- Não interpretar nem validar dados
-- Não tentar decidir quem é o morador
-- Não retornar explicações
+Regras de Saída:
+- Se encontrar qualquer texto, não retorne erro.
+- Se identificar nome ou casa, retorne-os nos campos correspondentes.
 
-Retorne APENAS o JSON.`;
+Retorne APENAS o JSON conforme o esquema:
+{
+  "texto_bruto": "todo o texto extraído da imagem",
+  "nome_detectado": "nome identificado",
+  "casa_detectada": "número da casa",
+  "confianca": "alta | media | baixa"
+}`;
 
   try {
     const response = await ai.models.generateContent({
@@ -78,10 +85,12 @@ Retorne APENAS o JSON.`;
         responseSchema: {
           type: Type.OBJECT,
           properties: {
-            nome: { type: Type.STRING, description: "Nome do destinatário" },
-            casa: { type: Type.STRING, description: "Número da casa ou unidade" },
-            confianca: { type: Type.STRING, enum: ["alta", "media", "baixa"], description: "Nível de confiança" }
-          }
+            texto_bruto: { type: Type.STRING, description: "Todo o texto extraído da imagem" },
+            nome_detectado: { type: Type.STRING, description: "Nome do destinatário identificado" },
+            casa_detectada: { type: Type.STRING, description: "Número da casa ou unidade identificado" },
+            confianca: { type: Type.STRING, enum: ["alta", "media", "baixa"], description: "Nível de confiança da extração" }
+          },
+          required: ["texto_bruto", "nome_detectado", "casa_detectada", "confianca"]
         }
       },
     });
