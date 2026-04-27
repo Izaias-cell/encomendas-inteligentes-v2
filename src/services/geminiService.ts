@@ -4,13 +4,37 @@ import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
 const apiKey = process.env.GEMINI_API_KEY || "";
 const ai = new GoogleGenAI({ apiKey });
 
+async function callWithRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
+  let lastError: any;
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      return await fn();
+    } catch (error: any) {
+      lastError = error;
+      const isRateLimit = error?.message?.includes("429") || 
+                          error?.message?.includes("RESOURCE_EXHAUSTED") ||
+                          JSON.stringify(error)?.includes("429") ||
+                          JSON.stringify(error)?.includes("RESOURCE_EXHAUSTED");
+      
+      if (isRateLimit && i < maxRetries - 1) {
+        const delay = Math.pow(2, i) * 1000 + Math.random() * 1000;
+        console.warn(`Gemini quota atingida (429). Tentando novamente em ${Math.round(delay / 1000)}s... (${i + 1}/${maxRetries})`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw lastError;
+}
+
 export async function getRawTextFromImage(base64Image: string): Promise<string | null> {
-  const model = "gemini-3-flash-preview";
+  const model = "gemini-3.1-flash-lite-preview";
   
   const prompt = "Identifique e extraia o NOME DO DESTINATÁRIO, a UNIDADE (CASA/APTO), TRANSPORTADORA e CÓDIGO DE RASTREIO desta etiqueta. Dê atenção ESPECIAL a anotações MANUAIS grandes (ex: 'C 123', 'Ap 101'). Se houver anotação manual da unidade, ela tem prioridade. Retorne as informações de forma clara.";
 
   try {
-    const response = await ai.models.generateContent({
+    const response = await callWithRetry(() => ai.models.generateContent({
       model,
       contents: [
         {
@@ -30,7 +54,7 @@ export async function getRawTextFromImage(base64Image: string): Promise<string |
         temperature: 0,
         maxOutputTokens: 400,
       },
-    });
+    }));
 
     return response.text || null;
   } catch (e) {
@@ -40,7 +64,7 @@ export async function getRawTextFromImage(base64Image: string): Promise<string |
 }
 
 export async function extractBasicText(base64Image: string) {
-  const model = "gemini-3-flash-preview";
+  const model = "gemini-3.1-flash-lite-preview";
   
   const prompt = `Analise a etiqueta de encomenda nesta imagem e extraia as informações seguindo estas etapas:
 
@@ -64,7 +88,7 @@ Retorne APENAS o JSON conforme o esquema:
 }`;
 
   try {
-    const response = await ai.models.generateContent({
+    const response = await callWithRetry(() => ai.models.generateContent({
       model,
       contents: [
         {
@@ -93,7 +117,7 @@ Retorne APENAS o JSON conforme o esquema:
           required: ["texto_bruto", "nome_detectado", "casa_detectada", "confianca"]
         }
       },
-    });
+    }));
 
     const text = response.text;
     if (!text) return null;
@@ -105,7 +129,7 @@ Retorne APENAS o JSON conforme o esquema:
 }
 
 export async function analyzePackageLabel(base64Image: string, residentList?: string[]) {
-  const model = "gemini-3-flash-preview";
+  const model = "gemini-3.1-flash-lite-preview";
   
   const residentContext = residentList && residentList.length > 0 
     ? `\nCONTEXTO: Os seguintes moradores estão cadastrados neste condomínio. Use esta lista para tentar encontrar o melhor match, mesmo que o nome na etiqueta esteja abreviado ou com pequenos erros:\n${residentList.join('\n')}`
@@ -133,7 +157,7 @@ export async function analyzePackageLabel(base64Image: string, residentList?: st
   Retorne o JSON conforme o esquema.`;
 
   try {
-    const response = await ai.models.generateContent({
+    const response = await callWithRetry(() => ai.models.generateContent({
       model,
       contents: [
         {
@@ -188,7 +212,7 @@ export async function analyzePackageLabel(base64Image: string, residentList?: st
           }
         }
       },
-    });
+    }));
 
     const text = response.text;
     if (!text) return null;

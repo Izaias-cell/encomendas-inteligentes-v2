@@ -212,7 +212,7 @@ export default function Dashboard({ user }: DashboardProps) {
         .from('packages')
         .delete()
         .eq('condominium_id', user.condominium_id)
-        .or('is_teste.eq.true,recipient_name_raw.ilike.%teste%')
+        .ilike('recipient_name_raw', '%teste%')
         .select('id');
 
       if (pkgError) throw pkgError;
@@ -223,7 +223,7 @@ export default function Dashboard({ user }: DashboardProps) {
         .from('moradores')
         .delete()
         .eq('condominium_id', user.condominium_id)
-        .or('is_teste.eq.true,nome.ilike.%teste%,observacoes.ilike.%teste%')
+        .or('nome.ilike.%teste%,observacoes.ilike.%teste%')
         .select('id');
 
       if (resError) console.warn('Erro ao limpar moradores de teste:', resError);
@@ -234,7 +234,7 @@ export default function Dashboard({ user }: DashboardProps) {
         .from('profiles')
         .delete()
         .eq('condominium_id', user.condominium_id)
-        .or('is_teste.eq.true,full_name.ilike.%teste%,email.ilike.%teste%')
+        .or('full_name.ilike.%teste%,email.ilike.%teste%')
         .select('id');
 
       if (profileError) console.warn('Erro ao limpar porteiros de teste:', profileError);
@@ -262,9 +262,9 @@ export default function Dashboard({ user }: DashboardProps) {
     // Buscar contagens prévias
     if (user.condominium_id) {
       const [resC, porterC, pkgC] = await Promise.all([
-        supabase.from('moradores').select('id', { count: 'exact', head: true }).eq('condominium_id', user.condominium_id).or('is_teste.eq.true,nome.ilike.%teste%,observacoes.ilike.%teste%'),
-        supabase.from('profiles').select('id', { count: 'exact', head: true }).eq('condominium_id', user.condominium_id).or('is_teste.eq.true,full_name.ilike.%teste%,email.ilike.%teste%'),
-        supabase.from('packages').select('id', { count: 'exact', head: true }).eq('condominium_id', user.condominium_id).or('is_teste.eq.true,recipient_name_raw.ilike.%teste%')
+        supabase.from('moradores').select('id', { count: 'exact', head: true }).eq('condominium_id', user.condominium_id).or('nome.ilike.%teste%,observacoes.ilike.%teste%'),
+        supabase.from('profiles').select('id', { count: 'exact', head: true }).eq('condominium_id', user.condominium_id).or('full_name.ilike.%teste%,email.ilike.%teste%'),
+        supabase.from('packages').select('id', { count: 'exact', head: true }).eq('condominium_id', user.condominium_id).ilike('recipient_name_raw', '%teste%')
       ]);
       
       setTestCounts({

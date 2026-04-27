@@ -65,6 +65,7 @@ export default function PackageNew({ user }: PackageNewProps) {
   
   const [step, setStep] = useState<Step>('camera');
   const [loading, setLoading] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedResident, setSelectedResident] = useState<Morador | null>(null);
   const [matchingResidents, setMatchingResidents] = useState<ScoredResident[]>([]);
@@ -574,6 +575,8 @@ export default function PackageNew({ user }: PackageNewProps) {
 
   const handleClearResident = () => {
     setSelectedResident(null);
+    setLoading(false);
+    setIsSaving(false);
     // Não limpamos recipientName e unitNumber para que o porteiro possa ver o que o OCR leu
     setSearchTerm('');
     setMatchingResidents([]);
@@ -622,6 +625,7 @@ export default function PackageNew({ user }: PackageNewProps) {
     setFoundPartialData(false);
     setIsAiSearch(false);
     setLoading(false);
+    setIsSaving(false);
     setIsOcrLoading(false);
     setOcrConfidence(null);
     setDebugOcrImage(null);
@@ -636,15 +640,20 @@ export default function PackageNew({ user }: PackageNewProps) {
   const handleSubmit = async (e?: React.FormEvent, directResident?: Morador, shouldNotify: boolean = false) => {
     if (e) e.preventDefault();
     
+    if (isSaving) return;
+
     const targetResident = directResident || selectedResident;
     
     if (!targetResident || !user) {
       toast.error('Selecione um morador para continuar');
+      setLoading(false);
+      setIsSaving(false);
       return;
     }
 
     toast.loading('Registrando encomenda...', { id: 'saving-package' });
     setLoading(true);
+    setIsSaving(true);
     try {
       // Obter o usuário logado para capturar o ID se disponível (opcional)
       const { data: { user: authUser } } = await supabase.auth.getUser();
@@ -693,11 +702,7 @@ export default function PackageNew({ user }: PackageNewProps) {
         photoUrl
       ) || `Olá, ${targetResident.nome}! Sua encomenda chegou na portaria. Código: ${finalPickupCode}`;
 
-      // 2. Salvar a encomenda no Supabase
-      const is_teste = (recipientName || targetResident.nome).toLowerCase().includes('teste') || 
-                       (notes || '').toLowerCase().includes('teste') ||
-                       targetResident.is_teste;
-
+    // 2. Salvar a encomenda no Supabase
       const packageData = {
         condominium_id: user.condominium_id,
         recipient_id: targetResident.id,
@@ -711,7 +716,6 @@ export default function PackageNew({ user }: PackageNewProps) {
         carrier,
         tracking_code: trackingNumber,
         notes,
-        is_teste,
         photo_url: photoUrl,
         received_by: user.id,
         received_at: new Date().toISOString(),
@@ -736,14 +740,16 @@ export default function PackageNew({ user }: PackageNewProps) {
 
       if (insertError) {
         console.error('Erro ao inserir encomenda:', insertError);
-        toast.error('Erro ao salvar encomenda: ' + (insertError.message || 'Erro desconhecido'));
+        toast.error('Erro ao salvar encomenda: ' + (insertError.message || 'Erro desconhecido'), { id: 'saving-package' });
         setLoading(false);
+        setIsSaving(false);
         return;
       }
 
       if (!newPackage) {
-        toast.error('Erro ao recuperar encomenda salva');
+        toast.error('Erro ao recuperar encomenda salva', { id: 'saving-package' });
         setLoading(false);
+        setIsSaving(false);
         return;
       }
 
@@ -818,8 +824,10 @@ export default function PackageNew({ user }: PackageNewProps) {
       resetForm();
     } catch (error: any) {
       toast.error('Erro inesperado: ' + error.message, { id: 'saving-package' });
+      setIsSaving(false);
     } finally {
       setLoading(false);
+      setIsSaving(false);
     }
   };
 
@@ -838,6 +846,9 @@ export default function PackageNew({ user }: PackageNewProps) {
         <div className="max-w-2xl mx-auto px-4 h-16 flex items-center justify-between">
           <button 
             onClick={() => {
+              setLoading(false);
+              setIsSaving(false);
+              setIsOcrLoading(false);
               if (step === 'manual') {
                 resetForm();
               } else {
@@ -925,7 +936,12 @@ export default function PackageNew({ user }: PackageNewProps) {
                 
                   <div className="p-6 bg-gray-50 flex items-center justify-between">
                     <button
-                      onClick={() => setStep('manual')}
+                      onClick={() => {
+                        setLoading(false);
+                        setIsSaving(false);
+                        setIsOcrLoading(false);
+                        setStep('manual');
+                      }}
                       className="text-gray-500 font-medium hover:text-gray-700 flex items-center gap-2"
                     >
                       <FileText className="w-5 h-5" />
@@ -986,7 +1002,7 @@ export default function PackageNew({ user }: PackageNewProps) {
                 </div>
               )}
 
-              <form id="package-form" onSubmit={handleSubmit} className="space-y-6">
+              <form id="package-form" onSubmit={(e) => e.preventDefault()} className="space-y-6">
                 {/* Resident Selection */}
                 <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
                   <div className="flex items-center justify-between mb-4">

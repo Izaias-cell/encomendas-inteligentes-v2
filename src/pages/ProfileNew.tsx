@@ -27,8 +27,6 @@ export default function ProfileNew({ user }: ProfileNewProps) {
     setLoading(true);
 
     try {
-      const is_teste = fullName.toLowerCase().includes('teste');
-
       const { data: newResident, error } = await supabase
         .from('moradores')
         .insert([{
@@ -40,8 +38,7 @@ export default function ProfileNew({ user }: ProfileNewProps) {
           lote: lote,
           street: street,
           condominium_id: user.condominium_id,
-          ativo: true,
-          is_teste
+          ativo: true
         }])
         .select()
         .single();
