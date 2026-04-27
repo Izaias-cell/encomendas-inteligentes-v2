@@ -95,6 +95,12 @@ export default function PackageNew({ user }: PackageNewProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isCameraStabilizing, setIsCameraStabilizing] = useState(true);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [diagnosticInfo, setDiagnosticInfo] = useState<any>(null);
+
+  const APP_VERSION = "2.2.0-diag";
+  const BUILD_TIME = "2026-04-27 07:25";
+  const ENVIRONMENT = window.location.hostname.includes('ais-dev') ? 'preview' : 'produção';
 
   // Heurística de gênero para diferenciação visual (lilás para feminino)
   const isFemale = (name?: string) => {
@@ -320,7 +326,25 @@ export default function PackageNew({ user }: PackageNewProps) {
       context.drawImage(video, 0, 0, canvas.width, canvas.height);
       
       // Alta qualidade (0.95) para garantir fidelidade
-      const base64 = canvas.toDataURL('image/jpeg', 0.95);
+      const quality = 0.95;
+      const base64 = canvas.toDataURL('image/jpeg', quality);
+      
+      // Calcular tamanho aproximado
+      const sizeBytes = Math.round((base64.length * (3/4)) - (base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0));
+      const sizeKB = Math.round(sizeBytes / 1024);
+
+      setDiagnosticInfo({
+        version: APP_VERSION,
+        buildTime: BUILD_TIME,
+        environment: ENVIRONMENT,
+        width: canvas.width,
+        height: canvas.height,
+        sizeKB: sizeKB,
+        mimeType: 'image/jpeg',
+        quality: quality,
+        capturedAt: new Date().toLocaleTimeString()
+      });
+
       stopCamera();
       
       // 1. Salvar a imagem final no estado e debug
@@ -383,6 +407,15 @@ export default function PackageNew({ user }: PackageNewProps) {
           const parsedData = await extractBasicText(finalBase64);
           
           if (parsedData) {
+            setDiagnosticInfo((prev: any) => ({
+              ...prev,
+              rawOcrText: parsedData.texto_bruto,
+              detectedName: parsedData.nome_detectado,
+              detectedHouse: parsedData.casa_detectada,
+              confidence: parsedData.confianca,
+              ocrTimestamp: new Date().toLocaleTimeString()
+            }));
+
             const nameToUse = parsedData.nome_detectado;
             const unitToUse = parsedData.casa_detectada;
             const confidence = parsedData.confianca as 'alta' | 'media' | 'baixa';
@@ -1449,6 +1482,106 @@ export default function PackageNew({ user }: PackageNewProps) {
                   </div>
                 )}
               </form>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Botão de Diagnóstico (Discreto) */}
+        <div className="fixed bottom-24 right-4 z-[60]">
+          <button 
+            onClick={() => setShowDiagnostics(!showDiagnostics)}
+            className="w-10 h-10 bg-black/20 backdrop-blur-md rounded-full flex items-center justify-center text-white/40 hover:text-white hover:bg-black/40 transition-all border border-white/10"
+            title="Modo Diagnóstico"
+          >
+            <Info className="w-5 h-5" />
+          </button>
+        </div>
+
+        <AnimatePresence>
+          {showDiagnostics && diagnosticInfo && (
+            <motion.div 
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 20 }}
+              className="fixed inset-x-4 bottom-24 top-20 z-[70] bg-black/95 rounded-3xl p-6 overflow-y-auto font-mono text-[10px] text-green-400 shadow-2xl border border-white/10"
+            >
+              <div className="flex justify-between items-center mb-6 border-b border-green-900/30 pb-4">
+                <div className="flex items-center gap-2">
+                  <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+                  <h2 className="text-sm font-bold text-white uppercase tracking-widest">Diagnóstico OCR</h2>
+                </div>
+                <button onClick={() => setShowDiagnostics(false)} className="text-white hover:bg-white/10 p-2 rounded-full transition-all">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                <div className="space-y-6">
+                  <section className="bg-green-950/20 p-4 rounded-2xl border border-green-900/20">
+                    <p className="text-white mb-3 font-bold text-xs flex items-center gap-2">
+                      <CheckCircle className="w-3 h-3" /> [ AMBIENTE ]
+                    </p>
+                    <div className="grid grid-cols-2 gap-2 text-[9px] opacity-80">
+                      <p>Versão App:</p> <p className="text-white">{diagnosticInfo.version}</p>
+                      <p>Build Time:</p> <p className="text-white">{diagnosticInfo.buildTime}</p>
+                      <p>Host:</p> <p className="text-white">{ENVIRONMENT.toUpperCase()}</p>
+                      <p>Origin:</p> <p className="text-white">{window.location.origin.substring(0, 30)}...</p>
+                    </div>
+                  </section>
+
+                  <section className="bg-green-950/20 p-4 rounded-2xl border border-green-900/20">
+                    <p className="text-white mb-3 font-bold text-xs flex items-center gap-2">
+                      <Camera className="w-3 h-3" /> [ IMAGEM FINAL ]
+                    </p>
+                    <div className="grid grid-cols-2 gap-2 text-[9px] opacity-80 mb-4">
+                      <p>Resolução:</p> <p className="text-white">{diagnosticInfo.width}x{diagnosticInfo.height}</p>
+                      <p>Tamanho Real:</p> <p className="text-white">{diagnosticInfo.sizeKB} KB</p>
+                      <p>JPEG Quality:</p> <p className="text-white">{diagnosticInfo.quality * 100}%</p>
+                      <p>Captura Local:</p> <p className="text-white">{diagnosticInfo.capturedAt}</p>
+                    </div>
+                    <div className="relative mt-2 border border-green-900/50 overflow-hidden rounded-xl bg-black">
+                      <img src={debugOcrImage || ''} alt="Processada" className="w-full h-auto opacity-80" />
+                      <div className="absolute inset-x-0 bottom-0 bg-black/60 p-1 text-center text-[8px] text-white/50">
+                        Cópia exata enviada para IA
+                      </div>
+                    </div>
+                  </section>
+                </div>
+
+                <div className="space-y-6">
+                  <section className="bg-green-950/20 p-4 rounded-2xl border border-green-900/20">
+                    <p className="text-white mb-3 font-bold text-xs flex items-center gap-2">
+                      <Sparkles className="w-3 h-3 text-yellow-400" /> [ RESPOSTA IA ]
+                    </p>
+                    <div className="grid grid-cols-2 gap-2 text-[9px] opacity-80 mb-4">
+                      <p>Confiança:</p> <p className={`font-bold ${diagnosticInfo.confidence === 'alta' ? 'text-green-400' : 'text-yellow-400'}`}>{diagnosticInfo.confidence?.toUpperCase() || '...'}</p>
+                      <p>IA Timestamp:</p> <p className="text-white">{diagnosticInfo.ocrTimestamp || 'Pendente'}</p>
+                    </div>
+                    
+                    <div className="space-y-3">
+                      <div>
+                        <p className="text-white/40 text-[8px] uppercase font-bold mb-1">Nome Identificado</p>
+                        <p className="text-xs text-yellow-300 font-bold bg-yellow-400/10 p-2 rounded-lg border border-yellow-400/20">
+                          {diagnosticInfo.detectedName || 'vazio'}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-white/40 text-[8px] uppercase font-bold mb-1">Casa Identificada</p>
+                        <p className="text-xs text-yellow-300 font-bold bg-yellow-400/10 p-2 rounded-lg border border-yellow-400/20">
+                          {diagnosticInfo.detectedHouse || 'vazio'}
+                        </p>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section className="bg-green-950/20 p-4 rounded-2xl border border-green-900/20">
+                    <p className="text-white mb-2 font-bold text-xs"> [ TEXTO EXTRAÍDO ] </p>
+                    <div className="bg-black/50 p-3 rounded-xl border border-green-900/30 font-mono text-[9px] leading-relaxed max-h-[150px] overflow-y-auto text-green-500/80">
+                      {diagnosticInfo.rawOcrText || 'Nenhum texto bruto disponível ainda.'}
+                    </div>
+                  </section>
+                </div>
+              </div>
             </motion.div>
           )}
         </AnimatePresence>
