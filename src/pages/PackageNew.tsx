@@ -212,7 +212,9 @@ export default function PackageNew({ user }: PackageNewProps) {
             video: {
               deviceId: { exact: backCamera.deviceId },
               width: { ideal: 1920, min: 1280 },
-              height: { ideal: 1080, min: 720 }
+              height: { ideal: 1080, min: 720 },
+              // Adicionamos frameRate ideal para estabilidade
+              frameRate: { ideal: 30, max: 60 }
             },
             audio: false
           });
@@ -237,8 +239,8 @@ export default function PackageNew({ user }: PackageNewProps) {
           stream = await navigator.mediaDevices.getUserMedia({ 
             video: { 
               facingMode: 'environment',
-              width: { ideal: 1280 },
-              height: { ideal: 720 }
+              width: { ideal: 1920, min: 1080 },
+              height: { ideal: 1080, min: 720 }
             }, 
             audio: false 
           });
@@ -321,17 +323,19 @@ export default function PackageNew({ user }: PackageNewProps) {
     
     const context = canvas.getContext('2d');
     if (context) {
-      // Filtros leves como solicitado na regra de ouro
-      context.filter = 'contrast(110%) brightness(105%)';
+      // Filtros leves para melhorar contraste em etiquetas (sem compressão)
+      context.filter = 'contrast(112%) brightness(108%)';
       context.drawImage(video, 0, 0, canvas.width, canvas.height);
       
-      // Alta qualidade (0.95) para garantir fidelidade
-      const quality = 0.95;
+      // Qualidade máxima (1.0) para garantir fidelidade total entre ambientes
+      const quality = 1.0;
       const base64 = canvas.toDataURL('image/jpeg', quality);
       
-      // Calcular tamanho aproximado
+      // Calcular tamanho real para diagnóstico
       const sizeBytes = Math.round((base64.length * (3/4)) - (base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0));
       const sizeKB = Math.round(sizeBytes / 1024);
+
+      console.log(`[DEBUG_OCR] Image Captured: ${canvas.width}x${canvas.height}, Size: ${sizeKB}KB, Quality: ${quality}`);
 
       setDiagnosticInfo({
         version: APP_VERSION,
@@ -342,7 +346,8 @@ export default function PackageNew({ user }: PackageNewProps) {
         sizeKB: sizeKB,
         mimeType: 'image/jpeg',
         quality: quality,
-        capturedAt: new Date().toLocaleTimeString()
+        capturedAt: new Date().toLocaleTimeString(),
+        nativeResolution: `${video.videoWidth}x${video.videoHeight}`
       });
 
       stopCamera();
@@ -369,6 +374,15 @@ export default function PackageNew({ user }: PackageNewProps) {
     if (processingRef.current) return;
     processingRef.current = true;
     setIsOcrLoading(true);
+    
+    // Limpa estados de detecção anterior para evitar confusão/artefatos, especialmente em retentativas
+    setRecipientName('');
+    setUnitNumber('');
+    setMatchingResidents([]);
+    setSelectedResident(null);
+    setOcrConfidence(null);
+    setIsAiSearch(false);
+    setIsManualUnitSearch(false);
 
     try {
       setStatusMessage('Processando...');
@@ -404,11 +418,13 @@ export default function PackageNew({ user }: PackageNewProps) {
       const ocrPromise = (async () => {
         try {
           setStatusMessage('Analisando...');
+          setDiagnosticInfo((prev: any) => ({ ...prev, ocrStatus: 'PROCESSANDO...', ocrError: null }));
           const parsedData = await extractBasicText(finalBase64);
           
           if (parsedData) {
             setDiagnosticInfo((prev: any) => ({
               ...prev,
+              ocrStatus: 'SUCESSO',
               rawOcrText: parsedData.texto_bruto,
               detectedName: parsedData.nome_detectado,
               detectedHouse: parsedData.casa_detectada,
@@ -471,17 +487,41 @@ export default function PackageNew({ user }: PackageNewProps) {
           } else {
             setOcrConfidence('baixa');
           }
-        } catch (err) {
+        } catch (err: any) {
           console.error("Erro no OCR promise:", err);
+          setDiagnosticInfo((prev: any) => ({
+            ...prev,
+            ocrStatus: 'ERRO',
+            ocrError: err?.message || String(err),
+            ocrTimestamp: new Date().toLocaleTimeString()
+          }));
           setOcrConfidence('baixa');
         }
         return true;
       })();
 
-      // Aguarda OCR ou 4 segundos
-      const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve('timeout'), 4000));
+      // Aguarda OCR ou 20 segundos para não desistir antes da IA terminar
+      const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve('timeout'), 20000));
       
-      await Promise.race([ocrPromise, timeoutPromise]);
+      const raceResult = await Promise.race([
+        ocrPromise.then(() => 'success'),
+        timeoutPromise
+      ]);
+
+      if (raceResult === 'timeout') {
+        console.warn("OCR timeout atingido (20s)");
+        setDiagnosticInfo((prev: any) => ({
+          ...prev,
+          ocrStatus: 'TIMEOUT',
+          ocrError: 'A IA demorou mais de 20s para responder. Verifique sua conexão ou tente novamente.',
+          ocrTimestamp: new Date().toLocaleTimeString()
+        }));
+        
+        // Se deu timeout, forçamos o estado de baixa para liberar o preenchimento manual após o tempo limite
+        if (!ocrConfidence) {
+          setOcrConfidence('baixa');
+        }
+      }
 
       setIsOcrLoading(false);
       setStep('manual');
@@ -1062,14 +1102,14 @@ export default function PackageNew({ user }: PackageNewProps) {
                         <div className="py-12 flex flex-col items-center justify-center text-center space-y-4">
                           <div className="relative">
                             <div className="w-16 h-16 border-4 border-indigo-100 rounded-full" />
-                            <div className="w-16 h-16 border-4 border-indigo-600 rounded-full border-t-transparent animate-spin absolute inset-0" />
+                            <div className="w-16 h-16 border-4 border-indigo-600 border-t-transparent animate-spin absolute inset-0 rounded-full" />
                             <div className="absolute inset-0 flex items-center justify-center">
-                              <Sparkles className="w-6 h-6 text-indigo-600" />
+                              <Sparkles className="w-6 h-6 text-indigo-600 animate-pulse" />
                             </div>
                           </div>
-                          <div>
-                            <p className="text-gray-900 font-bold">{statusMessage}</p>
-                            <p className="text-gray-500 text-xs mt-1">Identificando morador automaticamente...</p>
+                          <div className="max-w-[200px]">
+                            <p className="text-gray-900 font-bold animate-pulse">{statusMessage}</p>
+                            <p className="text-gray-500 text-xs mt-1">Aguardando resposta da inteligência artificial...</p>
                           </div>
                         </div>
                       ) : (ocrConfidence === 'baixa' && matchingResidents.length === 0) ? (
@@ -1534,7 +1574,8 @@ export default function PackageNew({ user }: PackageNewProps) {
                       <Camera className="w-3 h-3" /> [ IMAGEM FINAL ]
                     </p>
                     <div className="grid grid-cols-2 gap-2 text-[9px] opacity-80 mb-4">
-                      <p>Resolução:</p> <p className="text-white">{diagnosticInfo.width}x{diagnosticInfo.height}</p>
+                      <p>Resolução Foto:</p> <p className="text-white">{diagnosticInfo.width}x{diagnosticInfo.height}</p>
+                      <p>Stream Nativo:</p> <p className="text-white">{diagnosticInfo.nativeResolution || '?'}</p>
                       <p>Tamanho Real:</p> <p className="text-white">{diagnosticInfo.sizeKB} KB</p>
                       <p>JPEG Quality:</p> <p className="text-white">{diagnosticInfo.quality * 100}%</p>
                       <p>Captura Local:</p> <p className="text-white">{diagnosticInfo.capturedAt}</p>
@@ -1554,9 +1595,20 @@ export default function PackageNew({ user }: PackageNewProps) {
                       <Sparkles className="w-3 h-3 text-yellow-400" /> [ RESPOSTA IA ]
                     </p>
                     <div className="grid grid-cols-2 gap-2 text-[9px] opacity-80 mb-4">
+                      <p>Status Chamada:</p> 
+                      <p className={`font-bold ${diagnosticInfo.ocrStatus === 'SUCESSO' ? 'text-green-400' : diagnosticInfo.ocrStatus === 'ERRO' ? 'text-red-400' : 'text-yellow-400'}`}>
+                        {diagnosticInfo.ocrStatus || 'AGUARDANDO'}
+                      </p>
                       <p>Confiança:</p> <p className={`font-bold ${diagnosticInfo.confidence === 'alta' ? 'text-green-400' : 'text-yellow-400'}`}>{diagnosticInfo.confidence?.toUpperCase() || '...'}</p>
                       <p>IA Timestamp:</p> <p className="text-white">{diagnosticInfo.ocrTimestamp || 'Pendente'}</p>
                     </div>
+
+                    {diagnosticInfo.ocrError && (
+                      <div className="mb-4 bg-red-950/30 border border-red-900/50 p-2 rounded-lg text-red-300 text-[8px] leading-tight">
+                        <p className="font-bold mb-1 tracking-wider">[ ERRO DETALHADO ]</p>
+                        {diagnosticInfo.ocrError}
+                      </div>
+                    )}
                     
                     <div className="space-y-3">
                       <div>

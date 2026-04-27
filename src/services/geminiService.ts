@@ -1,7 +1,7 @@
 import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
 
 // O Vite injeta o GEMINI_API_KEY via define no vite.config.ts
-const apiKey = process.env.GEMINI_API_KEY || "";
+const apiKey = process.env.GEMINI_API_KEY || (import.meta as any).env?.VITE_GEMINI_API_KEY || "";
 const ai = new GoogleGenAI({ apiKey });
 
 async function callWithRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
@@ -59,7 +59,7 @@ export async function getRawTextFromImage(base64Image: string): Promise<string |
     return response.text || null;
   } catch (e) {
     console.error("Erro no OCR bruto:", e);
-    return null;
+    throw e;
   }
 }
 
@@ -124,7 +124,7 @@ Retorne APENAS o JSON conforme o esquema:
     return JSON.parse(text);
   } catch (e) {
     console.error("Erro no OCR básico:", e);
-    return null;
+    throw e;
   }
 }
 
@@ -227,6 +227,6 @@ export async function analyzePackageLabel(base64Image: string, residentList?: st
     return data;
   } catch (e) {
     console.error("Erro ao analisar etiqueta com Gemini:", e);
-    return null;
+    throw e;
   }
 }
