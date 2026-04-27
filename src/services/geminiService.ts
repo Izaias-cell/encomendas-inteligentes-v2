@@ -7,7 +7,7 @@ const ai = new GoogleGenAI({ apiKey });
 export async function getRawTextFromImage(base64Image: string): Promise<string | null> {
   const model = "gemini-3-flash-preview";
   
-  const prompt = "Identifique e extraia APENAS o NOME DO DESTINATÁRIO e o NÚMERO DA CASA/APTO desta etiqueta. Ignore qualquer outro texto (rua, CEP, códigos, transportadora). Retorne o nome na primeira linha e a unidade na segunda linha.";
+  const prompt = "Identifique e extraia o NOME DO DESTINATÁRIO, a UNIDADE (CASA/APTO), TRANSPORTADORA e CÓDIGO DE RASTREIO desta etiqueta. Dê atenção ESPECIAL a anotações MANUAIS grandes (ex: 'C 123', 'Ap 101'). Se houver anotação manual da unidade, ela tem prioridade. Retorne as informações de forma clara.";
 
   try {
     const response = await ai.models.generateContent({
@@ -26,6 +26,7 @@ export async function getRawTextFromImage(base64Image: string): Promise<string |
         }
       ],
       config: {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
         temperature: 0,
         maxOutputTokens: 400,
       },
@@ -41,16 +42,19 @@ export async function getRawTextFromImage(base64Image: string): Promise<string |
 export async function extractBasicText(base64Image: string) {
   const model = "gemini-3-flash-preview";
   
-  const prompt = `Extraia o nome do destinatário e o número da unidade (casa/apto) desta etiqueta de encomenda.
-  
-  DIRETRIZES:
-  1. Priorize velocidade e precisão básica.
-  2. Se o nome não estiver claro, extraia o que parecer ser o nome do destinatário.
-  3. Se a unidade não estiver clara, extraia qualquer número que pareça ser a casa ou apartamento (ex: "Casa 12", "Apto 101", "142").
-  4. Ignore CEP, cidade, estado, endereço completo, códigos de rastreio e transportadora, A MENOS que ajudem a identificar o morador.
-  5. Se encontrar apenas um dos dados (só nome ou só unidade), retorne o que encontrou.
-  
-  Retorne APENAS o JSON.`;
+  const prompt = `Extrair informações de uma etiqueta de encomenda.
+
+Retorne apenas:
+- nome do destinatário (parcial ou completo)
+- número da casa/unidade (se identificado claramente)
+
+Regras:
+- Ignorar completamente: códigos de rastreio, códigos de barras, transportadora, CEP, cidade, endereço completo
+- Não interpretar nem validar dados
+- Não tentar decidir quem é o morador
+- Não retornar explicações
+
+Retorne APENAS o JSON.`;
 
   try {
     const response = await ai.models.generateContent({
@@ -74,10 +78,9 @@ export async function extractBasicText(base64Image: string) {
         responseSchema: {
           type: Type.OBJECT,
           properties: {
-            recipientName: { type: Type.STRING, description: "Nome aproximado ou exato do destinatário" },
-            unitNumber: { type: Type.STRING, description: "Número da casa ou apartamento encontrado" },
-            carrier: { type: Type.STRING, description: "Nome da transportadora (opcional)" },
-            trackingNumber: { type: Type.STRING, description: "Código de rastreio (opcional)" }
+            nome: { type: Type.STRING, description: "Nome do destinatário" },
+            casa: { type: Type.STRING, description: "Número da casa ou unidade" },
+            confianca: { type: Type.STRING, enum: ["alta", "media", "baixa"], description: "Nível de confiança" }
           }
         }
       },
@@ -104,6 +107,12 @@ export async function analyzePackageLabel(base64Image: string, residentList?: st
   OBJETIVO:
   - Identificar o nome do morador (mesmo que parcial ou aproximado).
   - Identificar a unidade (casa/apto).
+  - Identificar a transportadora (Carrier).
+  - Identificar o código de rastreio (Tracking Number).
+  
+  PRIORIDADE DE UNIDADE:
+  - Procure por marcações MANUAIS grandes (escritas a caneta/marcador) como "C 123", "C123", "Casa 45", "Ap 202", "Apto 101".
+  - Se encontrar "C" seguido de número, interprete 'C' como 'Casa'.
   
   REGRAS:
   - Seja tolerante com erros de OCR ou abreviações.

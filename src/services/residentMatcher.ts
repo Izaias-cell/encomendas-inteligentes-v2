@@ -10,6 +10,7 @@ const UNIT_SYNONYMS: Record<string, string> = {
   'APTO': 'AP',
   'APARTAMENTO': 'AP',
   'CS': 'CASA',
+  'C': 'CASA',
   'BL': 'BLOCO',
   'TR': 'TORRE'
 };
@@ -63,6 +64,7 @@ export const normalizeUnit = (unit: string) => {
   });
 
   return normalized.toLowerCase()
+    .replace(/\bc\b/g, 'casa')
     .replace(/\s+/g, '')
     .replace(/apartamento|apto|ap/g, 'ap')
     .replace(/casa|cs/g, 'casa')
@@ -119,22 +121,14 @@ export const getLevenshteinDistance = (a: string, b: string): number => {
 };
 
 /**
- * Extrai o primeiro nome e o sobrenome (última palavra)
+ * Extrai partes de um nome (removendo conectores como 'de', 'da', etc)
  */
-/**
- * Extrai o primeiro nome
- */
-const getFirstName = (fullName: string) => {
-  const normalized = normalizeName(fullName);
-  const parts = normalized.split(' ').filter(p => p.length > 0);
-  return parts[0] || '';
-};
-
-/**
- * Extrai as N primeiras letras de uma string
- */
-const getFirstNLetters = (text: string, n: number) => {
-  return text.substring(0, n).toUpperCase();
+const getNameParts = (name: string): string[] => {
+  const connectors = ['DE', 'DA', 'DO', 'DOS', 'DAS', 'E'];
+  return normalizeName(name)
+    .toUpperCase()
+    .split(' ')
+    .filter(p => p.length > 2 && !connectors.includes(p));
 };
 
 export const findMatchingResidents = async (
@@ -156,76 +150,110 @@ export const findMatchingResidents = async (
 
   if (!allResidents || allResidents.length === 0) return [];
 
-  const normalizedOcrName = normalizeName(name || '').toUpperCase();
+  const rawOcrName = (name || '').toUpperCase();
+  const normalizedOcrName = normalizeName(rawOcrName);
+  const ocrParts = getNameParts(rawOcrName);
   const normalizedOcrUnit = normalizeUnit(unit || '').toLowerCase();
   
   // Se tivermos detalhes da unidade (número isolado), usamos também
   const ocrUnitNum = details?.number ? normalizeUnit(details.number).toLowerCase() : '';
 
-  // 2. Extrair Primeiro Nome do OCR
-  const ocrFirstName = getFirstName(normalizedOcrName);
-  const ocrF3Name = getFirstNLetters(ocrFirstName, 3);
-  const ocrF4Name = getFirstNLetters(ocrFirstName, 4);
+  // Filtro de segurança para códigos falsos de casa (Ex: C 39 que é rastreio)
+  const isLikelyFakeUnit = (u: string) => {
+    const upperU = u.toUpperCase();
+    const fakeKeywords = ['ROTA', 'PARADA', 'PACOTE', 'STOP', 'PEDIDO', 'TRACKING', 'PL1', 'CTCE', 'HUB'];
+    
+    const hasFakeKeyword = fakeKeywords.some(kw => upperU.includes(kw));
+    const isTooLong = u.length > 6;
+    const isSuspiciousC = upperU.includes('C') && u.length <= 3 && !ocrParts.length && !upperU.includes('CASA');
+
+    return hasFakeKeyword || isTooLong || isSuspiciousC;
+  };
 
   const scoredResidents = allResidents.map(r => {
     let score = 0;
     const resFullName = (r.nome || '').toUpperCase();
+    const resParts = getNameParts(resFullName);
     const resUnit = normalizeUnit(r.unidade || '').toLowerCase();
 
-    // 1. Primeiro Nome do morador cadastrado
-    const resFirstName = getFirstName(resFullName);
-
-    // 2. Extrair letras para desempate
-    const resF3Name = getFirstNLetters(resFirstName, 3);
-    const resF4Name = getFirstNLetters(resFirstName, 4);
-
-    // 3. MATCHING LÓGICA (Requisito: 3 letras nome + unidade facultativa)
+    // 1. MATCH DE UNIDADE
     const unitMatches = resUnit && (normalizedOcrUnit === resUnit || normalizedOcrUnit.includes(resUnit) || (ocrUnitNum && ocrUnitNum === resUnit));
     
-    // Match de 3 letras (Base principal)
-    const name3Matches = resF3Name.length >= 3 && ocrF3Name === resF3Name;
+    // 2. MATCH DE NOME (FUZZY E PARTES)
+    let nameScore = 0;
     
-    // Match de 4 letras (Desempate de ambiguidade)
-    const name4Matches = resF4Name.length >= 4 && ocrF4Name === resF4Name;
+    // Match Exato (raro com OCR)
+    if (resFullName === rawOcrName) {
+      nameScore += 100;
+    }
 
-    // CÁLCULO DE SCORE
+    // Match de partes
+    if (ocrParts.length > 0 && resParts.length > 0) {
+      let matchedParts = 0;
+      ocrParts.forEach(op => {
+        if (resParts.includes(op)) {
+          matchedParts++;
+        } else {
+          // Fuzzy match para cada parte
+          resParts.forEach(rp => {
+            const dist = getLevenshteinDistance(op, rp);
+            if (dist <= 1 && op.length > 3) matchedParts += 0.8;
+            else if (dist <= 2 && op.length > 5) matchedParts += 0.5;
+          });
+        }
+      });
+
+      // Bônus por quantidade de partes batendo
+      const matchRatio = matchedParts / Math.max(ocrParts.length, resParts.length);
+      nameScore += (matchRatio * 80);
+
+      // Bônus específico para Primeiro + Último nome (com tolerância a erros)
+      if (ocrParts.length >= 2 && resParts.length >= 2) {
+        const firstDist = getLevenshteinDistance(ocrParts[0], resParts[0]);
+        const lastDist = getLevenshteinDistance(ocrParts[ocrParts.length - 1], resParts[resParts.length - 1]);
+        
+        if (firstDist <= 1 && lastDist <= 1) {
+          nameScore += 50; // Match forte de Nome + Sobrenome
+        } else if (firstDist <= 1) {
+          nameScore += 20; // Match de primeiro nome
+        }
+      }
+    }
+
+    // 3. CÁLCULO DE SCORE COMBINADO
     
-    // Prioridade Máxima: Unidade + Nome (4 letras)
-    if (unitMatches && name4Matches) {
-      score += 300; // Seleção automática imediata
-    } 
-    // Alta: Unidade + Nome (3 letras)
-    else if (unitMatches && name3Matches) {
-      score += 250; 
+    // Unidade + Nome Forte
+    if (unitMatches && nameScore >= 50) {
+      score = 300 + nameScore;
     }
-    // Alta/Média: Apenas Unidade (Se detectada claramente)
-    else if (unitMatches && normalizedOcrUnit.length > 0) {
-      score += 150;
+    // Unidade + Nome Fraco
+    else if (unitMatches && nameScore > 0) {
+      score = 200 + nameScore;
     }
-    // Média: Apenas Nome (4 letras)
-    else if (name4Matches) {
-      score += 100;
+    // Apenas Unidade (Cuidado com fake units)
+    else if (unitMatches && !isLikelyFakeUnit(normalizedOcrUnit)) {
+      score = 150;
     }
-    // Base: Apenas Nome (3 letras)
-    else if (name3Matches) {
-      score += 80;
+    // Apenas Nome Forte
+    else if (nameScore >= 60) {
+      score = 100 + nameScore;
     }
-    // Fallback: Nome contém as 3 letras mas não no início
-    else if (resF3Name.length >= 3 && normalizedOcrName.includes(resF3Name)) {
-      score += 40;
+    // Apenas Nome Médio
+    else if (nameScore >= 30) {
+      score = 50 + nameScore;
     }
 
     // SEGURANÇA: Se a unidade foi detectada e NÃO bate, penaliza fortemente
-    if (normalizedOcrUnit && resUnit && !unitMatches) {
+    if (normalizedOcrUnit && resUnit && !unitMatches && !isLikelyFakeUnit(normalizedOcrUnit)) {
       score = Math.max(0, score - 200);
     }
 
     return { resident: r, score };
   });
 
-  // Ordenar pelo maior score e filtrar os que não tiveram match significativo
+  // Filtrar e ordenar
   const sortedMatches = scoredResidents
-    .filter(sr => sr.score >= 40)
+    .filter(sr => sr.score >= 50)
     .sort((a, b) => b.score - a.score);
 
   return sortedMatches;

@@ -5,7 +5,7 @@ import { Profile } from '../types';
 import { Users, Plus, Loader2, Search, User, Phone, Home, Shield, Trash2, MoreVertical, Edit, Power, X } from 'lucide-react';
 import { formatResidentAddress } from '../lib/residentUtils';
 import { toast } from 'react-hot-toast';
-import { logAction } from '../services/auditService';
+import { registrarAuditoria } from '../services/auditService';
 
 interface ProfileListProps {
   user: Profile;
@@ -108,15 +108,18 @@ export default function ProfileList({ user }: ProfileListProps) {
         .update({ active: false })
         .eq('id', profile.id);
 
-      await logAction(
-        user.id,
-        user.condominium_id,
-        'DELETE_RESIDENT',
-        'moradores',
-        profile.id,
-        profile,
-        { active: false }
-      );
+      await registrarAuditoria({
+        condominio_id: user.condominium_id || '',
+        usuario_id: user.id,
+        usuario_nome: user.full_name,
+        usuario_perfil: user.role,
+        tipo_evento: 'MORADOR_DESATIVADO',
+        acao: 'UPDATE',
+        tabela_afetada: 'moradores',
+        registro_id: profile.id,
+        descricao: `Morador desativado: ${profile.full_name} - ${profile.unidade || 'N/A'}`,
+        metodo: 'MANUAL'
+      });
 
       toast.success('Morador excluído com sucesso!');
       fetchProfiles();
@@ -141,15 +144,18 @@ export default function ProfileList({ user }: ProfileListProps) {
 
       if (error) throw error;
 
-      await logAction(
-        user.id,
-        user.condominium_id,
-        newStatus ? 'ACTIVATE_RESIDENT' : 'DEACTIVATE_RESIDENT',
-        'moradores',
-        profile.id,
-        profile,
-        { active: newStatus }
-      );
+      await registrarAuditoria({
+        condominio_id: user.condominium_id || '',
+        usuario_id: user.id,
+        usuario_nome: user.full_name,
+        usuario_perfil: user.role,
+        tipo_evento: newStatus ? 'MORADOR_ATIVADO' : 'MORADOR_DESATIVADO',
+        acao: 'UPDATE',
+        tabela_afetada: 'moradores',
+        registro_id: profile.id,
+        descricao: `Morador ${newStatus ? 'ativado' : 'desativado'}: ${profile.full_name} - ${profile.unidade || 'N/A'}`,
+        metodo: 'MANUAL'
+      });
 
       toast.success(`Morador ${newStatus ? 'ativado' : 'desativado'} com sucesso!`);
       fetchProfiles();
@@ -175,15 +181,20 @@ export default function ProfileList({ user }: ProfileListProps) {
 
       if (error) throw error;
 
-      await logAction(
-        user.id,
-        user.condominium_id,
-        newStatus ? 'ACTIVATE_USER' : 'DEACTIVATE_USER',
-        'profiles',
-        profile.id,
-        profile,
-        { active: newStatus }
-      );
+      await registrarAuditoria({
+        condominio_id: user.condominium_id || '',
+        usuario_id: user.id,
+        usuario_nome: user.full_name,
+        usuario_perfil: user.role,
+        tipo_evento: newStatus ? 'USUARIO_ATIVADO' : 'USUARIO_DESATIVADO',
+        acao: 'UPDATE',
+        tabela_afetada: 'profiles',
+        registro_id: profile.id,
+        descricao: `Usuário ${newStatus ? 'ativado' : 'desativado'}: ${profile.full_name}`,
+        metodo: 'MANUAL',
+        dados_antes: profile,
+        dados_depois: { active: newStatus }
+      });
 
       toast.success(`Usuário ${newStatus ? 'ativado' : 'inativado'} com sucesso!`);
       fetchProfiles();
@@ -247,15 +258,20 @@ export default function ProfileList({ user }: ProfileListProps) {
         if (error) throw error;
       }
 
-      await logAction(
-        user.id,
-        user.condominium_id,
-        'UPDATE_PROFILE',
-        editingProfile.role === 'resident' ? 'moradores' : 'profiles',
-        editingProfile.id,
-        editingProfile,
-        formData
-      );
+      await registrarAuditoria({
+        condominio_id: user.condominium_id || '',
+        usuario_id: user.id,
+        usuario_nome: user.full_name,
+        usuario_perfil: user.role,
+        tipo_evento: editingProfile.role === 'resident' ? 'MORADOR_EDITADO' : 'USUARIO_EDITADO',
+        acao: 'UPDATE',
+        tabela_afetada: editingProfile.role === 'resident' ? 'moradores' : 'profiles',
+        registro_id: editingProfile.id,
+        descricao: `${editingProfile.role === 'resident' ? 'Morador' : 'Usuário'} editado: ${formData.full_name} - ${formData.unidade || 'N/A'}`,
+        metodo: 'MANUAL',
+        dados_antes: editingProfile,
+        dados_depois: formData
+      });
 
       toast.success('Perfil atualizado com sucesso!');
       setShowEditModal(false);

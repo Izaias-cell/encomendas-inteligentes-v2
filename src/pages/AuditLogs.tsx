@@ -3,11 +3,25 @@ import { supabase } from '../lib/supabase';
 import { AuditLog, Profile } from '../types';
 import { 
   History, Loader2, Search, User, Calendar, 
-  Database, ArrowRight, Filter, Download 
+  Database, ArrowRight, Filter, Download,
+  Tag, Activity, ShieldCheck, Clock
 } from 'lucide-react';
-import { formatDate } from '../lib/dateUtils';
 import { ptBR } from 'date-fns/locale';
 import { toast } from 'react-hot-toast';
+import { subDays, startOfDay, endOfDay } from 'date-fns';
+
+function formatarDataBrasil(dataUtc: string) {
+  if (!dataUtc) return "-";
+
+  return new Intl.DateTimeFormat("pt-BR", {
+    timeZone: "America/Sao_Paulo",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(dataUtc));
+}
 
 interface AuditLogsProps {
   user: Profile;
@@ -17,24 +31,30 @@ export default function AuditLogs({ user }: AuditLogsProps) {
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
-  const [filterAction, setFilterAction] = useState('');
+  const [filterEventType, setFilterEventType] = useState('');
+  const [filterUser, setFilterUser] = useState('');
+  const [dateRange, setDateRange] = useState({
+    start: subDays(new Date(), 7).toISOString().split('T')[0],
+    end: new Date().toISOString().split('T')[0]
+  });
 
   useEffect(() => {
     fetchLogs();
-  }, []);
+  }, [dateRange.start, dateRange.end]);
 
   const fetchLogs = async () => {
     setLoading(true);
     try {
-      const { data, error } = await supabase
-        .from('audit_logs')
-        .select(`
-          *,
-          user:profiles!user_id(full_name)
-        `)
-        .eq('condominium_id', user.condominium_id)
-        .order('created_at', { ascending: false })
-        .limit(200);
+      let query = supabase
+        .from('auditoria_eventos')
+        .select('*')
+        .eq('condominio_id', user.condominium_id)
+        .gte('criado_em', startOfDay(new Date(dateRange.start + 'T00:00:00')).toISOString())
+        .lte('criado_em', endOfDay(new Date(dateRange.end + 'T23:59:59')).toISOString())
+        .order('criado_em', { ascending: false })
+        .limit(500);
+
+      const { data, error } = await query;
 
       if (error) throw error;
       setLogs(data || []);
@@ -47,112 +67,221 @@ export default function AuditLogs({ user }: AuditLogsProps) {
 
   const filteredLogs = logs.filter(log => {
     const matchesSearch = 
-      log.action.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      log.entity_type.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      (log as any).user?.full_name.toLowerCase().includes(searchTerm.toLowerCase());
+      log.descricao.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      log.tabela_afetada.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      log.usuario_nome.toLowerCase().includes(searchTerm.toLowerCase());
     
-    const matchesAction = filterAction ? log.action === filterAction : true;
+    const matchesEventType = filterEventType ? log.tipo_evento === filterEventType : true;
+    const matchesUser = filterUser ? log.usuario_nome === filterUser : true;
     
-    return matchesSearch && matchesAction;
+    return matchesSearch && matchesEventType && matchesUser;
   });
 
-  const actions = Array.from(new Set(logs.map(l => l.action)));
+  const eventTypes = Array.from(new Set(logs.map(l => l.tipo_evento))).sort();
+  const users = Array.from(new Set(logs.map(l => l.usuario_nome))).sort();
+
+  const handleExportCSV = () => {
+    if (filteredLogs.length === 0) {
+      toast.error("Nenhum log para exportar");
+      return;
+    }
+
+    const headers = ["Data", "Usuário", "Evento", "Ação", "Tabela", "Descrição", "Método"];
+    const rows = filteredLogs.map(log => [
+      formatarDataBrasil(log.criado_em),
+      log.usuario_nome,
+      log.tipo_evento,
+      log.acao,
+      log.tabela_afetada,
+      log.descricao,
+      log.metodo
+    ]);
+
+    const csvContent = [
+      headers.join(","),
+      ...rows.map(row => row.map(cell => `"${cell?.toString().replace(/"/g, '""')}"`).join(","))
+    ].join("\n");
+
+    const blob = new Blob(["\ufeff" + csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `auditoria_${dateRange.start}_a_${dateRange.end}.csv`;
+    link.click();
+    toast.success("Logs exportados com sucesso!");
+  };
 
   const formatValue = (val: any) => {
-    if (typeof val === 'object' && val !== null) {
+    if (val === null || val === undefined) return 'Nao informado';
+    if (typeof val === 'object') {
       return JSON.stringify(val, null, 2);
     }
     return String(val);
   };
 
   return (
-    <div className="max-w-6xl mx-auto p-6">
-      <div className="flex justify-between items-center mb-8">
+    <div className="max-w-6xl mx-auto p-4 sm:p-6 space-y-6">
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div>
-          <h1 className="text-3xl font-bold text-zinc-900">Logs de Auditoria</h1>
-          <p className="text-zinc-500">Histórico completo de ações realizadas no sistema</p>
+          <h1 className="text-2xl sm:text-3xl font-bold text-zinc-900 flex items-center gap-2">
+            <ShieldCheck className="w-8 h-8 text-emerald-600" />
+            Auditoria do Sistema
+          </h1>
+          <p className="text-zinc-500 text-sm">Rastreabilidade completa de todas as ações e alterações</p>
         </div>
-        <button
-          onClick={fetchLogs}
-          className="p-3 hover:bg-zinc-100 rounded-xl transition-all text-zinc-500"
-          title="Atualizar"
-        >
-          <History className={`w-6 h-6 ${loading ? 'animate-spin' : ''}`} />
-        </button>
+        <div className="flex gap-2 w-full md:w-auto">
+          <button
+            onClick={handleExportCSV}
+            className="flex-1 md:flex-none flex items-center justify-center gap-2 px-4 py-2 bg-emerald-50 text-emerald-700 rounded-xl font-bold hover:bg-emerald-100 transition-all text-sm"
+          >
+            <Download className="w-4 h-4" />
+            EXPORTAR CSV
+          </button>
+          <button
+            onClick={fetchLogs}
+            className="p-2.5 bg-zinc-100 hover:bg-zinc-200 rounded-xl transition-all text-zinc-600"
+            title="Atualizar"
+          >
+            <History className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
+          </button>
+        </div>
       </div>
 
-      <div className="flex flex-col md:flex-row gap-4 mb-8">
-        <div className="relative flex-1">
-          <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-zinc-400" />
-          <input
-            type="text"
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full pl-12 pr-4 py-4 rounded-2xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 transition-all bg-white"
-            placeholder="Buscar por ação, usuário ou entidade..."
-          />
+      {/* Filtros */}
+      <div className="bg-white p-6 rounded-3xl border border-zinc-100 shadow-sm space-y-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="space-y-1.5">
+            <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest px-1">Busca Geral</label>
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
+              <input
+                type="text"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="w-full pl-9 pr-4 py-2.5 rounded-xl border border-zinc-200 text-sm focus:ring-2 focus:ring-emerald-500/20 outline-none transition-all"
+                placeholder="Descrição, tabela, usuário..."
+              />
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest px-1">Período</label>
+            <div className="flex gap-2 items-center">
+              <input
+                type="date"
+                value={dateRange.start}
+                onChange={(e) => setDateRange({...dateRange, start: e.target.value})}
+                className="flex-1 px-3 py-2.5 rounded-xl border border-zinc-200 text-sm focus:ring-2 focus:ring-emerald-500/20 outline-none transition-all"
+              />
+              <span className="text-zinc-300">/</span>
+              <input
+                type="date"
+                value={dateRange.end}
+                onChange={(e) => setDateRange({...dateRange, end: e.target.value})}
+                className="flex-1 px-3 py-2.5 rounded-xl border border-zinc-200 text-sm focus:ring-2 focus:ring-emerald-500/20 outline-none transition-all"
+              />
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest px-1">Evento</label>
+            <select
+              value={filterEventType}
+              onChange={(e) => setFilterEventType(e.target.value)}
+              className="w-full px-3 py-2.5 rounded-xl border border-zinc-200 text-sm focus:ring-2 focus:ring-emerald-500/20 outline-none transition-all bg-white"
+            >
+              <option value="">Todos os Eventos</option>
+              {eventTypes.map(t => (
+                <option key={t} value={t}>{t}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest px-1">Usuário</label>
+            <select
+              value={filterUser}
+              onChange={(e) => setFilterUser(e.target.value)}
+              className="w-full px-3 py-2.5 rounded-xl border border-zinc-200 text-sm focus:ring-2 focus:ring-emerald-500/20 outline-none transition-all bg-white"
+            >
+              <option value="">Todos os Usuários</option>
+              {users.map(u => (
+                <option key={u} value={u}>{u}</option>
+              ))}
+            </select>
+          </div>
         </div>
-        <select
-          value={filterAction}
-          onChange={(e) => setFilterAction(e.target.value)}
-          className="px-6 py-4 rounded-2xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 bg-white min-w-[200px]"
-        >
-          <option value="">Todas as Ações</option>
-          {actions.map(a => (
-            <option key={a} value={a}>{a}</option>
-          ))}
-        </select>
       </div>
 
       {loading ? (
-        <div className="flex items-center justify-center py-20">
+        <div className="flex flex-col items-center justify-center py-20 gap-3">
           <Loader2 className="w-10 h-10 animate-spin text-emerald-600" />
+          <p className="text-zinc-500 font-medium">Carregando logs...</p>
         </div>
       ) : (
         <div className="space-y-4">
           {filteredLogs.map((log) => (
-            <div key={log.id} className="bg-white rounded-3xl border border-zinc-100 shadow-sm p-6 hover:shadow-md transition-all">
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
-                <div className="flex items-center gap-4">
-                  <div className="w-12 h-12 bg-zinc-50 rounded-2xl flex items-center justify-center text-zinc-400">
-                    <Database className="w-6 h-6" />
+            <div key={log.id} className="bg-white rounded-3xl border border-zinc-100 shadow-sm p-5 sm:p-6 hover:shadow-md transition-all">
+              <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-4">
+                <div className="flex items-start gap-4 flex-1">
+                  <div className={`w-12 h-12 rounded-2xl flex items-center justify-center shrink-0 ${
+                    log.acao === 'CREATE' ? 'bg-emerald-50 text-emerald-600' :
+                    log.acao === 'DELETE' ? 'bg-red-50 text-red-600' :
+                    'bg-zinc-50 text-zinc-600'
+                  }`}>
+                    <Activity className="w-6 h-6" />
                   </div>
-                  <div>
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 text-[10px] font-bold uppercase tracking-wider rounded-full">
-                        {log.action}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex flex-wrap items-center gap-2 mb-1.5">
+                      <span className={`px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full ${
+                        log.acao === 'CREATE' ? 'bg-emerald-100 text-emerald-700' :
+                        log.acao === 'DELETE' ? 'bg-red-100 text-red-700' :
+                        'bg-zinc-100 text-zinc-700'
+                      }`}>
+                        {log.acao}
                       </span>
-                      <span className="text-sm font-bold text-zinc-900">{log.entity_type}</span>
+                      <span className="text-sm font-bold text-zinc-900 truncate">{log.tipo_evento}</span>
+                      <span className="text-xs text-zinc-400">•</span>
+                      <span className="text-xs font-medium text-zinc-500">{log.tabela_afetada}</span>
                     </div>
-                    <div className="flex items-center gap-3 text-xs text-zinc-500">
-                      <div className="flex items-center gap-1">
-                        <User className="w-3 h-3" />
-                        {(log as any).user?.full_name || 'Sistema'}
+                    <p className="text-sm text-zinc-600 mb-3 font-medium leading-relaxed">{log.descricao}</p>
+                    
+                    <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+                      <div className="flex items-center gap-2 text-xs text-zinc-500">
+                        <User className="w-3.5 h-3.5 text-zinc-400" />
+                        <span className="font-bold text-zinc-700">{log.usuario_nome}</span>
+                        <span className="px-1.5 py-0.5 bg-zinc-100 rounded text-[9px] uppercase font-bold text-zinc-500">{log.usuario_perfil}</span>
                       </div>
-                      <div className="flex items-center gap-1">
-                        <Calendar className="w-3 h-3" />
-                        {formatDate(log.created_at, "dd/MM/yyyy HH:mm:ss", { locale: ptBR })}
+                      <div className="flex items-center gap-2 text-xs text-zinc-500">
+                        <Clock className="w-3.5 h-3.5 text-zinc-400" />
+                        {log.criado_em ? formatarDataBrasil(log.criado_em) : '-'}
+                      </div>
+                      <div className="flex items-center gap-2 text-xs text-zinc-500">
+                        <Tag className="w-3.5 h-3.5 text-zinc-400" />
+                        Método: <span className="font-bold uppercase">{log.metodo}</span>
                       </div>
                     </div>
                   </div>
                 </div>
-                <div className="text-xs font-mono text-zinc-400 bg-zinc-50 px-2 py-1 rounded">
-                  ID: {log.entity_id}
+                <div className="flex flex-col items-end gap-2 shrink-0">
+                  <div className="text-[10px] font-mono text-zinc-400 bg-zinc-50 px-2.5 py-1 rounded-lg border border-zinc-100">
+                    ID: {log.registro_id || 'N/A'}
+                  </div>
                 </div>
               </div>
 
-              {(log.old_value || log.new_value) && (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4 p-4 bg-zinc-50 rounded-2xl border border-zinc-100 overflow-hidden">
-                  <div>
-                    <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-2">Valor Antigo</p>
-                    <pre className="text-xs text-zinc-600 overflow-x-auto max-h-40 whitespace-pre-wrap">
-                      {log.old_value ? formatValue(log.old_value) : 'N/A'}
+              {(log.dados_antes || log.dados_depois) && (
+                <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="p-3 bg-zinc-50 rounded-2xl border border-zinc-100">
+                    <p className="text-[9px] font-bold text-zinc-400 uppercase tracking-widest mb-1.5">Estado Anterior</p>
+                    <pre className="text-[11px] text-zinc-600 overflow-x-auto max-h-32 whitespace-pre-wrap font-mono scrollbar-thin">
+                      {log.dados_antes ? formatValue(log.dados_antes) : 'N/A'}
                     </pre>
                   </div>
-                  <div className="border-t md:border-t-0 md:border-l border-zinc-200 pt-4 md:pt-0 md:pl-4">
-                    <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-2">Novo Valor</p>
-                    <pre className="text-xs text-zinc-600 overflow-x-auto max-h-40 whitespace-pre-wrap">
-                      {log.new_value ? formatValue(log.new_value) : 'N/A'}
+                  <div className="p-3 bg-emerald-50/30 rounded-2xl border border-emerald-100/50">
+                    <p className="text-[9px] font-bold text-emerald-500 uppercase tracking-widest mb-1.5">Novo Estado</p>
+                    <pre className="text-[11px] text-emerald-900/70 overflow-x-auto max-h-32 whitespace-pre-wrap font-mono scrollbar-thin">
+                      {log.dados_depois ? formatValue(log.dados_depois) : 'N/A'}
                     </pre>
                   </div>
                 </div>
@@ -166,7 +295,7 @@ export default function AuditLogs({ user }: AuditLogsProps) {
                 <History className="w-10 h-10" />
               </div>
               <h3 className="text-xl font-bold text-zinc-900 mb-2">Nenhum log encontrado</h3>
-              <p className="text-zinc-500">As ações realizadas no sistema aparecerão aqui.</p>
+              <p className="text-zinc-500">Tente ajustar os filtros ou o período de busca.</p>
             </div>
           )}
         </div>

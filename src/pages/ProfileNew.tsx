@@ -4,7 +4,7 @@ import { supabase } from '../lib/supabase';
 import { Profile, Role } from '../types';
 import { UserPlus, ArrowLeft, Loader2, User, Phone, Home, Shield } from 'lucide-react';
 import { toast } from 'react-hot-toast';
-import { logAction } from '../services/auditService';
+import { registrarAuditoria } from '../services/auditService';
 
 interface ProfileNewProps {
   user: Profile;
@@ -27,7 +27,9 @@ export default function ProfileNew({ user }: ProfileNewProps) {
     setLoading(true);
 
     try {
-      const { error } = await supabase
+      const is_teste = fullName.toLowerCase().includes('teste');
+
+      const { data: newResident, error } = await supabase
         .from('moradores')
         .insert([{
           nome: fullName,
@@ -38,29 +40,26 @@ export default function ProfileNew({ user }: ProfileNewProps) {
           lote: lote,
           street: street,
           condominium_id: user.condominium_id,
-          ativo: true
-        }]);
+          ativo: true,
+          is_teste
+        }])
+        .select()
+        .single();
 
       if (error) throw error;
       
-      await logAction(
-        user.id,
-        user.condominium_id,
-        'CREATE_PROFILE',
-        'moradores',
-        'new',
-        null,
-        {
-          full_name: fullName,
-          phone,
-          role: 'resident',
-          unit: unitNumber,
-          unit_type: unitType,
-          block: block,
-          lote: lote,
-          street: street
-        }
-      );
+      await registrarAuditoria({
+        condominio_id: user.condominium_id || '',
+        usuario_id: user.id,
+        usuario_nome: user.full_name,
+        usuario_perfil: user.role,
+        tipo_evento: 'MORADOR_CRIADO',
+        acao: 'CREATE',
+        tabela_afetada: 'moradores',
+        registro_id: newResident.id,
+        descricao: `Morador criado: ${fullName} - ${unitNumber}`,
+        metodo: 'MANUAL'
+      });
 
       toast.success('Morador cadastrado com sucesso!');
       navigate('/portaria?tab=residents');

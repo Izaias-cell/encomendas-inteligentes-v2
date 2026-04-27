@@ -313,8 +313,97 @@ CREATE POLICY "Authenticated Update" ON storage.objects
   );
 
 -- Permitir que usuários autenticados excluam (DELETE)
+-- Permitir que usuários autenticados excluam (DELETE)
 CREATE POLICY "Authenticated Delete" ON storage.objects
   FOR DELETE USING (
     bucket_id = 'packages' AND
     (auth.role() = 'authenticated' OR auth.role() = 'anon')
   );
+
+-- ==========================================
+-- AUDITORIA
+-- ==========================================
+
+CREATE TABLE auditoria_eventos (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  condominio_id UUID REFERENCES condominiums(id),
+  usuario_id UUID REFERENCES profiles(id),
+  usuario_nome TEXT,
+  usuario_perfil TEXT,
+  tipo_evento TEXT, -- e.g. 'ENCOMENDA_CADASTRADA'
+  acao TEXT, -- 'CREATE', 'UPDATE', 'DELETE'
+  tabela_afetada TEXT,
+  registro_id UUID,
+  descricao TEXT,
+  metodo TEXT, -- 'MANUAL', 'OCR', 'QR', 'CODIGO', 'FOTO'
+  dados_antes JSONB,
+  dados_depois JSONB,
+  criado_em TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+ALTER TABLE auditoria_eventos ENABLE ROW LEVEL SECURITY;
+
+-- Admins e Síndicos podem ver todos os logs do condomínio
+CREATE POLICY "Staff can view audit logs" ON auditoria_eventos
+  FOR SELECT TO authenticated USING (
+    EXISTS (
+      SELECT 1 FROM profiles
+      WHERE profiles.id = auth.uid()
+      AND profiles.condominium_id = auditoria_eventos.condominio_id
+      AND profiles.role IN ('admin', 'sindico')
+    )
+  );
+
+-- Permitir inserção de logs por qualquer usuário autenticado (via app ou RPC)
+CREATE POLICY "Authenticated can insert audit logs" ON auditoria_eventos
+  FOR INSERT TO authenticated WITH CHECK (true);
+
+-- Função RPC para registro centralizado de auditoria
+CREATE OR REPLACE FUNCTION registrar_auditoria(
+  p_condominio_id UUID,
+  p_usuario_id UUID,
+  p_usuario_nome TEXT,
+  p_usuario_perfil TEXT,
+  p_tipo_evento TEXT,
+  p_acao TEXT,
+  p_tabela_afetada TEXT,
+  p_registro_id UUID,
+  p_descricao TEXT,
+  p_metodo TEXT DEFAULT 'MANUAL',
+  p_dados_antes JSONB DEFAULT NULL,
+  p_dados_depois JSONB DEFAULT NULL
+) RETURNS UUID AS $
+DECLARE
+  v_audit_id UUID;
+BEGIN
+  INSERT INTO auditoria_eventos (
+    condominio_id,
+    usuario_id,
+    usuario_nome,
+    usuario_perfil,
+    tipo_evento,
+    acao,
+    tabela_afetada,
+    registro_id,
+    descricao,
+    metodo,
+    dados_antes,
+    dados_depois
+  ) VALUES (
+    p_condominio_id,
+    p_usuario_id,
+    p_usuario_nome,
+    p_usuario_perfil,
+    p_tipo_evento,
+    p_acao,
+    p_tabela_afetada,
+    p_registro_id,
+    p_descricao,
+    p_metodo,
+    p_dados_antes,
+    p_dados_depois
+  ) RETURNING id INTO v_audit_id;
+
+  RETURN v_audit_id;
+END;
+$ LANGUAGE plpgsql SECURITY DEFINER;

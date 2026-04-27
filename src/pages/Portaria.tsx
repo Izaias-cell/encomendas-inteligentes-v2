@@ -47,7 +47,7 @@ import { ptBR } from 'date-fns/locale';
 import { getCurrentPorter, setManualPorter, clearManualPorter } from '../lib/porterUtils';
 
 import toast from 'react-hot-toast';
-import { logAction } from '../services/auditService';
+import { registrarAuditoria } from '../services/auditService';
 import { Html5Qrcode } from 'html5-qrcode';
 import { motion, AnimatePresence } from 'motion/react';
 import { sendWhatsAppMessage, getWhatsAppLink, generatePickupCode, prepareWhatsAppNotification } from '../services/whatsappService';
@@ -484,15 +484,20 @@ export default function Portaria({ user }: PortariaProps) {
             fallbackTriggered = true;
             
             // Log fallback
-            await logAction(
-              user.id,
-              user.condominium_id,
-              'WHATSAPP_FALLBACK',
-              'packages',
-              pkg.id,
-              { mode: 'api' },
-              { mode: 'manual', error: error instanceof Error ? error.message : String(error) }
-            );
+            await registrarAuditoria({
+              condominio_id: user.condominium_id || '',
+              usuario_id: user.id,
+              usuario_nome: user.full_name,
+              usuario_perfil: user.role,
+              tipo_evento: 'WHATSAPP_FALLBACK',
+              acao: 'UPDATE',
+              tabela_afetada: 'encomendas',
+              registro_id: pkg.id,
+              descricao: `Fallback no envio de WhatsApp para Encomenda ${pkg.id}`,
+              metodo: 'API_FALLBACK',
+              dados_antes: { mode: 'api' },
+              dados_depois: { mode: 'manual', error: error instanceof Error ? error.message : String(error) }
+            });
 
             break; // Interromper envio automático
           }
@@ -717,7 +722,7 @@ export default function Portaria({ user }: PortariaProps) {
       // Requisito: passar o objeto diretamente para o handleDeliver para evitar estado "stale" e garantir baixa coletiva
       setTimeout(() => {
         handleDeliver(data.package_id || data.id, scanMethod, undefined, data);
-      }, 1500);
+      }, 50);
     } catch (err) {
       console.error("Erro ao processar QR:", err);
       setQrScanStatus('error');
@@ -962,15 +967,20 @@ export default function Portaria({ user }: PortariaProps) {
         .update({ active: false })
         .eq('id', residentToDelete.id);
 
-      await logAction(
-        user.id,
-        user.condominium_id,
-        'DELETE_RESIDENT',
-        'moradores',
-        residentToDelete.id,
-        residentToDelete,
-        { ativo: false }
-      );
+      await registrarAuditoria({
+        condominio_id: user.condominium_id || '',
+        usuario_id: user.id,
+        usuario_nome: user.full_name,
+        usuario_perfil: user.role,
+        tipo_evento: 'MORADOR_DESATIVADO',
+        acao: 'UPDATE',
+        tabela_afetada: 'moradores',
+        registro_id: residentToDelete.id,
+        descricao: `Morador desativado/excluído: ${residentToDelete.nome}`,
+        metodo: 'MANUAL',
+        dados_antes: residentToDelete,
+        dados_depois: { ativo: false }
+      });
 
       toast.success('Morador excluído com sucesso!');
       setResidentToDelete(null);
@@ -995,15 +1005,20 @@ export default function Portaria({ user }: PortariaProps) {
 
       if (error) throw error;
 
-      await logAction(
-        user.id,
-        user.condominium_id,
-        newStatus ? 'ACTIVATE_RESIDENT' : 'DEACTIVATE_RESIDENT',
-        'moradores',
-        resident.id,
-        resident,
-        { ativo: newStatus }
-      );
+      await registrarAuditoria({
+        condominio_id: user.condominium_id || '',
+        usuario_id: user.id,
+        usuario_nome: user.full_name,
+        usuario_perfil: user.role,
+        tipo_evento: newStatus ? 'MORADOR_ATIVADO' : 'MORADOR_DESATIVADO',
+        acao: 'UPDATE',
+        tabela_afetada: 'moradores',
+        registro_id: resident.id,
+        descricao: `Morador ${newStatus ? 'ativado' : 'desativado'}: ${resident.nome}`,
+        metodo: 'MANUAL',
+        dados_antes: resident,
+        dados_depois: { ativo: newStatus }
+      });
 
       toast.success(`Morador ${newStatus ? 'ativado' : 'desativado'} com sucesso!`);
       fetchData();
@@ -1239,6 +1254,35 @@ export default function Portaria({ user }: PortariaProps) {
 
       if (updateError) throw updateError;
 
+      // REGISTRAR AUDITORIA PARA CADA ENCOMENDA ENTREGUE
+      try {
+        const currentMethod = finalMethod as string;
+        const metodoTraduzido = 
+          currentMethod === 'qr_code' ? 'QR' : 
+          (currentMethod === 'CÓDIGO' || currentMethod === 'code' || currentMethod === 'manual') ? 'CODIGO' : 'FOTO';
+
+        const residentData = residents.find(r => r.id === activePackage?.recipient_id);
+
+        for (const pkgToAuditId of idsToUpdate) {
+          const descSuffix = idsToUpdate.length > 1 ? ' (Retirada Coletiva)' : '';
+          
+          await registrarAuditoria({
+            condominio_id: user.condominium_id || '',
+            usuario_id: user.id,
+            usuario_nome: user.full_name,
+            usuario_perfil: user.role,
+            tipo_evento: 'ENCOMENDA_ENTREGUE',
+            acao: 'UPDATE',
+            tabela_afetada: 'encomendas',
+            registro_id: pkgToAuditId,
+            descricao: `Encomenda entregue via ${metodoTraduzido} para ${residentData?.full_name || residentData?.nome || 'Morador'} - ${residentData?.unidade || 'N/A'}${descSuffix}`,
+            metodo: metodoTraduzido
+          });
+        }
+      } catch (logErr) {
+        console.warn('Erro ao registrar auditoria de entrega:', logErr);
+      }
+
       // VALIDAR SE AINDA EXISTE PENDENTE COM ESSE CÓDIGO (Anti-Update-Gap)
       const { data: remainingPending } = await supabase
         .from('packages')
@@ -1305,34 +1349,32 @@ export default function Portaria({ user }: PortariaProps) {
         console.warn('[Baixa] Instância de áudio não encontrada no momento do toque');
       }
 
-    // Aguardar o som iniciar antes de mostrar sucesso e resetar interface
+      // Aguardar o som iniciar antes de mostrar sucesso e resetar interface
     setTimeout(() => {
       setIsDeliverySuccess(true);
-      toast.success(`${deliveredCount} ${deliveredCount === 1 ? 'encomenda entregue' : 'encomendas entregues'} com sucesso`);
+      toast.success(`${deliveredCount} ${deliveredCount === 1 ? 'encomenda entregue' : 'encomendas entregues'} com sucesso`, { duration: 2500 });
       
-      if (method === 'code' || method === 'CÓDIGO') {
+      if (method === 'code' || method === 'CÓDIGO' || method === 'manual') {
         setManualToken('');
       }
 
-      // Resetar estados de notificação para garantir que nada abra abas extras
+      // Resetar rigorosamente estados de notificação para garantir que nada redirecione ou abra abas
       setModoEnvio(null);
       setIsNotifyingAll(false);
       setIsWaitingForFocus(false);
       setIndividualNotifyData(null);
+      setShowBatchModal(false);
+      setNotifyQueue([]);
+      setNotifyIndex(0);
       
-setShowBatchModal(false);
-setNotifyQueue([]);
-setNotifyIndex(0);
-      
-
-
-      // FLUXO FINAL EXIGIDO
+      // Atualizar dados e garantir que permaneça na aba de pendentes
       setQrPackage(null);
+      setViewQrPackage(null);
       setQrScanStatus('idle');
-      fetchData(); // Equivalente a fetchPackages()
-     // fetchPendingNotices(); // Equivalente a fetchRecentRetrals()
+      fetchData(); 
       setActiveTab('pending');
       
+      // Manter o estado de sucesso visual por 2 segundos antes de fechar o modal e resetar variáveis de UI
       setTimeout(() => {
         setIsScanning(false);
         setIsDeliverySuccess(false);
@@ -1341,7 +1383,7 @@ setNotifyIndex(0);
         setShowManualInput(false);
         setCameraStarted(false);
       }, 2000);
-    }, 300);
+    }, 50);
 
     } catch (error: any) {
       console.error('Erro ao entregar encomenda:', error);

@@ -16,6 +16,7 @@ export interface Profile {
   street?: string;
   complement?: string;
   active: boolean;
+  is_teste?: boolean;
   must_change_password?: boolean;
   horario_inicio?: string;
   horario_fim?: string;
@@ -27,14 +28,19 @@ export interface Profile {
 
 export interface AuditLog {
   id: string;
-  user_id: string;
-  condominium_id: string;
-  action: string;
-  entity_type: string;
-  entity_id: string;
-  old_value?: any;
-  new_value?: any;
-  created_at: string;
+  condominio_id: string;
+  usuario_id: string;
+  usuario_nome: string;
+  usuario_perfil: string;
+  tipo_evento: string;
+  acao: string;
+  tabela_afetada: string;
+  registro_id: string;
+  descricao: string;
+  metodo: string;
+  dados_antes?: any;
+  dados_depois?: any;
+  criado_em: string;
 }
 
 export interface Morador {
@@ -48,6 +54,7 @@ export interface Morador {
   street?: string;
   telefone: string;
   ativo: boolean;
+  is_teste?: boolean;
   observacoes?: string;
   created_at: string;
   condominium_id?: string;
@@ -62,6 +69,13 @@ export interface Condominium {
   id: string;
   name: string;
   address: string;
+  city_state?: string;
+  manager_name?: string;
+  manager_phone?: string;
+  manager_email?: string;
+  rules?: string;
+  internal_notes?: string;
+  active: boolean;
   created_at: string;
 }
 
@@ -94,6 +108,7 @@ export interface Package {
   delivered_by?: string;
   delivered_to_name?: string;
   notes?: string;
+  is_teste?: boolean;
   whatsapp_status?: 'pending' | 'pendente' | 'sent' | 'enviado' | 'failed' | 'error' | 'delivered' | 'read' | 'not_configured' | 'pending_configuration' | 'no_recipient';
   last_notification_at?: string;
   whatsapp_sent_at?: string;

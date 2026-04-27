@@ -7,7 +7,7 @@ import {
   Building2, Power, Key, Edit2, Filter, X, Trash2, MoreVertical
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
-import { logAction } from '../services/auditService';
+import { registrarAuditoria } from '../services/auditService';
 
 interface UserManagementProps {
   user: Profile;
@@ -206,15 +206,20 @@ export default function UserManagement({ user }: UserManagementProps) {
         setUsers(prev => prev.map(u => u.id === updatedProfile.id ? updatedProfile : u));
 
         try {
-          await logAction(
-            user.id,
-            user.condominium_id,
-            'UPDATE_USER',
-            'profiles',
-            editingUser.id,
-            editingUser,
-            updatedProfile
-          );
+          await registrarAuditoria({
+            condominio_id: user.condominium_id || '',
+            usuario_id: user.id,
+            usuario_nome: user.full_name,
+            usuario_perfil: user.role,
+            tipo_evento: 'USUARIO_EDITADO',
+            acao: 'UPDATE',
+            tabela_afetada: 'profiles',
+            registro_id: editingUser.id,
+            descricao: `Usuário editado: ${formData.full_name}`,
+            metodo: 'MANUAL',
+            dados_antes: editingUser,
+            dados_depois: updatedProfile
+          });
         } catch (auditErr) {
           console.warn("[DEBUG FRONTEND] Erro ao registrar log de auditoria (não crítico):", auditErr);
         }
@@ -256,15 +261,19 @@ export default function UserManagement({ user }: UserManagementProps) {
         setUsers(prev => [...prev, newProfile]);
 
         try {
-          await logAction(
-            user.id,
-            user.condominium_id,
-            'CREATE_USER',
-            'profiles',
-            newProfile.id,
-            null,
-            newProfile
-          );
+          await registrarAuditoria({
+            condominio_id: user.condominium_id || '',
+            usuario_id: user.id,
+            usuario_nome: user.full_name,
+            usuario_perfil: user.role,
+            tipo_evento: 'USUARIO_CRIADO',
+            acao: 'CREATE',
+            tabela_afetada: 'profiles',
+            registro_id: newProfile.id,
+            descricao: `Usuário criado: ${formData.full_name}`,
+            metodo: 'MANUAL',
+            dados_depois: newProfile
+          });
         } catch (auditErr) {
           console.warn("[DEBUG FRONTEND] Erro ao registrar log de auditoria (não crítico):", auditErr);
         }
@@ -312,15 +321,18 @@ export default function UserManagement({ user }: UserManagementProps) {
         throw new Error(err.error || 'Erro ao resetar senha');
       }
 
-      logAction(
-        user.id,
-        user.condominium_id,
-        'RESET_PASSWORD',
-        'profiles',
-        u.id,
-        null,
-        { must_change_password: true }
-      ).catch(() => {});
+      registrarAuditoria({
+        condominio_id: user.condominium_id || '',
+        usuario_id: user.id,
+        usuario_nome: user.full_name,
+        usuario_perfil: user.role,
+        tipo_evento: 'SENHA_RESETADA',
+        acao: 'UPDATE',
+        tabela_afetada: 'profiles',
+        registro_id: u.id,
+        descricao: `Senha resetada para o usuário: ${u.full_name}`,
+        metodo: 'MANUAL'
+      }).catch(() => {});
 
       toast.success(`Senha resetada com sucesso! Nova senha temporária: ${newPassword}`, {
         id: toastId,
@@ -359,15 +371,18 @@ export default function UserManagement({ user }: UserManagementProps) {
         throw new Error(err.error || 'Erro ao alterar status');
       }
 
-      logAction(
-        user.id,
-        user.condominium_id,
-        newStatus ? 'ACTIVATE_USER' : 'DEACTIVATE_USER',
-        'profiles',
-        u.id,
-        u,
-        { active: newStatus }
-      ).catch(() => {});
+      registrarAuditoria({
+        condominio_id: user.condominium_id || '',
+        usuario_id: user.id,
+        usuario_nome: user.full_name,
+        usuario_perfil: user.role,
+        tipo_evento: newStatus ? 'USUARIO_ATIVADO' : 'USUARIO_DESATIVADO',
+        acao: 'UPDATE',
+        tabela_afetada: 'profiles',
+        registro_id: u.id,
+        descricao: `Usuário ${newStatus ? 'ativado' : 'desativado'}: ${u.full_name}`,
+        metodo: 'MANUAL'
+      }).catch(() => {});
 
       toast.success(`Usuário ${newStatus ? 'ativado' : 'inativado'} com sucesso! ✅`);
     } catch (error: any) {
@@ -410,15 +425,18 @@ export default function UserManagement({ user }: UserManagementProps) {
         throw new Error(err.error || 'Erro ao excluir usuário');
       }
 
-      logAction(
-        user.id,
-        user.condominium_id,
-        'DELETE_USER',
-        'profiles',
-        u.id,
-        u,
-        null
-      ).catch(() => {});
+      registrarAuditoria({
+        condominio_id: user.condominium_id || '',
+        usuario_id: user.id,
+        usuario_nome: user.full_name,
+        usuario_perfil: user.role,
+        tipo_evento: 'USUARIO_EXCLUIDO',
+        acao: 'DELETE',
+        tabela_afetada: 'profiles',
+        registro_id: u.id,
+        descricao: `Usuário excluído permanentemente: ${u.full_name}`,
+        metodo: 'MANUAL'
+      }).catch(() => {});
 
       toast.success('Usuário excluído com sucesso ✅');
     } catch (error: any) {

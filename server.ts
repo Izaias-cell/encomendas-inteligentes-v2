@@ -240,29 +240,103 @@ const app = express();
 
     if (authError || !user) return res.status(401).json({ error: "Sessão inválida" });
 
-    const { name, address } = req.body;
+    const { 
+      name, 
+      address, 
+      city_state, 
+      manager_name, 
+      manager_phone, 
+      manager_email, 
+      rules, 
+      internal_notes, 
+      active,
+      porters = [] // Array of { name, phone, email }
+    } = req.body;
 
     try {
       // 1. Create the condominium using admin client to bypass RLS
       const { data: condo, error: condoError } = await supabaseAdmin
         .from('condominiums')
-        .insert([{ name, address }])
+        .insert([{ 
+          name, 
+          address, 
+          city_state,
+          manager_name,
+          manager_phone,
+          manager_email,
+          rules,
+          internal_notes,
+          active: active !== undefined ? active : true
+        }])
         .select()
         .single();
 
       if (condoError) throw condoError;
 
-      // 2. Update the user's profile using admin client
-      const { data: profile, error: profileError } = await supabaseAdmin
-        .from('profiles')
-        .update({ condominium_id: condo.id })
-        .eq('id', user.id)
-        .select()
-        .single();
+      // 2. Create Syndic Profile if info provided
+      if (manager_email && manager_name) {
+        try {
+          const tempPassword = Math.random().toString(36).slice(-8);
+          const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
+            email: manager_email,
+            password: tempPassword,
+            email_confirm: true,
+            user_metadata: { full_name: manager_name, role: 'sindico' }
+          });
 
-      if (profileError) throw profileError;
+          if (!authError && authData.user) {
+            await supabaseAdmin.from('profiles').insert([{
+              id: authData.user.id,
+              full_name: manager_name,
+              phone: manager_phone || '',
+              role: 'sindico',
+              condominium_id: condo.id,
+              active: true,
+              must_change_password: true,
+              created_by: user.id
+            }]);
+          }
+        } catch (e) {
+          console.error("Erro ao criar síndico:", e);
+        }
+      }
 
-      res.json({ condo, profile });
+      // 3. Create Porter Profiles
+      for (const porter of porters) {
+        if (porter.name) {
+          try {
+            // If they don't have email, we could generate a fake one or skip auth
+            // But usually we need an email for login.
+            // Let's assume we use a pattern if email is missing or just skip if no email.
+            const porterEmail = porter.email || `porteiro.${Math.random().toString(36).slice(-4)}@${name.toLowerCase().replace(/\s+/g, '')}.com`;
+            const tempPassword = Math.random().toString(36).slice(-8);
+            
+            const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
+              email: porterEmail,
+              password: tempPassword,
+              email_confirm: true,
+              user_metadata: { full_name: porter.name, role: 'porteiro' }
+            });
+
+            if (!authError && authData.user) {
+              await supabaseAdmin.from('profiles').insert([{
+                id: authData.user.id,
+                full_name: porter.name,
+                phone: porter.phone || '',
+                role: 'porteiro',
+                condominium_id: condo.id,
+                active: true,
+                must_change_password: true,
+                created_by: user.id
+              }]);
+            }
+          } catch (e) {
+            console.error("Erro ao criar porteiro:", e);
+          }
+        }
+      }
+
+      res.json({ condo });
     } catch (err: any) {
       console.error("Erro ao criar condomínio:", err);
       res.status(500).json({ error: err.message });

@@ -27,6 +27,7 @@ import { testZApiConnection } from '../services/whatsappService';
 
 
 import { normalizeRole } from '../lib/authUtils';
+import { registrarAuditoria } from '../services/auditService';
 
 import ProfileList from '../pages/ProfileList';
 import ProfileNew from '../pages/ProfileNew';
@@ -1572,14 +1573,20 @@ const ResidentsList = ({ user, residents = [], onUpdate }: any) => {
       toast.success(`Morador ${newStatus ? 'ativado' : 'desativado'} com sucesso!`);
       
       // Log action
-      await supabase.from('audit_logs').insert([{
-        user_id: user.id,
-        action: newStatus ? 'activate_resident' : 'deactivate_resident',
-        resource_type: 'resident',
-        resource_id: resident.id,
-        details: { nome: resident.nome, unidade: resident.unidade },
-        condominium_id: user.condominium_id
-      }]);
+      await registrarAuditoria({
+        condominio_id: user.condominium_id || '',
+        usuario_id: user.id,
+        usuario_nome: user.full_name,
+        usuario_perfil: user.role,
+        tipo_evento: newStatus ? 'MORADOR_ATIVADO' : 'MORADOR_DESATIVADO',
+        acao: 'UPDATE',
+        tabela_afetada: 'moradores',
+        registro_id: resident.id,
+        descricao: `Morador ${newStatus ? 'ativado' : 'desativado'}: ${resident.nome} - Uni: ${resident.unidade}`,
+        metodo: 'MANUAL',
+        dados_antes: { ativo: !newStatus },
+        dados_depois: { ativo: newStatus }
+      });
 
       onUpdate();
     } catch (err: any) {
@@ -2628,7 +2635,7 @@ export default function SyndicPanel({ user, onLogout, onUpdateUser }: { user: Pr
     { id: 'moradores', label: `MORADORES (${activeResidentsCount})`, icon: Users },
     { id: 'moradores_desativados', label: 'Moradores Desativados', icon: XCircle },
     { id: 'usuarios', label: 'Usuários', icon: Shield },
-    ...(normalizeRole(user.role) === 'admin' ? [
+    ...(normalizeRole(user.role) === 'admin' || normalizeRole(user.role) === 'sindico' ? [
       { id: 'settings', label: 'Configurações', icon: Settings },
       { id: 'audit', label: 'Auditoria', icon: History }
     ] : []),

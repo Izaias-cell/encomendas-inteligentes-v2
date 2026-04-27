@@ -1,4 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
+/*
+ * REGRA DE OURO DO REGISTRO DE ENCOMENDAS (PROTEÇÃO DE FLUXO):
+ * 1. O OCR nunca deve rodar antes da foto estar capturada e armazenada.
+ * 2. Fluxo Fixo: Abrir Câmera Traseira -> Estabilizar -> Capturar -> Salvar Alta Qualidade -> Processar OCR.
+ * 3. NÃO retornar ao reconhecimento em tempo real/ao vivo (borra a imagem e reduz precisão).
+ * 4. NÃO comprimir excessivamente antes do OCR (mínimo 0.8 qualidade).
+ * 5. Filtros permitidos: Contraste leve, Nitidez leve, Correção de brilho. Evitar filtros agressivos.
+ */
 import { useNavigate, useLocation } from 'react-router-dom';
 import { 
   Package, 
@@ -26,11 +34,11 @@ import {
 import { supabase } from '../lib/supabase';
 import { Profile, Morador, CondominiumSettings } from '../types';
 import toast from 'react-hot-toast';
-import { logAction } from '../services/auditService';
+import { registrarAuditoria } from '../services/auditService';
 import { getCurrentPorter } from '../lib/porterUtils';
-import { getRawTextFromImage } from '../services/geminiService';
+import { extractBasicText } from '../services/geminiService';
 import { parseLabelText } from '../services/labelParser';
-import { findMatchingResidents, ScoredResident } from '../services/residentMatcher';
+import { findMatchingResidents, ScoredResident, normalizeUnit, normalizeName } from '../services/residentMatcher';
 import { formatResidentAddress } from '../lib/residentUtils';
 import { motion, AnimatePresence } from 'motion/react';
 import { generatePickupCode, prepareWhatsAppNotification, sendWhatsAppMessage, getWhatsAppLink } from '../services/whatsappService';
@@ -39,7 +47,7 @@ interface PackageNewProps {
   user: Profile;
 }
 
-type Step = 'camera' | 'analyzing' | 'confirmation' | 'manual';
+type Step = 'camera' | 'manual';
 
 const QUICK_OBSERVATIONS = [
   'Caixa frágil',
@@ -70,17 +78,21 @@ export default function PackageNew({ user }: PackageNewProps) {
   const [photoUrl, setPhotoUrl] = useState('');
   const [pickupCode, setPickupCode] = useState('');
   const [condoName, setCondoName] = useState('');
+  const [isManualUnitSearch, setIsManualUnitSearch] = useState(false);
   const [allCondoResidents, setAllCondoResidents] = useState<Morador[]>([]);
   const [cameraActive, setCameraActive] = useState(false);
   const [flashOn, setFlashOn] = useState(false);
   const [condoSettings, setCondoSettings] = useState<CondominiumSettings | null>(null);
   const [foundPartialData, setFoundPartialData] = useState(false);
   const [isAiSearch, setIsAiSearch] = useState(false);
-  const [statusMessage, setStatusMessage] = useState('Lendo dados...');
+  const [statusMessage, setStatusMessage] = useState('Lendo etiqueta...');
   const [allResidents, setAllResidents] = useState<Morador[]>([]);
   const [isWaitingForReturn, setIsWaitingForReturn] = useState(false);
+  const [isOcrLoading, setIsOcrLoading] = useState(false);
+  const [ocrConfidence, setOcrConfidence] = useState<'alta' | 'media' | 'baixa' | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [isCameraStabilizing, setIsCameraStabilizing] = useState(true);
 
   // Heurística de gênero para diferenciação visual (lilás para feminino)
   const isFemale = (name?: string) => {
@@ -170,15 +182,50 @@ export default function PackageNew({ user }: PackageNewProps) {
   const startCamera = async () => {
     // Garantir que qualquer stream anterior seja encerrado antes de iniciar um novo
     stopCamera();
+    setIsCameraStabilizing(true);
     
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { facingMode: 'environment' }, 
-        audio: false 
-      });
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ 
+          video: { 
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1920, min: 1280 },
+            height: { ideal: 1080, min: 720 }
+          }, 
+          audio: false 
+        });
+      } catch (err) {
+        console.warn("Retrying camera with exact environment mode...");
+        stream = await navigator.mediaDevices.getUserMedia({ 
+          video: { 
+            facingMode: { exact: 'environment' },
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          }, 
+          audio: false 
+        });
+      }
+      
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         setCameraActive(true);
+
+        // Aguarda estabilização
+        setTimeout(() => {
+          setIsCameraStabilizing(false);
+          
+          // Tenta aplicar foco contínuo e exposição automática
+          const track = stream.getVideoTracks()[0];
+          if (track.applyConstraints) {
+            track.applyConstraints({
+              advanced: [
+                { focusMode: 'continuous' } as any,
+                { exposureMode: 'continuous' } as any
+              ]
+            }).catch(e => console.warn('Constraints not supported:', e));
+          }
+        }, 600);
       }
     } catch (err) {
       console.error("Erro ao acessar câmera:", err);
@@ -227,7 +274,7 @@ export default function PackageNew({ user }: PackageNewProps) {
   };
 
   const capturePhoto = () => {
-    if (!videoRef.current || !canvasRef.current) return;
+    if (!videoRef.current || !canvasRef.current || isCameraStabilizing) return;
     
     const video = videoRef.current;
     const canvas = canvasRef.current;
@@ -236,12 +283,16 @@ export default function PackageNew({ user }: PackageNewProps) {
     
     const context = canvas.getContext('2d');
     if (context) {
+      // Aplicar filtros para melhorar o OCR
+      context.filter = 'grayscale(100%) contrast(140%) brightness(105%)';
       context.drawImage(video, 0, 0, canvas.width, canvas.height);
-      const base64 = canvas.toDataURL('image/jpeg');
+      
+      const base64 = canvas.toDataURL('image/jpeg', 0.9);
       stopCamera();
       
       setPhotoUrl(base64);
-      setStep('analyzing');
+      setStep('manual');
+      setIsOcrLoading(true);
       setStatusMessage('Buscando dados da etiqueta...');
       
       // Executa leitura com espera controlada de 3 segundos
@@ -254,9 +305,10 @@ export default function PackageNew({ user }: PackageNewProps) {
   const processImageWithWait = async (base64: string) => {
     if (processingRef.current) return;
     processingRef.current = true;
+    setIsOcrLoading(true);
 
     try {
-      setStatusMessage('Comprimindo foto...');
+      setStatusMessage('Processando...');
       let finalBase64 = base64;
 
       // Compressão obrigatória para reduzir peso no mobile
@@ -291,55 +343,83 @@ export default function PackageNew({ user }: PackageNewProps) {
         }
       })();
 
-      // 2. Leitura leve com espera de até 3 segundos
+      // 2. Leitura inteligente com Gemini
       const ocrPromise = (async () => {
-        setStatusMessage('Buscando dados da etiqueta...');
-        const rawText = await getRawTextFromImage(finalBase64);
-        if (rawText && rawText.length >= 3) {
-          const parsedData = parseLabelText(rawText);
+        try {
+          setStatusMessage('Analisando...');
+          const parsedData = await extractBasicText(finalBase64);
           
-          if (parsedData.recipientName) setRecipientName(parsedData.recipientName);
-          if (parsedData.unitNumber) setUnitNumber(parsedData.unitNumber);
+          if (parsedData) {
+            const nameToUse = parsedData.nome;
+            const unitToUse = parsedData.casa;
+            const confidence = parsedData.confianca as 'alta' | 'media' | 'baixa';
+            
+            setOcrConfidence(confidence);
 
-          if ((parsedData.recipientName || parsedData.unitNumber) && user?.condominium_id) {
-            const matches = await findMatchingResidents(
-              user.condominium_id,
-              parsedData.unitNumber,
-              parsedData.recipientName
-            );
+            // Só preencher o que é essencial para busca
+            if (nameToUse) setRecipientName(nameToUse);
+            if (unitToUse) setUnitNumber(unitToUse);
+            
+            if ((nameToUse || unitToUse) && user?.condominium_id) {
+              const matches = await findMatchingResidents(
+                user.condominium_id,
+                unitToUse || '',
+                nameToUse || ''
+              );
 
-            if (matches.length > 0) {
-              const topMatch = matches[0];
-              setMatchingResidents(matches.slice(0, 5));
-              setIsAiSearch(true);
-              
-              if (topMatch.score >= 200) {
-                handleSelectResident(topMatch.resident);
-              } else {
-                const suggestion = (parsedData.recipientName || parsedData.unitNumber || '');
-                if (suggestion && suggestion.length >= 2) {
-                  setSearchTerm(suggestion);
+              if (matches.length > 0) {
+                const topMatch = matches[0];
+                setMatchingResidents(matches.slice(0, 5));
+                setIsAiSearch(true);
+                
+                // Se tivermos alta confiança na extração e um match razoável
+                if (topMatch.score >= 180 && confidence === 'alta') {
+                  handleSelectResident(topMatch.resident);
+                } else {
+                  // Se for sugestão, preenchemos o termo de busca para mostrar os cards
+                  setSearchTerm(nameToUse || unitToUse || '');
                 }
+              } else if (unitToUse) {
+                // Se identificou a casa mas não achou morador exato, mostra moradores daquela casa
+                setSearchTerm(unitToUse);
+                setIsManualUnitSearch(true);
               }
+            } else if (confidence === 'baixa') {
+              // Se não achou nada e a confiança é baixa, forçamos o estado de baixa
+              setOcrConfidence('baixa');
             }
+          } else {
+            setOcrConfidence('baixa');
           }
+        } catch (err) {
+          console.error("Erro no OCR promise:", err);
+          setOcrConfidence('baixa');
         }
         return true;
       })();
 
-      // Aguarda OCR ou 3 segundos
-      const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve('timeout'), 3000));
+      // Aguarda OCR ou 4 segundos
+      const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve('timeout'), 4000));
       
       await Promise.race([ocrPromise, timeoutPromise]);
 
-      // Após 3 segundos ou OCR concluído, vai para o manual
+      setIsOcrLoading(false);
       setStep('manual');
+      
+      // Se após o timeout/OCR ainda não tivermos confiança definida, assume baixa se nada foi achado
+      setOcrConfidence(prev => {
+        if (!prev && !recipientName && !unitNumber) return 'baixa';
+        return prev;
+      });
+
       await uploadPromise;
     } catch (err) {
       console.warn("[IA APOIO] Erro no processamento:", err);
       setStep('manual');
+      setIsOcrLoading(false);
     } finally {
       processingRef.current = false;
+      setIsOcrLoading(false);
     }
   };
 
@@ -361,6 +441,27 @@ export default function PackageNew({ user }: PackageNewProps) {
   useEffect(() => {
     const searchResidents = async () => {
       if (selectedResident) return;
+
+      if (isManualUnitSearch) {
+        if (!searchTerm) {
+          setMatchingResidents([]);
+          return;
+        }
+        // Manual search by house number with normalization
+        const normalizedSearch = normalizeUnit(searchTerm);
+        const matches = allResidents
+          .filter(r => {
+            const resUnit = normalizeUnit(r.unidade || '');
+            return resUnit.includes(normalizedSearch);
+          })
+          .map(r => {
+            const resUnit = normalizeUnit(r.unidade || '');
+            return { resident: r, score: (resUnit === normalizedSearch ? 100 : 50) };
+          })
+          .sort((a,b) => b.score - a.score);
+        setMatchingResidents(matches as ScoredResident[]);
+        return;
+      }
 
       // If empty search, show some default residents (browse mode)
       if (!searchTerm && !foundPartialData) {
@@ -477,11 +578,14 @@ export default function PackageNew({ user }: PackageNewProps) {
     setNotes('');
     setPhotoUrl('');
     setSearchTerm('');
+    setIsManualUnitSearch(false);
     setMatchingResidents([]);
     setPickupCode(generatePickupCode());
     setFoundPartialData(false);
     setIsAiSearch(false);
     setLoading(false);
+    setIsOcrLoading(false);
+    setOcrConfidence(null);
     setStatusMessage('Lendo dados...');
     
     // Forçar reinicialização da câmera se estivermos voltando para o step camera
@@ -551,6 +655,10 @@ export default function PackageNew({ user }: PackageNewProps) {
       ) || `Olá, ${targetResident.nome}! Sua encomenda chegou na portaria. Código: ${finalPickupCode}`;
 
       // 2. Salvar a encomenda no Supabase
+      const is_teste = (recipientName || targetResident.nome).toLowerCase().includes('teste') || 
+                       (notes || '').toLowerCase().includes('teste') ||
+                       targetResident.is_teste;
+
       const packageData = {
         condominium_id: user.condominium_id,
         recipient_id: targetResident.id,
@@ -564,6 +672,7 @@ export default function PackageNew({ user }: PackageNewProps) {
         carrier,
         tracking_code: trackingNumber,
         notes,
+        is_teste,
         photo_url: photoUrl,
         received_by: user.id,
         received_at: new Date().toISOString(),
@@ -650,20 +759,18 @@ export default function PackageNew({ user }: PackageNewProps) {
 
       // Log action
       try {
-        await logAction(
-          user.id, 
-          user.condominium_id || '', 
-          'package_received', 
-          'package', 
-          newPackage.id, 
-          null, 
-          {
-            recipient: targetResident.nome,
-            unit: targetResident.unidade,
-            carrier,
-            pickup_code: newPackage.pickup_code || pickupCode
-          }
-        );
+        await registrarAuditoria({
+          condominio_id: user.condominium_id || '',
+          usuario_id: user.id,
+          usuario_nome: user.full_name,
+          usuario_perfil: user.role,
+          tipo_evento: 'ENCOMENDA_CADASTRADA',
+          acao: 'CREATE',
+          tabela_afetada: 'encomendas',
+          registro_id: newPackage.id,
+          descricao: `Encomenda cadastrada para ${targetResident.nome} - ${targetResident.unidade}`,
+          metodo: photoUrl ? 'OCR' : 'MANUAL'
+        });
       } catch (logErr) {
         console.warn('Erro ao logar ação:', logErr);
       }
@@ -692,7 +799,7 @@ export default function PackageNew({ user }: PackageNewProps) {
         <div className="max-w-2xl mx-auto px-4 h-16 flex items-center justify-between">
           <button 
             onClick={() => {
-              if (step === 'manual' || step === 'analyzing' || step === 'confirmation') {
+              if (step === 'manual') {
                 resetForm();
               } else {
                 navigate('/portaria');
@@ -709,6 +816,9 @@ export default function PackageNew({ user }: PackageNewProps) {
               <span className={`text-[10px] font-bold uppercase tracking-wider ${getCurrentPorter() === 'Selecione o Porteiro' ? 'text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200' : 'text-emerald-600'}`}>
                 Porteiro: {getCurrentPorter()}
               </span>
+            </div>
+            <div className="mt-1 text-[8px] text-gray-400 font-medium uppercase tracking-[0.2em]">
+              v2.1 - OCR atualizado
             </div>
           </h1>
           <div className="w-10" />
@@ -742,13 +852,32 @@ export default function PackageNew({ user }: PackageNewProps) {
                       {flashOn ? <Zap className="w-6 h-6 text-yellow-400 fill-yellow-400" /> : <ZapOff className="w-6 h-6" />}
                     </button>
                   )}
-                  <div className="absolute inset-0 border-2 border-white/30 pointer-events-none m-8 rounded-2xl" />
+                  <div className="absolute inset-0 flex items-center justify-center pointer-events-none p-12">
+                    <div className="w-full aspect-[4/3] border-2 border-white/50 rounded-2xl relative">
+                      {/* Cantos reforçados para o guia */}
+                      <div className="absolute -top-1 -left-1 w-6 h-6 border-t-4 border-l-4 border-indigo-500 rounded-tl-lg" />
+                      <div className="absolute -top-1 -right-1 w-6 h-6 border-t-4 border-r-4 border-indigo-500 rounded-tr-lg" />
+                      <div className="absolute -bottom-1 -left-1 w-6 h-6 border-b-4 border-l-4 border-indigo-500 rounded-bl-lg" />
+                      <div className="absolute -bottom-1 -right-1 w-6 h-6 border-b-4 border-r-4 border-indigo-500 rounded-br-lg" />
+                      
+                      {/* Texto de instrução no guia */}
+                      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-white/50 text-[10px] font-bold uppercase tracking-widest text-center whitespace-nowrap">
+                        Enquadre a etiqueta aqui
+                      </div>
+                    </div>
+                  </div>
+
                   <div className="absolute bottom-8 left-0 right-0 flex justify-center px-8 gap-4">
                     <button
                       onClick={capturePhoto}
-                      className="w-20 h-20 bg-white rounded-full flex items-center justify-center shadow-2xl active:scale-90 transition-transform"
+                      disabled={isCameraStabilizing || isOcrLoading}
+                      className={`w-20 h-20 bg-white rounded-full flex items-center justify-center shadow-2xl active:scale-90 transition-all ${isCameraStabilizing || isOcrLoading ? 'opacity-50 scale-90' : 'opacity-100'}`}
                     >
-                      <div className="w-16 h-16 border-4 border-gray-900 rounded-full" />
+                      {isCameraStabilizing || isOcrLoading ? (
+                         <div className="w-12 h-12 border-4 border-gray-100 rounded-full border-t-indigo-600 animate-spin" />
+                      ) : (
+                         <div className="w-16 h-16 border-4 border-gray-900 rounded-full" />
+                      )}
                     </button>
                   </div>
 
@@ -776,26 +905,6 @@ export default function PackageNew({ user }: PackageNewProps) {
                   Certifique-se de que o nome do morador e a unidade estejam bem visíveis na foto.
                 </p>
               </div>
-            </motion.div>
-          )}
-
-          {step === 'analyzing' && (
-            <motion.div
-              key="analyzing"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="flex flex-col items-center justify-center py-20 text-center"
-            >
-              <div className="relative mb-8">
-                <div className="w-24 h-24 border-4 border-indigo-100 rounded-full" />
-                <div className="w-24 h-24 border-4 border-indigo-600 rounded-full border-t-transparent animate-spin absolute inset-0" />
-                <div className="absolute inset-0 flex items-center justify-center">
-                  <Sparkles className="w-10 h-10 text-indigo-600" />
-                </div>
-              </div>
-              <h2 className="text-2xl font-bold text-gray-900 mb-2">{statusMessage}</h2>
-              <p className="text-gray-500">Processando informações da etiqueta para agilizar seu trabalho.</p>
             </motion.div>
           )}
 
@@ -827,6 +936,14 @@ export default function PackageNew({ user }: PackageNewProps) {
                   >
                     <X className="w-5 h-5 text-gray-600" />
                   </button>
+                  <button
+                    type="button"
+                    onClick={(e) => { e.preventDefault(); resetForm(); }}
+                    className="absolute bottom-2 right-2 px-3 py-1.5 bg-black/40 backdrop-blur-sm rounded-lg text-[10px] text-white font-bold uppercase tracking-wider flex items-center gap-1.5 hover:bg-black/60 transition-colors"
+                  >
+                    <Camera className="w-3.5 h-3.5" />
+                    Tirar nova foto
+                  </button>
                 </div>
               )}
 
@@ -853,84 +970,217 @@ export default function PackageNew({ user }: PackageNewProps) {
 
                   {!selectedResident ? (
                     <div className="space-y-4">
-                      <div className="relative">
-                        <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
-                        <input
-                          autoFocus
-                          type="text"
-                          placeholder="Nome ou número da casa..."
-                          value={searchTerm}
-                          onChange={(e) => {
-                            setSearchTerm(e.target.value);
-                            setIsAiSearch(false);
+                      {isOcrLoading ? (
+                        <div className="py-12 flex flex-col items-center justify-center text-center space-y-4">
+                          <div className="relative">
+                            <div className="w-16 h-16 border-4 border-indigo-100 rounded-full" />
+                            <div className="w-16 h-16 border-4 border-indigo-600 rounded-full border-t-transparent animate-spin absolute inset-0" />
+                            <div className="absolute inset-0 flex items-center justify-center">
+                              <Sparkles className="w-6 h-6 text-indigo-600" />
+                            </div>
+                          </div>
+                          <div>
+                            <p className="text-gray-900 font-bold">{statusMessage}</p>
+                            <p className="text-gray-500 text-xs mt-1">Identificando morador automaticamente...</p>
+                          </div>
+                        </div>
+                      ) : ocrConfidence === 'baixa' ? (
+                        <div className="py-2 space-y-4">
+                          <div className="bg-amber-50 border border-amber-100 rounded-2xl p-6 text-center">
+                            <div className="w-12 h-12 bg-amber-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                              <AlertCircle className="w-6 h-6 text-amber-600" />
+                            </div>
+                            <h3 className="text-amber-900 font-bold mb-1">Dados não identificados</h3>
+                            <p className="text-amber-700 text-sm mb-6">A IA não conseguiu ler com clareza. Escolha como prosseguir:</p>
+                            
+                            <div className="grid grid-cols-1 gap-3">
+                              <button
+                                type="button"
+                                disabled={isOcrLoading}
+                                onClick={() => {
+                                  if (photoUrl) {
+                                    setIsOcrLoading(true);
+                                    setOcrConfidence(null);
+                                    processImageWithWait(photoUrl);
+                                  }
+                                }}
+                                className="flex items-center justify-center gap-3 w-full py-4 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 transition-all shadow-md shadow-indigo-100 disabled:opacity-50"
+                              >
+                                {isOcrLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Sparkles className="w-5 h-5" />}
+                                {isOcrLoading ? 'Lendo etiqueta...' : 'Tentar ler foto novamente'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => resetForm()}
+                                className="flex items-center justify-center gap-3 w-full py-4 bg-emerald-600 text-white rounded-xl font-bold hover:bg-emerald-700 transition-all shadow-md shadow-emerald-100"
+                              >
+                                <Camera className="w-5 h-5" />
+                                Tirar nova foto
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setIsManualUnitSearch(true);
+                                  setSearchTerm('');
+                                  setOcrConfidence(null);
+                                }}
+                                className="flex items-center justify-center gap-3 w-full py-4 bg-white text-emerald-700 rounded-xl font-bold hover:bg-emerald-50 transition-all border-2 border-emerald-100"
+                              >
+                                <Hash className="w-5 h-5 text-emerald-500" />
+                                Registrar por nº da casa
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setIsManualUnitSearch(false);
+                                  setSearchTerm('');
+                                  setOcrConfidence(null);
+                                }}
+                                className="flex items-center justify-center gap-3 w-full py-4 bg-white text-indigo-700 rounded-xl font-bold hover:bg-indigo-50 transition-all border-2 border-indigo-100"
+                              >
+                                <Search className="w-5 h-5 text-indigo-500" />
+                                Buscar por nome
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsManualUnitSearch(false);
+                            setSearchTerm('');
                           }}
-                          className="w-full pl-12 pr-4 py-4 bg-gray-50 border-2 border-transparent focus:border-indigo-500 focus:bg-white rounded-xl transition-all outline-none text-lg"
-                        />
+                          className={`flex-1 py-3 rounded-xl text-xs font-bold transition-all ${
+                            !isManualUnitSearch 
+                              ? 'bg-indigo-600 text-white shadow-md' 
+                              : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                          }`}
+                        >
+                          Busca por Nome
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsManualUnitSearch(true);
+                            setSearchTerm('');
+                          }}
+                          className={`flex-1 py-3 rounded-xl text-xs font-bold transition-all ${
+                            isManualUnitSearch 
+                              ? 'bg-indigo-600 text-white shadow-md' 
+                              : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                          }`}
+                        >
+                          Por nº da Casa
+                        </button>
+                      </div>
+
+                      <div className="relative">
+                        {isManualUnitSearch ? (
+                           <div className="relative">
+                             <div className="absolute left-6 top-1/2 -translate-y-1/2 w-8 h-8 bg-indigo-100 rounded-lg flex items-center justify-center">
+                               <Hash className="w-5 h-5 text-indigo-600" />
+                             </div>
+                             <input
+                               autoFocus
+                               type="number"
+                               inputMode="numeric"
+                               placeholder="Digite o número da residência..."
+                               value={searchTerm}
+                               onChange={(e) => setSearchTerm(e.target.value)}
+                               className="w-full pl-16 pr-4 py-5 bg-indigo-50/50 border-2 border-indigo-100 focus:border-indigo-500 focus:bg-white rounded-2xl transition-all outline-none text-2xl font-black text-indigo-900 placeholder:text-indigo-200"
+                             />
+                           </div>
+                        ) : (
+                          <>
+                            <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+                            <input
+                              autoFocus
+                              type="text"
+                              placeholder="Nome ou número da casa..."
+                              value={searchTerm}
+                              onChange={(e) => {
+                                setSearchTerm(e.target.value);
+                                setIsAiSearch(false);
+                              }}
+                              className="w-full pl-12 pr-4 py-4 bg-gray-50 border-2 border-transparent focus:border-indigo-500 focus:bg-white rounded-xl transition-all outline-none text-lg"
+                            />
+                          </>
+                        )}
                       </div>
 
                       {/* Search Results / Intelligent Suggestions */}
                       {matchingResidents.length > 0 && (
-                        <div className="space-y-3 max-h-[400px] overflow-y-auto pr-2 pb-2 scroll-smooth custom-scrollbar">
-                          <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest px-1">
-                            {!searchTerm ? 'Moradores (A-Z)' : 'Resultados da Busca'}
-                          </p>
-                          {matchingResidents.slice(0, 15).map(({ resident, score }, index) => {
-                            // Destaque para o primeiro da lista se houver score
-                            const isBest = searchTerm && index === 0 && score >= 80;
+                        <div className="space-y-4 max-h-[500px] overflow-y-auto pr-2 pb-2 scroll-smooth custom-scrollbar">
+                          <div className="flex items-center gap-2 px-1 mb-2">
+                             <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                             <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">
+                               {isManualUnitSearch ? `Moradores da Casa ${searchTerm}` : (!searchTerm ? 'Moradores (A-Z)' : 'Moradores sugeridos')}
+                             </p>
+                          </div>
+                          
+                          {matchingResidents.slice(0, 10).map(({ resident, score }, index) => {
+                            // Destaque para o primeiro da lista se houver score relevante
+                            const isBest = searchTerm && index === 0 && score >= 70;
                             
                             return (
                               <button
                                 key={resident.id}
                                 type="button"
                                 onClick={() => handleSelectResident(resident)}
-                                className={`w-full flex items-center justify-between p-4 rounded-2xl transition-all border-2 text-left outline-none hover:shadow-lg active:scale-[0.98] cursor-pointer touch-manipulation group ${
+                                className={`w-full relative flex flex-col p-4 rounded-2xl transition-all border-2 text-left outline-none hover:shadow-lg active:scale-[0.98] cursor-pointer touch-manipulation group ${
                                   isBest 
                                     ? (isFemale(resident.nome) ? 'bg-violet-50 border-violet-200 shadow-md ring-1 ring-violet-200' : 'bg-indigo-50 border-indigo-200 shadow-md ring-1 ring-indigo-200')
-                                    : (isFemale(resident.nome) ? 'bg-white border-gray-100 hover:border-violet-200 hover:bg-violet-50 active:bg-violet-100' : 'bg-white border-gray-100 hover:border-indigo-100 hover:bg-gray-50 active:bg-indigo-50')
+                                    : (isFemale(resident.nome) ? 'bg-white border-gray-100 hover:border-violet-200 hover:bg-violet-50' : 'bg-white border-gray-100 hover:border-indigo-100 hover:bg-gray-50')
                                 }`}
                               >
-                                <div className="flex items-center gap-4">
+                                {isBest && (
+                                  <div className="absolute -top-2.5 right-4 z-10">
+                                    <span className={`px-3 py-1 text-[10px] font-black rounded-full uppercase tracking-wider flex items-center gap-1 shadow-sm ${
+                                      isFemale(resident.nome) ? 'bg-violet-500 text-white' : 'bg-emerald-500 text-white'
+                                    }`}>
+                                      <CheckCircle className="w-3 h-3" />
+                                      Mais provável
+                                    </span>
+                                  </div>
+                                )}
+
+                                <div className="flex items-center gap-4 mb-3">
                                   <div className={`w-12 h-12 rounded-full flex items-center justify-center border shadow-sm shrink-0 transition-colors ${
                                     isBest 
                                       ? (isFemale(resident.nome) ? 'bg-violet-500 border-violet-400' : 'bg-indigo-600 border-indigo-500')
-                                      : (isFemale(resident.nome) ? 'bg-violet-50 border-violet-100 group-hover:bg-violet-100' : 'bg-gray-50 border-gray-100 group-hover:bg-indigo-50')
+                                      : (isFemale(resident.nome) ? 'bg-violet-50 border-violet-100' : 'bg-gray-50 border-gray-100')
                                   }`}>
-                                    <User className={`w-6 h-6 ${isBest ? 'text-white' : (isFemale(resident.nome) ? 'text-violet-400 group-hover:text-violet-600' : 'text-gray-400 group-hover:text-indigo-600')}`} />
+                                    <User className={`w-6 h-6 ${isBest ? 'text-white' : (isFemale(resident.nome) ? 'text-violet-400' : 'text-gray-400')}`} />
                                   </div>
-                                  <div>
+                                  <div className="flex-1 min-w-0">
                                     <div className="flex items-center gap-2">
-                                      <p className={`font-bold text-lg leading-tight transition-colors ${
-                                        isFemale(resident.nome) ? 'text-gray-900 group-hover:text-violet-900' : 'text-gray-900 group-hover:text-indigo-900'
-                                      }`}>
+                                      <p className="font-bold text-lg text-gray-900 leading-tight truncate">
                                         {resident.nome}
                                       </p>
-                                      {isBest && <Zap className={`w-3.5 h-3.5 ${isFemale(resident.nome) ? 'text-violet-500 fill-violet-500' : 'text-amber-500 fill-amber-500'}`} />}
                                     </div>
-                                    <p className={`text-sm font-medium ${
+                                    <p className={`text-sm font-semibold flex items-center gap-1.5 ${
                                       isBest 
                                         ? (isFemale(resident.nome) ? 'text-violet-700' : 'text-indigo-700') 
                                         : 'text-gray-500'
                                     }`}>
+                                      <Building2 className="w-3.5 h-3.5" />
                                       {formatResidentAddress(resident)}
                                     </p>
                                   </div>
+                                  <ChevronRight className="w-5 h-5 text-gray-300 group-hover:text-indigo-400" />
                                 </div>
-                                
-                                <div className="flex flex-col items-end gap-1 shrink-0">
-                                  {score >= 250 && (
-                                    <span className="px-2 py-0.5 bg-green-500 text-white text-[9px] font-black rounded-full uppercase tracking-tighter">
-                                      Exato
-                                    </span>
-                                  )}
-                                  {score >= 150 && score < 250 && (
-                                    <span className="px-2 py-0.5 bg-amber-100 text-amber-700 text-[9px] font-black rounded-full uppercase tracking-tighter">
-                                      Sugerido
-                                    </span>
-                                  )}
-                                  {!searchTerm && (
-                                    <ChevronRight className="w-5 h-5 text-gray-300 group-hover:text-indigo-400 transition-colors" />
-                                  )}
-                                </div>
+
+                                {resident.telefone && (
+                                  <div className={`mt-1 pt-2 border-t flex items-center gap-2 text-xs ${
+                                    isBest ? 'border-indigo-100/50 text-indigo-400' : 'border-gray-50 text-gray-400'
+                                  }`}>
+                                    <Zap className="w-3 h-3" />
+                                    <span>Possui WhatsApp: {resident.telefone}</span>
+                                  </div>
+                                )}
                               </button>
                             );
                           })}
@@ -938,9 +1188,50 @@ export default function PackageNew({ user }: PackageNewProps) {
                       )}
                       
                       {searchTerm.length >= 2 && matchingResidents.length === 0 && (
-                        <div className="py-8 text-center">
-                          <p className="text-gray-500">Nenhum morador encontrado.</p>
+                        <div className="py-8 space-y-4">
+                          <div className="bg-white rounded-2xl p-6 border-2 border-dashed border-gray-200 text-center">
+                            <div className="w-12 h-12 bg-gray-50 rounded-full flex items-center justify-center mx-auto mb-4">
+                              <Search className="w-6 h-6 text-gray-400" />
+                            </div>
+                            <h3 className="text-gray-900 font-bold mb-1">Nenhum morador encontrado</h3>
+                            <p className="text-gray-500 text-sm mb-6">Tente uma das opções abaixo para continuar:</p>
+                            
+                            <div className="grid grid-cols-1 gap-3">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setIsManualUnitSearch(false);
+                                  setSearchTerm('');
+                                }}
+                                className="flex items-center justify-center gap-3 w-full py-4 bg-indigo-50 text-indigo-700 rounded-xl font-bold hover:bg-indigo-100 transition-all border border-indigo-100"
+                              >
+                                <Search className="w-5 h-5" />
+                                Buscar por nome
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setIsManualUnitSearch(true);
+                                  setSearchTerm('');
+                                }}
+                                className="flex items-center justify-center gap-3 w-full py-4 bg-emerald-50 text-emerald-700 rounded-xl font-bold hover:bg-emerald-100 transition-all border border-emerald-100"
+                              >
+                                <Hash className="w-5 h-5" />
+                                Registrar por nº da casa
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => resetForm()}
+                                className="flex items-center justify-center gap-3 w-full py-4 bg-gray-100 text-gray-700 rounded-xl font-bold hover:bg-gray-200 transition-all border border-gray-200"
+                              >
+                                <Camera className="w-5 h-5" />
+                                Tirar nova foto
+                              </button>
+                            </div>
+                          </div>
                         </div>
+                      )}
+                        </>
                       )}
                     </div>
                   ) : (
@@ -948,8 +1239,8 @@ export default function PackageNew({ user }: PackageNewProps) {
                       {/* Card do Morador Selecionado (Clickable to save) */}
                       <button
                         type="button"
-                        onClick={() => handleSubmit(undefined, undefined, false)}
-                        disabled={loading}
+                        onClick={() => handleSubmit(undefined, undefined, true)}
+                        disabled={loading || isOcrLoading}
                         className={`w-full px-4 py-5 rounded-2xl border-2 flex items-center justify-between shadow-sm transition-all active:scale-[0.97] text-left group ${
                           isFemale(selectedResident.nome) 
                             ? 'bg-violet-50 border-violet-100 text-violet-900 hover:bg-violet-100 hover:border-violet-200' 
@@ -968,7 +1259,7 @@ export default function PackageNew({ user }: PackageNewProps) {
                             <p className={`text-[9px] font-black uppercase tracking-widest ${isFemale(selectedResident.nome) ? 'text-violet-400' : 'text-indigo-400'}`}>Toque para Registrar</p>
                           </div>
                         </div>
-                        <CheckCircle className={`w-5 h-5 ${isFemale(selectedResident.nome) ? 'text-violet-400' : 'text-indigo-400'}`} />
+                        {loading ? <Loader2 className="w-5 h-5 animate-spin text-gray-400" /> : <CheckCircle className={`w-5 h-5 ${isFemale(selectedResident.nome) ? 'text-violet-400' : 'text-indigo-400'}`} />}
                       </button>
                     </div>
                   )}
@@ -1001,45 +1292,6 @@ export default function PackageNew({ user }: PackageNewProps) {
                         <option value="Bloco">Bloco</option>
                         <option value="Outro">Outro</option>
                       </select>
-                    </div>
-
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
-                        CÓDIGO DE ETIQUETA
-                      </label>
-                      <div className="relative">
-                        <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                          <Hash className="h-5 w-5 text-gray-400" />
-                        </div>
-                        <input
-                          type="text"
-                          value={trackingNumber}
-                          onChange={(e) => setTrackingNumber(e.target.value)}
-                          placeholder="Ex: BR255238373823T"
-                          className="block w-full pl-10 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all"
-                        />
-                      </div>
-                      <p className="mt-1 text-[10px] text-gray-400">
-                        Identificado automaticamente pela IA. Você pode corrigir se necessário.
-                      </p>
-                    </div>
-
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
-                        Transportadora
-                      </label>
-                      <div className="relative">
-                        <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                          <Truck className="h-5 w-5 text-gray-400" />
-                        </div>
-                        <input
-                          type="text"
-                          value={carrier}
-                          onChange={(e) => setCarrier(e.target.value)}
-                          placeholder="Ex: Correios, Loggi, Mercado Livre..."
-                          className="block w-full pl-10 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all"
-                        />
-                      </div>
                     </div>
 
                     <div>
@@ -1085,7 +1337,7 @@ export default function PackageNew({ user }: PackageNewProps) {
                 </div>
 
                 {/* Pickup Code Info */}
-                <div className="bg-indigo-900 rounded-2xl p-6 text-white shadow-lg shadow-indigo-200 mb-24">
+                <div className="bg-indigo-900 rounded-2xl p-6 text-white shadow-lg shadow-indigo-200 mb-2">
                   <div className="flex items-center justify-between mb-4">
                     <div className="flex items-center gap-2">
                       <Hash className="w-5 h-5 text-indigo-300" />
@@ -1105,6 +1357,22 @@ export default function PackageNew({ user }: PackageNewProps) {
                   </p>
                 </div>
 
+                {/* Final Actions - SALVAR ENCOMENDA appears when resident is selected */}
+                {selectedResident && (
+                  <div className="fixed bottom-0 left-0 right-0 p-4 bg-white/80 backdrop-blur-md border-t border-gray-200 z-50 animate-in fade-in slide-in-from-bottom-5">
+                    <div className="max-w-2xl mx-auto">
+                      <button
+                        type="button"
+                        disabled={loading || isOcrLoading}
+                        onClick={() => handleSubmit(undefined, undefined, true)}
+                        className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-bold flex items-center justify-center gap-2 hover:bg-indigo-700 shadow-lg shadow-indigo-100 transition-all disabled:opacity-50 active:scale-[0.98]"
+                      >
+                        {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Save className="w-5 h-5" />}
+                        SALVAR ENCOMENDA
+                      </button>
+                    </div>
+                  </div>
+                )}
               </form>
             </motion.div>
           )}
