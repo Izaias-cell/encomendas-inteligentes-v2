@@ -90,6 +90,46 @@ export default function Portaria({ user }: PortariaProps) {
   const [isWaitingForFocus, setIsWaitingForFocus] = useState(false);
   const [modoEnvio, setModoEnvio] = useState<'individual' | 'batch' | null>(null);
 
+  // Persistence for Notify Queue
+  useEffect(() => {
+    if (isNotifyingAll) {
+      sessionStorage.setItem('notify_batch_active', 'true');
+      sessionStorage.setItem('notify_batch_queue', JSON.stringify(notifyQueue));
+      sessionStorage.setItem('notify_batch_index', notifyIndex.toString());
+      sessionStorage.setItem('notify_batch_waiting', isWaitingForFocus ? 'true' : 'false');
+      sessionStorage.setItem('notify_batch_modo', modoEnvio || '');
+    } else {
+      sessionStorage.removeItem('notify_batch_active');
+      sessionStorage.removeItem('notify_batch_queue');
+      sessionStorage.removeItem('notify_batch_index');
+      sessionStorage.removeItem('notify_batch_waiting');
+      sessionStorage.removeItem('notify_batch_modo');
+    }
+  }, [isNotifyingAll, notifyQueue, notifyIndex, isWaitingForFocus, modoEnvio]);
+
+  // Restore Persistence on Mount
+  useEffect(() => {
+    const active = sessionStorage.getItem('notify_batch_active');
+    if (active === 'true') {
+      try {
+        const queue = JSON.parse(sessionStorage.getItem('notify_batch_queue') || '[]');
+        const index = parseInt(sessionStorage.getItem('notify_batch_index') || '0');
+        const waiting = sessionStorage.getItem('notify_batch_waiting') === 'true';
+        const modo = sessionStorage.getItem('notify_batch_modo') as any;
+
+        if (queue.length > 0) {
+          setNotifyQueue(queue);
+          setNotifyIndex(index);
+          setIsWaitingForFocus(waiting);
+          setModoEnvio(modo);
+          setIsNotifyingAll(true);
+        }
+      } catch (err) {
+        console.error('Erro ao restaurar fila de notificação:', err);
+      }
+    }
+  }, []);
+
   const fetchCondoName = async () => {
     if (!user.condominium_id) return;
     try {
@@ -274,8 +314,7 @@ export default function Portaria({ user }: PortariaProps) {
           } else {
             // Batch Finished
             setNotifyIndex(notifyQueue.length);
-            setIsNotifyingAll(false);
-            setModoEnvio(null);
+            // Don't close here automatically, show success screen
             toast.success('Notificações concluídas!', { icon: '✅', duration: 4000 });
             fetchData();
             fetchPendingNotices();
@@ -1983,6 +2022,9 @@ export default function Portaria({ user }: PortariaProps) {
                   <button
                     onClick={() => {
                         setIsNotifyingAll(false);
+                        setModoEnvio(null);
+                        setNotifyQueue([]);
+                        setNotifyIndex(0);
                         fetchData();
                     }}
                     className="w-full bg-zinc-900 text-white py-4 rounded-2xl font-bold hover:bg-zinc-800 transition-all"

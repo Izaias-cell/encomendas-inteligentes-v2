@@ -63,7 +63,7 @@ export default function PackageNew({ user }: PackageNewProps) {
   const location = useLocation();
   const fileInputRef = useRef<HTMLInputElement>(null);
   
-  const [step, setStep] = useState<Step>('manual');
+  const [step, setStep] = useState<Step>('camera');
   const [loading, setLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
@@ -95,9 +95,22 @@ export default function PackageNew({ user }: PackageNewProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isCameraStabilizing, setIsCameraStabilizing] = useState(true);
+  const [isCapturing, setIsCapturing] = useState(false);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [diagnosticInfo, setDiagnosticInfo] = useState<any>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+
+  // Focus effect for manual step
+  useEffect(() => {
+    if (step === 'manual') {
+      const timer = setTimeout(() => {
+        if (searchInputRef.current) {
+          searchInputRef.current.focus();
+        }
+      }, 400); // Slightly longer delay to ensure UI transition completes on mobile
+      return () => clearTimeout(timer);
+    }
+  }, [step, isManualUnitSearch]);
 
   const APP_VERSION = "2.2.0-diag";
   const BUILD_TIME = "2026-04-27 07:25";
@@ -315,57 +328,57 @@ export default function PackageNew({ user }: PackageNewProps) {
   };
 
   const capturePhoto = async () => {
-    if (!videoRef.current || !canvasRef.current || isCameraStabilizing) return;
+    if (!videoRef.current || !canvasRef.current || isCameraStabilizing || isCapturing) return;
+    
+    // Feedback visual imediato (flash) e tátil (vibração)
+    setIsCapturing(true);
+    if ('vibrate' in navigator) {
+      try { navigator.vibrate(50); } catch (e) {}
+    }
     
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
     
-    const context = canvas.getContext('2d');
+    // Resolução otimizada para velocidade (máximo 1024px)
+    const MAX_DIMENSION = 1024; 
+    let width = video.videoWidth;
+    let height = video.videoHeight;
+    
+    const ratio = Math.min(MAX_DIMENSION / width, MAX_DIMENSION / height);
+    if (ratio < 1) {
+      width = Math.round(width * ratio);
+      height = Math.round(height * ratio);
+    }
+
+    canvas.width = width;
+    canvas.height = height;
+    
+    const context = canvas.getContext('2d', { alpha: false });
     if (context) {
-      // Filtros leves para melhorar contraste em etiquetas (sem compressão)
-      context.filter = 'contrast(112%) brightness(108%)';
-      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      // Captura imediata (sem filtros para velocidade máxima)
+      context.drawImage(video, 0, 0, width, height);
       
-      // Qualidade máxima (1.0) para garantir fidelidade total entre ambientes
-      const quality = 1.0;
-      const base64 = canvas.toDataURL('image/jpeg', quality);
+      // Compressão rápida (0.75)
+      const base64 = canvas.toDataURL('image/jpeg', 0.75);
       
-      // Calcular tamanho real para diagnóstico
-      const sizeBytes = Math.round((base64.length * (3/4)) - (base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0));
-      const sizeKB = Math.round(sizeBytes / 1024);
-
-      console.log(`[DEBUG_OCR] Image Captured: ${canvas.width}x${canvas.height}, Size: ${sizeKB}KB, Quality: ${quality}`);
-
-      setDiagnosticInfo({
-        version: APP_VERSION,
-        buildTime: BUILD_TIME,
-        environment: ENVIRONMENT,
-        width: canvas.width,
-        height: canvas.height,
-        sizeKB: sizeKB,
-        mimeType: 'image/jpeg',
-        quality: quality,
-        capturedAt: new Date().toLocaleTimeString(),
-        nativeResolution: `${video.videoWidth}x${video.videoHeight}`
-      });
-
+      // Mudar fluxo IMEDIATAMENTE (antes de cálculos pesados)
+      setStep('manual');
       stopCamera();
       
-      // 1. Salvar a imagem final no estado e debug
+      // Salva no estado
       setPhotoUrl(base64);
       setDebugOcrImage(base64); 
-      setStep('manual');
       setIsOcrLoading(true);
-      setStatusMessage('Preparando imagem...');
+      setStatusMessage('Processando...');
 
-      // 2. Aguardar a imagem estar completamente pronta/carregada (delay de segurança de 500ms)
-      await new Promise(resolve => setTimeout(resolve, 500));
-      
-      // 3. Somente depois chamar o OCR usando a imagem final salva
-      setStatusMessage('Buscando dados da etiqueta...');
-      processImageWithWait(base64);
+      // Processa OCR/Upload em background
+      setTimeout(() => {
+        processImageWithWait(base64).finally(() => {
+          setIsCapturing(false);
+        });
+      }, 50);
+    } else {
+      setIsCapturing(false);
     }
   };
 
@@ -383,7 +396,7 @@ export default function PackageNew({ user }: PackageNewProps) {
     setSelectedResident(null);
     setOcrConfidence(null);
     setIsAiSearch(false);
-    setIsManualUnitSearch(false);
+    setIsManualUnitSearch(true);
 
     try {
       setStatusMessage('Processando...');
@@ -461,6 +474,12 @@ export default function PackageNew({ user }: PackageNewProps) {
                 } else {
                   // Se for sugestão, preenchemos o termo de busca para mostrar os cards
                   setSearchTerm(nameToUse || unitToUse || '');
+                  
+                  // Se detectou nome mas não detectou casa, muda para busca por nome para mostrar os moradores sugeridos
+                  if (nameToUse && !unitToUse) {
+                    setIsManualUnitSearch(false);
+                  }
+                  
                   // Se encontrou algo, garantimos que não fique em 'baixa' total
                   if (confidence === 'baixa') setOcrConfidence('media');
                 }
@@ -904,7 +923,7 @@ export default function PackageNew({ user }: PackageNewProps) {
       }
 
       toast.success('Encomenda registrada', { id: 'saving-package' });
-      resetForm(true); // Mantém no modo manual e foca no input para a próxima casa
+      resetForm(); // Volta para a câmera para a próxima encomenda (Sempre abrir câmera primeiro)
     } catch (error: any) {
       toast.error('Erro inesperado: ' + error.message, { id: 'saving-package' });
       setIsSaving(false);
@@ -976,6 +995,19 @@ export default function PackageNew({ user }: PackageNewProps) {
                     playsInline 
                     className="w-full h-full object-cover"
                   />
+                  {/* Flash Effect na Captura */}
+                  <AnimatePresence>
+                    {isCapturing && (
+                      <motion.div 
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        transition={{ duration: 0.1 }}
+                        className="absolute inset-0 bg-white z-[100]"
+                      />
+                    )}
+                  </AnimatePresence>
+
                   {cameraActive && (
                     <button
                       onClick={toggleFlash}
