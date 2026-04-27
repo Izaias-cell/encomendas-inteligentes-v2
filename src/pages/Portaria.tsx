@@ -277,9 +277,10 @@ export default function Portaria({ user }: PortariaProps) {
             setIsNotifyingAll(false);
             setModoEnvio(null);
             toast.success('Notificações concluídas!', { icon: '✅', duration: 4000 });
-            // Requirements: NÃO abrir câmera automaticamente no modo lote
+            fetchData();
+            fetchPendingNotices();
           }
-        }, 1000);
+        }, 100); // Reduzido de 1000ms para 100ms para fluxo super rápido
       }
     };
 
@@ -1943,11 +1944,12 @@ export default function Portaria({ user }: PortariaProps) {
                   ) : (
                     <div className="flex flex-col gap-3">
                       <button
+                        autoFocus
                         onClick={handleSendQueueItem}
-                        className="w-full bg-emerald-600 text-white py-4 rounded-2xl font-bold hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-200 flex items-center justify-center gap-3"
+                        className="w-full bg-emerald-600 text-white py-5 rounded-2xl font-bold hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-200 flex items-center justify-center gap-3 animate-in fade-in zoom-in duration-300"
                       >
                         <Send className="w-5 h-5" />
-                        ENVIAR WHATSAPP
+                        ENVIAR WHATSAPP AGORA
                       </button>
                       <div className="grid grid-cols-2 gap-3">
                         <button
@@ -1957,10 +1959,13 @@ export default function Portaria({ user }: PortariaProps) {
                           Pular este
                         </button>
                         <button
-                          onClick={() => setIsNotifyingAll(false)}
+                          onClick={() => {
+                            setIsNotifyingAll(false);
+                            setModoEnvio(null);
+                          }}
                           className="py-3 text-red-600 font-bold hover:bg-red-50 rounded-xl transition-all text-sm"
                         >
-                          Cancelar tudo
+                          Cancelar
                         </button>
                       </div>
                     </div>

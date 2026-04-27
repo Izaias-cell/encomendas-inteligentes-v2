@@ -63,7 +63,7 @@ export default function PackageNew({ user }: PackageNewProps) {
   const location = useLocation();
   const fileInputRef = useRef<HTMLInputElement>(null);
   
-  const [step, setStep] = useState<Step>('camera');
+  const [step, setStep] = useState<Step>('manual');
   const [loading, setLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
@@ -79,7 +79,7 @@ export default function PackageNew({ user }: PackageNewProps) {
   const [photoUrl, setPhotoUrl] = useState('');
   const [pickupCode, setPickupCode] = useState('');
   const [condoName, setCondoName] = useState('');
-  const [isManualUnitSearch, setIsManualUnitSearch] = useState(false);
+  const [isManualUnitSearch, setIsManualUnitSearch] = useState(true);
   const [allCondoResidents, setAllCondoResidents] = useState<Morador[]>([]);
   const [cameraActive, setCameraActive] = useState(false);
   const [flashOn, setFlashOn] = useState(false);
@@ -97,6 +97,7 @@ export default function PackageNew({ user }: PackageNewProps) {
   const [isCameraStabilizing, setIsCameraStabilizing] = useState(true);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [diagnosticInfo, setDiagnosticInfo] = useState<any>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   const APP_VERSION = "2.2.0-diag";
   const BUILD_TIME = "2026-04-27 07:25";
@@ -681,8 +682,13 @@ export default function PackageNew({ user }: PackageNewProps) {
     }
   };
 
-  const resetForm = () => {
-    setStep('camera');
+  const resetForm = (stayInManual: boolean = false) => {
+    if (!stayInManual) {
+      setStep('camera');
+      setPhotoUrl('');
+      setDebugOcrImage(null);
+    }
+    
     setSelectedResident(null);
     setRecipientName('');
     setUnitNumber('');
@@ -690,9 +696,9 @@ export default function PackageNew({ user }: PackageNewProps) {
     setCarrier('');
     setTrackingNumber('');
     setNotes('');
-    setPhotoUrl('');
     setSearchTerm('');
-    setIsManualUnitSearch(false);
+    // No "next package" mode, we keep the unit search active
+    setIsManualUnitSearch(true);
     setMatchingResidents([]);
     setPickupCode(generatePickupCode());
     setFoundPartialData(false);
@@ -701,13 +707,21 @@ export default function PackageNew({ user }: PackageNewProps) {
     setIsSaving(false);
     setIsOcrLoading(false);
     setOcrConfidence(null);
-    setDebugOcrImage(null);
-    setStatusMessage('Lendo dados...');
+    setStatusMessage('Aguardando...');
     
     // Forçar reinicialização da câmera se estivermos voltando para o step camera
-    if (step !== 'camera') {
+    if (!stayInManual && step !== 'camera') {
       setTimeout(() => startCamera(), 100);
     }
+
+    // Focar no campo de busca se estamos no modo manual
+    // Pequeno delay para garantir que o render do input (autoFocus) não interfira
+    setTimeout(() => {
+      if (searchInputRef.current) {
+        searchInputRef.current.value = ''; // Limpar explicitamente
+        searchInputRef.current.focus();
+      }
+    }, 150);
   };
 
   const handleSubmit = async (e?: React.FormEvent, directResident?: Morador, shouldNotify: boolean = false) => {
@@ -858,20 +872,16 @@ export default function PackageNew({ user }: PackageNewProps) {
               toast.success('Notificação enviada via WhatsApp', { icon: '📱' });
             } else {
               console.warn('Falha no envio da Z-API:', result.error);
-              toast.error('Aviso: Falha no envio automático do WhatsApp', { duration: 3000 });
             }
           } catch (err) {
             console.error('Erro no envio automático:', err);
-            toast.error('Erro ao conectar com API de WhatsApp');
           }
         }
 
-        // Fallback manual apenas se explicitamente em modo manual
+        // WhatsApp MANUAL - REMOVIDO window.open AUTOMÁTICO para não interromper o fluxo do porteiro
+        // O porteiro poderá notificar todos de uma vez depois no painel da portaria
         if (condoSettings?.whatsapp_mode === 'manual_assistido' || !apiActive) {
-          const whatsappLink = getWhatsAppLink(targetResident.telefone, directMessage, photoUrl || undefined);
-          
-          setIsWaitingForReturn(true); // Ativa detecção de retorno para abrir câmera
-          window.open(whatsappLink, '_blank');
+          console.log('Notificação manual pendente - porteiro deve usar "Notificar Todos" no painel.');
         }
       }
 
@@ -894,7 +904,7 @@ export default function PackageNew({ user }: PackageNewProps) {
       }
 
       toast.success('Encomenda registrada', { id: 'saving-package' });
-      resetForm();
+      resetForm(true); // Mantém no modo manual e foca no input para a próxima casa
     } catch (error: any) {
       toast.error('Erro inesperado: ' + error.message, { id: 'saving-package' });
       setIsSaving(false);
@@ -933,7 +943,7 @@ export default function PackageNew({ user }: PackageNewProps) {
             <ArrowLeft className="w-6 h-6 text-gray-600" />
           </button>
           <h1 className="text-lg font-semibold text-gray-900 leading-tight text-center">
-            {step === 'camera' ? 'Capturar Encomenda' : 'Registrar Encomenda'}
+            {step === 'manual' ? 'Novo Registro' : 'Capturar Etiqueta'}
             <div className="flex items-center justify-center gap-1.5 mt-0.5">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
               <span className={`text-[10px] font-bold uppercase tracking-wider ${getCurrentPorter() === 'Selecione o Porteiro' ? 'text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200' : 'text-emerald-600'}`}>
@@ -941,7 +951,7 @@ export default function PackageNew({ user }: PackageNewProps) {
               </span>
             </div>
             <div className="mt-1 text-[8px] text-gray-400 font-medium uppercase tracking-[0.2em]">
-              v2.1 - OCR atualizado
+              Fluxo Rápido
             </div>
           </h1>
           <div className="w-10" />
@@ -1083,7 +1093,7 @@ export default function PackageNew({ user }: PackageNewProps) {
                       <div className="w-8 h-8 bg-indigo-50 rounded-lg flex items-center justify-center">
                         <User className="w-5 h-5 text-indigo-600" />
                       </div>
-                      <h2 className="text-sm font-semibold text-gray-900 uppercase tracking-wider">Morador</h2>
+                      <h2 className="text-xs font-bold text-gray-400 uppercase tracking-[0.2em]">Quem está recebendo?</h2>
                     </div>
                     {selectedResident && (
                       <button
@@ -1194,68 +1204,84 @@ export default function PackageNew({ user }: PackageNewProps) {
                               <p className="text-xs text-amber-800 font-medium">Possível leitura parcial. Verifique se o morador está na lista abaixo.</p>
                             </div>
                           )}
-                          <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setIsManualUnitSearch(false);
-                            setSearchTerm('');
-                          }}
-                          className={`flex-1 py-3 rounded-xl text-xs font-bold transition-all ${
-                            !isManualUnitSearch 
-                              ? 'bg-indigo-600 text-white shadow-md' 
-                              : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
-                          }`}
-                        >
-                          Busca por Nome
-                        </button>
+                      <div className="flex items-center gap-2 mb-4">
                         <button
                           type="button"
                           onClick={() => {
                             setIsManualUnitSearch(true);
                             setSearchTerm('');
+                            setIsAiSearch(false);
                           }}
-                          className={`flex-1 py-3 rounded-xl text-xs font-bold transition-all ${
+                          className={`flex-1 py-3.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 ${
                             isManualUnitSearch 
-                              ? 'bg-indigo-600 text-white shadow-md' 
+                              ? 'bg-indigo-600 text-white shadow-md shadow-indigo-100' 
                               : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
                           }`}
                         >
+                          <Hash className="w-4 h-4" />
                           Por nº da Casa
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsManualUnitSearch(false);
+                            setSearchTerm('');
+                            setIsAiSearch(false);
+                          }}
+                          className={`flex-1 py-3.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 ${
+                            !isManualUnitSearch 
+                              ? 'bg-indigo-600 text-white shadow-md shadow-indigo-100' 
+                              : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                          }`}
+                        >
+                          <User className="w-4 h-4" />
+                          Por Nome
+                        </button>
+                        
+                        {/* Botão OCR Secundário */}
+                        <button
+                          type="button"
+                          onClick={() => setStep('camera')}
+                          className="p-3.5 bg-white border border-gray-200 rounded-xl text-indigo-600 hover:bg-indigo-50 transition-all shadow-sm"
+                          title="Usar Câmera/IA"
+                        >
+                          <Camera className="w-5 h-5" />
                         </button>
                       </div>
 
-                      <div className="relative">
+                      <div className="relative mb-6">
                         {isManualUnitSearch ? (
                            <div className="relative">
-                             <div className="absolute left-6 top-1/2 -translate-y-1/2 w-8 h-8 bg-indigo-100 rounded-lg flex items-center justify-center">
-                               <Hash className="w-5 h-5 text-indigo-600" />
+                             <div className="absolute left-6 top-1/2 -translate-y-1/2 w-8 h-8 bg-indigo-50 rounded-lg flex items-center justify-center">
+                               <Hash className="w-5 h-5 text-indigo-400" />
                              </div>
                              <input
+                               ref={searchInputRef}
                                autoFocus
                                type="number"
                                inputMode="numeric"
-                               placeholder="Digite o número da residência..."
+                               placeholder="Casa / Unidade..."
                                value={searchTerm}
                                onChange={(e) => setSearchTerm(e.target.value)}
-                               className="w-full pl-16 pr-4 py-5 bg-indigo-50/50 border-2 border-indigo-100 focus:border-indigo-500 focus:bg-white rounded-2xl transition-all outline-none text-2xl font-black text-indigo-900 placeholder:text-indigo-200"
+                               className="w-full pl-16 pr-4 py-5 bg-gray-50 border-2 border-transparent focus:border-indigo-500 focus:bg-white rounded-2xl transition-all outline-none text-2xl font-black text-indigo-900 placeholder:text-gray-300"
                              />
                            </div>
                         ) : (
-                          <>
+                          <div className="relative">
                             <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
                             <input
+                              ref={searchInputRef}
                               autoFocus
                               type="text"
-                              placeholder="Nome ou número da casa..."
+                              placeholder="Pesquisar nome do morador..."
                               value={searchTerm}
                               onChange={(e) => {
                                 setSearchTerm(e.target.value);
                                 setIsAiSearch(false);
                               }}
-                              className="w-full pl-12 pr-4 py-4 bg-gray-50 border-2 border-transparent focus:border-indigo-500 focus:bg-white rounded-xl transition-all outline-none text-lg"
+                              className="w-full pl-12 pr-4 py-4 bg-gray-50 border-2 border-transparent focus:border-indigo-500 focus:bg-white rounded-xl transition-all outline-none text-lg text-gray-900 placeholder:text-gray-400"
                             />
-                          </>
+                          </div>
                         )}
                       </div>
 
@@ -1277,7 +1303,12 @@ export default function PackageNew({ user }: PackageNewProps) {
                               <button
                                 key={resident.id}
                                 type="button"
-                                onClick={() => handleSelectResident(resident)}
+                                onClick={() => {
+                                  // Seleciona e tenta salvar imediatamente se desejar fluxo ultra rápido
+                                  handleSelectResident(resident);
+                                  // Se tivermos as informações básicas, podemos salvar direto
+                                  handleSubmit(undefined, resident, true);
+                                }}
                                 className={`w-full relative flex flex-col p-4 rounded-2xl transition-all border-2 text-left outline-none hover:shadow-lg active:scale-[0.98] cursor-pointer touch-manipulation group ${
                                   isBest 
                                     ? (isFemale(resident.nome) ? 'bg-violet-50 border-violet-200 shadow-md ring-1 ring-violet-200' : 'bg-indigo-50 border-indigo-200 shadow-md ring-1 ring-indigo-200')
@@ -1419,7 +1450,7 @@ export default function PackageNew({ user }: PackageNewProps) {
                     <div className="w-8 h-8 bg-emerald-50 rounded-lg flex items-center justify-center">
                       <Package className="w-5 h-5 text-emerald-600" />
                     </div>
-                    <h2 className="text-sm font-semibold text-gray-900 uppercase tracking-wider">Dados da Entrega</h2>
+                    <h2 className="text-xs font-bold text-gray-400 uppercase tracking-[0.2em]">Detalhes Opcionais</h2>
                   </div>
 
                   <div className="space-y-4">
