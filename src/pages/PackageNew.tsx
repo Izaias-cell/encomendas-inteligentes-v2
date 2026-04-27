@@ -90,6 +90,7 @@ export default function PackageNew({ user }: PackageNewProps) {
   const [isWaitingForReturn, setIsWaitingForReturn] = useState(false);
   const [isOcrLoading, setIsOcrLoading] = useState(false);
   const [ocrConfidence, setOcrConfidence] = useState<'alta' | 'media' | 'baixa' | null>(null);
+  const [debugOcrImage, setDebugOcrImage] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isCameraStabilizing, setIsCameraStabilizing] = useState(true);
@@ -283,14 +284,16 @@ export default function PackageNew({ user }: PackageNewProps) {
     
     const context = canvas.getContext('2d');
     if (context) {
-      // Aplicar filtros para melhorar o OCR
-      context.filter = 'grayscale(100%) contrast(140%) brightness(105%)';
+      // Filtros leves como solicitado na regra de ouro
+      context.filter = 'contrast(110%) brightness(105%)';
       context.drawImage(video, 0, 0, canvas.width, canvas.height);
       
-      const base64 = canvas.toDataURL('image/jpeg', 0.9);
+      // Alta qualidade (0.95) para garantir fidelidade
+      const base64 = canvas.toDataURL('image/jpeg', 0.95);
       stopCamera();
       
       setPhotoUrl(base64);
+      setDebugOcrImage(base64); // Armazena para debug
       setStep('manual');
       setIsOcrLoading(true);
       setStatusMessage('Buscando dados da etiqueta...');
@@ -311,18 +314,12 @@ export default function PackageNew({ user }: PackageNewProps) {
       setStatusMessage('Processando...');
       let finalBase64 = base64;
 
-      // Compressão obrigatória para reduzir peso no mobile
-      try {
-        const { compressImage } = await import('../lib/imageUtils');
-        finalBase64 = await compressImage(base64, 800, 0.6); 
-      } catch (err) {
-        console.warn('Falha ao comprimir imagem:', err);
-      }
-
-      // 1. Inicia upload em paralelo usando a imagem comprimida
+      // 1. Inicia upload em paralelo
       const uploadPromise = (async () => {
         try {
-          const res = await fetch(finalBase64);
+          const storageBase64 = base64;
+
+          const res = await fetch(storageBase64);
           const blob = await res.blob();
           const file = new File([blob], "package_photo.jpg", { type: "image/jpeg" });
           const fileName = `${Date.now()}_${Math.random().toString(36).substring(7)}.jpg`;
@@ -544,15 +541,7 @@ export default function PackageNew({ user }: PackageNewProps) {
     try {
       const reader = new FileReader();
       reader.onloadend = async () => {
-        let base64 = reader.result as string;
-
-        // Otimização: Redimensionar e comprimir antes de enviar para IA
-        try {
-          const { compressImage } = await import('../lib/imageUtils');
-          base64 = await compressImage(base64, 900, 0.65);
-        } catch (err) {
-          console.warn('Falha ao comprimir imagem:', err);
-        }
+        const base64 = reader.result as string;
 
         setPhotoUrl(base64);
         setStep('analyzing');
@@ -586,6 +575,7 @@ export default function PackageNew({ user }: PackageNewProps) {
     setLoading(false);
     setIsOcrLoading(false);
     setOcrConfidence(null);
+    setDebugOcrImage(null);
     setStatusMessage('Lendo dados...');
     
     // Forçar reinicialização da câmera se estivermos voltando para o step camera
@@ -1017,6 +1007,17 @@ export default function PackageNew({ user }: PackageNewProps) {
                                 <Camera className="w-5 h-5" />
                                 Tirar nova foto
                               </button>
+
+                              {/* Debug de Imagem OCR (Somente se houver imagem de debug) */}
+                              {debugOcrImage && (
+                                <div className="mt-4 p-3 bg-zinc-50 rounded-xl border border-dashed border-zinc-200">
+                                  <p className="text-[10px] font-bold text-zinc-400 uppercase mb-2">DEBUG: Imagem enviada para IA</p>
+                                  <div className="relative aspect-video rounded-lg overflow-hidden bg-black">
+                                    <img src={debugOcrImage} alt="Debug OCR" className="w-full h-full object-contain" />
+                                  </div>
+                                </div>
+                              )}
+
                               <button
                                 type="button"
                                 onClick={() => {

@@ -2078,7 +2078,6 @@ const SettingsPanel = ({ user, systemStatus, onUpdateUser }: any) => {
         notification_template: '📦 Nova encomenda recebida\n\nOlá, {{name}}\n\nUma encomenda chegou para sua unidade {{unit}}.\n\nVocê já pode retirar na portaria.',
         reminder_48h_enabled: true,
         reminder_72h_enabled: true,
-        light_mode_enabled: true,
         contact_phone: '',
         whatsapp_mode: 'manual_assistido'
       });
@@ -2386,27 +2385,6 @@ const SettingsPanel = ({ user, systemStatus, onUpdateUser }: any) => {
                 className="w-5 h-5 rounded-lg border-zinc-300 text-emerald-600 focus:ring-emerald-500" 
               />
               <span className="text-sm text-zinc-700 group-hover:text-zinc-900 transition-colors">Ativar lembrete automático após 72h</span>
-            </label>
-          </div>
-        </div>
-
-        <div className="space-y-4 pt-6 border-t border-zinc-100">
-          <h3 className="font-bold text-zinc-900 flex items-center gap-2">
-            <Zap className="w-5 h-5 text-amber-500" />
-            Performance & Sistema
-          </h3>
-          <div className="flex flex-col gap-3">
-            <label className="flex items-center gap-3 cursor-pointer group">
-              <input 
-                type="checkbox" 
-                checked={settings.light_mode_enabled}
-                onChange={(e) => setSettings({...settings, light_mode_enabled: e.target.checked})}
-                className="w-5 h-5 rounded-lg border-zinc-300 text-emerald-600 focus:ring-emerald-500" 
-              />
-              <div>
-                <span className="text-sm text-zinc-700 group-hover:text-zinc-900 transition-colors font-bold">Modo Leve (Recomendado para celulares simples)</span>
-                <p className="text-[10px] text-zinc-400 uppercase font-bold">Reduz animações, limita carregamento de listas e otimiza fotos para maior rapidez.</p>
-              </div>
             </label>
           </div>
         </div>

@@ -192,7 +192,6 @@ export interface CondominiumSettings {
   api_token?: string;
   instance_id?: string;
   sender_phone?: string;
-  light_mode_enabled: boolean;
 }
 
 export interface ResidentAccessToken {

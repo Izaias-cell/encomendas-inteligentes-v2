@@ -56,10 +56,6 @@ export default function ProfileList({ user }: ProfileListProps) {
         .select('id, nome, unidade, unit_type, block, street, telefone, ativo, created_at, condominium_id')
         .eq('condominium_id', user.condominium_id);
       
-      if (condoSettings?.light_mode_enabled) {
-        query = query.limit(100);
-      }
-
       const { data: residentsData, error: residentsError } = await query;
 
       if (residentsError) throw residentsError;

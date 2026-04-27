@@ -115,7 +115,6 @@ CREATE TABLE condominium_settings (
   notification_template TEXT,
   reminder_48h_enabled BOOLEAN DEFAULT TRUE,
   reminder_72h_enabled BOOLEAN DEFAULT TRUE,
-  light_mode_enabled BOOLEAN DEFAULT TRUE,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 

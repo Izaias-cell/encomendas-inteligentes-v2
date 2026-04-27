@@ -215,7 +215,7 @@ export default function Portaria({ user }: PortariaProps) {
   const isScanningRef = useRef(false);
   const successAudioRef = useRef<HTMLAudioElement | null>(null);
 
-  const anim = (props: any) => condoSettings?.light_mode_enabled ? {} : props;
+  const anim = (props: any) => props;
 
   useEffect(() => {
     isScanningRef.current = isScanning;
@@ -1057,22 +1057,16 @@ export default function Portaria({ user }: PortariaProps) {
         .eq('condominium_id', user.condominium_id)
         .maybeSingle();
       
-      const isLightMode = settingsData?.light_mode_enabled ?? true;
       setCondoSettings(settingsData);
-
-      // Busca encomendas e moradores respeitando o modo leve
-      let pkgQuery = supabase
-        .from('packages')
-        .select('*, package_id:id, recipient_name:recipient_name_raw, unit_label:unit_number')
-        .eq('condominium_id', user.condominium_id)
-        .order('received_at', { ascending: false });
-
-      // No modo leve, limitamos a carga inicial de encomendas para melhorar performance
-      if (isLightMode) {
-        pkgQuery = pkgQuery.limit(100);
-      }
-
-      const [pkgResult, resResult] = await Promise.all([
+ 
+       // Busca encomendas e moradores
+       let pkgQuery = supabase
+         .from('packages')
+         .select('*, package_id:id, recipient_name:recipient_name_raw, unit_label:unit_number')
+         .eq('condominium_id', user.condominium_id)
+         .order('received_at', { ascending: false });
+ 
+       const [pkgResult, resResult] = await Promise.all([
         pkgQuery,
         supabase
           .from('moradores')
