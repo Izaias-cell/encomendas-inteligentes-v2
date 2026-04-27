@@ -274,7 +274,7 @@ export default function PackageNew({ user }: PackageNewProps) {
     }
   };
 
-  const capturePhoto = () => {
+  const capturePhoto = async () => {
     if (!videoRef.current || !canvasRef.current || isCameraStabilizing) return;
     
     const video = videoRef.current;
@@ -292,13 +292,18 @@ export default function PackageNew({ user }: PackageNewProps) {
       const base64 = canvas.toDataURL('image/jpeg', 0.95);
       stopCamera();
       
+      // 1. Salvar a imagem final no estado e debug
       setPhotoUrl(base64);
-      setDebugOcrImage(base64); // Armazena para debug
+      setDebugOcrImage(base64); 
       setStep('manual');
       setIsOcrLoading(true);
-      setStatusMessage('Buscando dados da etiqueta...');
+      setStatusMessage('Preparando imagem...');
+
+      // 2. Aguardar a imagem estar completamente pronta/carregada (delay de segurança de 500ms)
+      await new Promise(resolve => setTimeout(resolve, 500));
       
-      // Executa leitura com espera controlada de 3 segundos
+      // 3. Somente depois chamar o OCR usando a imagem final salva
+      setStatusMessage('Buscando dados da etiqueta...');
       processImageWithWait(base64);
     }
   };
@@ -987,10 +992,13 @@ export default function PackageNew({ user }: PackageNewProps) {
                               <button
                                 type="button"
                                 disabled={isOcrLoading}
-                                onClick={() => {
+                                onClick={async () => {
                                   if (photoUrl) {
                                     setIsOcrLoading(true);
                                     setOcrConfidence(null);
+                                    setStatusMessage('Preparando imagem...');
+                                    // Delay de segurança antes de reprocessar a mesma foto final
+                                    await new Promise(resolve => setTimeout(resolve, 500));
                                     processImageWithWait(photoUrl);
                                   }
                                 }}
