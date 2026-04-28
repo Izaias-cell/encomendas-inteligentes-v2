@@ -812,10 +812,10 @@ export default function PackageNew({ user }: PackageNewProps) {
       const packageData = {
         condominium_id: user.condominium_id,
         recipient_id: targetResident.id,
-        recipient_name_raw: recipientName || targetResident.nome,
+        
         unit_number: unitNumber || targetResident.unidade || '',
         unit_type: unitType || targetResident.unit_type || '',
-        unit_number_val: targetResident.unidade,
+        
         block: targetResident.block || targetResident.bloco,
         tower: targetResident.tower || targetResident.lote,
         complement: targetResident.observacoes,
