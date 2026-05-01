@@ -61,8 +61,10 @@ const PackageItem: React.FC<PackageItemProps> = ({
       </div>
       
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-xl font-bold text-zinc-900">{pkg.recipient_name}</h3>
-        {getWhatsAppBadge(pkg.whatsapp_status)}
+        <h3 className="text-xl font-bold text-zinc-900 truncate pr-2" title={pkg.moradores?.nome}>
+          {pkg.moradores?.nome || 'Morador não identificado'}
+        </h3>
+        {getWhatsAppBadge(pkg.whatsapp_status, pkg)}
       </div>
       
       <div className="space-y-3 mb-6">

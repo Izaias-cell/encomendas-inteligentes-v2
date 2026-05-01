@@ -328,7 +328,6 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
     full_name: '',
     unit_number: '',
     unit_type: '',
-    unit_number_val: '',
     block: '',
     tower: '',
     complement: '',
@@ -542,7 +541,6 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
         if (finalData.block) parts.push(`BLOCO-${finalData.block}`);
         if (finalData.tower) parts.push(`TORRE-${finalData.tower}`);
         if (finalData.unit_type) parts.push(finalData.unit_type.toUpperCase());
-        if (finalData.unit_number_val) parts.push(finalData.unit_number_val);
         finalData.unit_number = parts.join('-').toUpperCase();
       }
 
@@ -570,7 +568,6 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
         full_name: '', 
         unit_number: '', 
         unit_type: '',
-        unit_number_val: '',
         block: '',
         tower: '',
         complement: '',
@@ -589,19 +586,15 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
 
   // Auto-generate unit from structured fields
   useEffect(() => {
-    const { unit_type, unit_number_val, block, tower, complement } = residentFormData;
+    const { unit_type, block, tower, complement } = residentFormData;
     
     // Only generate if at least one detail is present to avoid overwriting legacy data unnecessarily
-    if (unit_type || unit_number_val || block || tower || complement) {
+    if (unit_type || block || tower || complement) {
       const parts = [];
       if (block) parts.push(`BLOCO-${block.trim().toUpperCase()}`);
       if (tower) parts.push(`TORRE-${tower.trim().toUpperCase()}`);
       
-      if (unit_type && unit_number_val) {
-        parts.push(`${unit_type.trim().toUpperCase()}-${unit_number_val.trim()}`);
-      } else if (unit_number_val) {
-        parts.push(unit_number_val.trim());
-      } else if (unit_type) {
+      if (unit_type) {
         parts.push(unit_type.trim().toUpperCase());
       }
       
@@ -615,7 +608,6 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
     }
   }, [
     residentFormData.unit_type, 
-    residentFormData.unit_number_val, 
     residentFormData.block, 
     residentFormData.tower, 
     residentFormData.complement
@@ -673,7 +665,7 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
     try {
       const { data, error } = await supabase
         .from('packages')
-        .select('*, package_id:id, recipient_name:recipient_name_raw, unit_label:unit_number_raw')
+        .select('*, package_id:id, unit_label:unit_number')
         .eq('condominium_id', user.condominium_id)
         .or(`pickup_token.eq.${decodedText},pickup_code.eq.${decodedText},id.eq.${decodedText}`)
         .maybeSingle();
@@ -786,7 +778,7 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
     if (!user?.condominium_id) return;
     const { data, error } = await supabase
       .from('packages')
-      .select('*, package_id:id, recipient_name:recipient_name_raw, unit_label:unit_number_raw')
+      .select('*, package_id:id, unit_label:unit_number')
       .eq('condominium_id', user.condominium_id)
       .order('created_at', { ascending: false });
     
@@ -948,17 +940,18 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
         .from('packages')
         .insert([{
           condominium_id: user.condominium_id,
-          recipient_name_raw: analyzedData?.recipientName || '',
-          unit_number_raw: analyzedData?.unitNumber || '',
+          unit_number: analyzedData?.unitNumber || '',
           unit_type: analyzedData?.unitDetails?.type || null,
-          unit_number_val: analyzedData?.unitDetails?.number || null,
           block: analyzedData?.unitDetails?.block || null,
           tower: analyzedData?.unitDetails?.tower || null,
           complement: analyzedData?.unitDetails?.complement || null,
           carrier: analyzedData?.carrier || '',
           tracking_code: analyzedData?.trackingNumber || '',
           photo_url: photoUrl,
-          status: 'notified',
+          status: 'received',
+          whatsapp_notified: true,
+          whatsapp_sent: true,
+          notified_at: new Date().toISOString(),
           received_by: user.id,
           ...(authUser?.id ? { registered_by: authUser.id } : {}),
           notes: notes || null,
@@ -1076,7 +1069,7 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
       const { data: residentProfile } = await supabase
         .from('profiles')
         .select('phone, full_name')
-        .eq('unit_number', pkg.unit_number_raw)
+        .eq('unit_number', pkg.unit_number)
         .eq('condominium_id', user.condominium_id)
         .eq('role', 'resident')
         .maybeSingle();
@@ -1091,8 +1084,8 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
           },
           body: JSON.stringify({
             phone: residentProfile.phone, 
-            residentName: pkg.recipient_name_raw || residentProfile.full_name,
-            unitNumber: pkg.unit_number_raw,
+            residentName: residentProfile.full_name,
+            unitNumber: pkg.unit_number,
             carrier: pkg.carrier,
             trackingNumber: pkg.tracking_code,
             packageId: pkg.id
@@ -1117,7 +1110,7 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
   };
 
   const filteredPackages = packages.filter((p: any) => 
-    p.recipient_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    (p.moradores?.nome || "").toLowerCase().includes(searchTerm.toLowerCase()) ||
     p.unit_label?.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
@@ -1240,7 +1233,7 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
                     </div>
                     <div>
                       <div className="flex items-center gap-2">
-                        <h4 className="font-bold text-zinc-900 text-sm">{pkg.recipient_name}</h4>
+                        <h4 className="font-bold text-zinc-900 text-sm">{pkg.moradores?.nome || 'Morador'}</h4>
                         {pkg.status !== 'delivered' && (
                           <div className="flex items-center gap-1">
                             {pkg.whatsapp_status === 'sent' && <CheckCircle className="w-3 h-3 text-emerald-500" title="Enviado" />}
@@ -1298,7 +1291,6 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
                 full_name: '', 
                 unit_number: '', 
                 unit_type: '',
-                unit_number_val: '',
                 block: '',
                 tower: '',
                 complement: '',
@@ -1341,7 +1333,6 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
                     full_name: res.full_name, 
                     unit_number: res.unit_number || '', 
                     unit_type: res.unit_type || '',
-                    unit_number_val: res.unit_number_val || '',
                     block: res.block || '',
                     tower: res.tower || '',
                     complement: res.complement || '',
@@ -1485,7 +1476,7 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
                     <div className="text-left space-y-4 mb-8">
                       <div className="bg-zinc-50 p-4 rounded-2xl border border-zinc-100">
                         <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Morador</p>
-                        <p className="text-lg font-bold text-zinc-900">{qrPackage.recipient_name || qrPackage.recipient_name_raw}</p>
+                        <p className="text-lg font-bold text-zinc-900">{qrPackage.moradores?.nome || 'Morador'}</p>
                         <p className="text-sm text-zinc-500">{formatPackageUnit(qrPackage)}</p>
                       </div>
 
@@ -1593,7 +1584,7 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
                         <Check className="w-4 h-4" />
                       </div>
                       <div>
-                        <p className="text-sm font-bold text-white">{pkg.recipient_name || pkg.recipient_name_raw}</p>
+                        <p className="text-sm font-bold text-white">{pkg.moradores?.nome || 'Morador'}</p>
                         <p className="text-[10px] text-zinc-500">{formatPackageUnit(pkg)} • {formatSafeDateTime(pkg.delivered_at)}</p>
                       </div>
                     </div>
@@ -1959,15 +1950,6 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
                   />
                 </div>
                 <div>
-                  <label className="block text-[10px] font-medium text-zinc-500 mb-1">Número</label>
-                  <input 
-                    value={residentFormData.unit_number_val || ''}
-                    onChange={(e) => setResidentFormData({...residentFormData, unit_number_val: e.target.value})}
-                    className="w-full px-3 py-2 text-sm rounded-lg border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500"
-                    placeholder="Ex: 101"
-                  />
-                </div>
-                <div>
                   <label className="block text-[10px] font-medium text-zinc-500 mb-1">Bloco</label>
                   <input 
                     value={residentFormData.block || ''}
@@ -2015,7 +1997,7 @@ const ResidentDashboard = ({ user }: { user: Profile }) => {
       const { data } = await supabase
         .from('packages')
         .select('*')
-        .eq('unit_number_raw', user.unidade)
+        .eq('unit_number', user.unidade)
         .eq('condominium_id', user.condominium_id)
         .order('received_at', { ascending: false });
       if (data) setPackages(data);

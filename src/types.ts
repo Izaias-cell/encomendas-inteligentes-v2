@@ -10,7 +10,6 @@ export interface Profile {
   unit?: string;
   unit_type?: string;
   unidade?: string;
-  unit_number_val?: string;
   block?: string;
   tower?: string;
   street?: string;
@@ -83,13 +82,9 @@ export interface Package {
   id: string;
   condominium_id: string;
   recipient_id?: string;
-  recipient_name?: string;
-  recipient_name_raw: string;
-  unit_number_raw: string;
+  unit_number?: string;
   unit?: string;
   unit_type?: string;
-  unit_number?: string;
-  unit_number_val?: string;
   block?: string;
   tower?: string;
   complement?: string;
@@ -110,6 +105,9 @@ export interface Package {
   notes?: string;
   is_teste?: boolean;
   whatsapp_status?: 'pending' | 'pendente' | 'sent' | 'enviado' | 'failed' | 'error' | 'delivered' | 'read' | 'not_configured' | 'pending_configuration' | 'no_recipient';
+  whatsapp_notified?: boolean;
+  whatsapp_sent?: boolean;
+  notified_at?: string;
   last_notification_at?: string;
   whatsapp_sent_at?: string;
   notification_mode?: 'api' | 'manual';
@@ -128,7 +126,7 @@ export interface Package {
   porter?: { full_name: string }; // Joined data
   deliverer?: { full_name: string }; // Joined data
   registrar?: { full_name: string }; // Joined data
-  morador?: { 
+  moradores?: { 
     nome: string; 
     unidade: string;
     unit_type?: string;

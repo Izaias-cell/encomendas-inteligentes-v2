@@ -40,8 +40,9 @@ export default function Dashboard({ user }: DashboardProps) {
   });
   const [loading, setLoading] = useState(true);
   const [showClearModal, setShowClearModal] = useState(false);
-  const [clearType, setClearType] = useState<'options' | 'test' | 'inactive' | 'report'>('options');
-  const [testCounts, setTestCounts] = useState({ residents: 0, porters: 0, packages: 0 });
+  const [clearType, setClearType] = useState<'options' | 'test' | 'inactive' | 'report' | 'allPackages'>('options');
+  const [testCounts, setTestCounts] = useState({ residents: 0, porters: 0, packages: 0, testPending: 0, testDelivered: 0 });
+  const [confirmationPhrase, setConfirmationPhrase] = useState('');
   const [clearReport, setClearReport] = useState({ residents: 0, porters: 0, packages: 0 });
   const [showCondoModal, setShowCondoModal] = useState(false);
   const [condoLoading, setCondoLoading] = useState(false);
@@ -207,12 +208,12 @@ export default function Dashboard({ user }: DashboardProps) {
       if (logsError) console.warn('Erro ao limpar logs:', logsError);
 
       // 2. Encomendas de teste
-      // Encomendas: is_teste = true OR recipient_name_raw contém teste
+      // Encomendas: is_teste = true OR notas contém teste
       const { data: pkgs, error: pkgError } = await supabase
         .from('packages')
         .delete()
         .eq('condominium_id', user.condominium_id)
-        .ilike('recipient_name_raw', '%teste%')
+        .eq('is_teste', true)
         .select('id');
 
       if (pkgError) throw pkgError;
@@ -255,22 +256,71 @@ export default function Dashboard({ user }: DashboardProps) {
     }
   };
 
+  const handleClearAllPackages = async () => {
+    if (!user.condominium_id) return;
+    if (normalizeRole(user.role) !== 'admin') {
+      toast.error('Apenas administradores podem realizar esta ação.');
+      return;
+    }
+    
+    if (confirmationPhrase !== 'LIMPAR') {
+      toast.error('Por favor, digite LIMPAR para confirmar.');
+      return;
+    }
+    
+    setClearing(true);
+    try {
+      // Deletar logs de retirada primeiro para evitar erros de FK se existirem
+      const { data: pkgs } = await supabase
+        .from('packages')
+        .select('id')
+        .eq('condominium_id', user.condominium_id);
+      
+      const pkgIds = pkgs?.map(p => p.id) || [];
+      if (pkgIds.length > 0) {
+        await supabase.from('retrieval_logs').delete().in('package_id', pkgIds);
+      }
+      
+      // Deletar todas as encomendas
+      const { error } = await supabase
+        .from('packages')
+        .delete()
+        .eq('condominium_id', user.condominium_id);
+      
+      if (error) throw error;
+
+      toast.success('Todas as encomendas foram excluídas com sucesso.');
+      setShowClearModal(false);
+      fetchStats();
+    } catch (error: any) {
+      console.error('Erro na limpeza total de encomendas:', error);
+      toast.error('Erro ao realizar limpeza: ' + error.message);
+    } finally {
+      setClearing(false);
+    }
+  };
+
   const openClearModal = async () => {
     setClearType('options');
+    setConfirmationPhrase('');
     setShowClearModal(true);
     
     // Buscar contagens prévias
     if (user.condominium_id) {
-      const [resC, porterC, pkgC] = await Promise.all([
+      const [resC, porterC, pkgC, pkgPendingC, pkgDeliverC] = await Promise.all([
         supabase.from('moradores').select('id', { count: 'exact', head: true }).eq('condominium_id', user.condominium_id).or('nome.ilike.%teste%,observacoes.ilike.%teste%'),
         supabase.from('profiles').select('id', { count: 'exact', head: true }).eq('condominium_id', user.condominium_id).or('full_name.ilike.%teste%,email.ilike.%teste%'),
-        supabase.from('packages').select('id', { count: 'exact', head: true }).eq('condominium_id', user.condominium_id).ilike('recipient_name_raw', '%teste%')
+        supabase.from('packages').select('id', { count: 'exact', head: true }).eq('condominium_id', user.condominium_id),
+        supabase.from('packages').select('id', { count: 'exact', head: true }).eq('condominium_id', user.condominium_id).neq('status', 'delivered'),
+        supabase.from('packages').select('id', { count: 'exact', head: true }).eq('condominium_id', user.condominium_id).eq('status', 'delivered')
       ]);
       
       setTestCounts({
         residents: resC.count || 0,
         porters: porterC.count || 0,
-        packages: pkgC.count || 0
+        packages: pkgC.count || 0,
+        testPending: pkgPendingC.count || 0,
+        testDelivered: pkgDeliverC.count || 0
       });
     }
   };
@@ -721,6 +771,57 @@ export default function Dashboard({ user }: DashboardProps) {
                     <h4 className="font-bold text-zinc-900 mb-1 group-hover:text-red-700 transition-colors">Limpar moradores desativados</h4>
                     <p className="text-sm text-zinc-500">Remove moradores marcados como inativos/desativados.</p>
                   </button>
+
+                  <button
+                    onClick={() => setClearType('allPackages')}
+                    className="w-full text-left p-6 rounded-2xl border border-zinc-100 hover:border-blue-200 hover:bg-blue-50 transition-all group"
+                  >
+                    <h4 className="font-bold text-zinc-900 mb-1 group-hover:text-blue-700 transition-colors">LIMPAR TODAS AS ENCOMENDAS</h4>
+                    <p className="text-sm text-zinc-500">Remove todas as encomendas cadastradas, incluindo pendentes, retiradas, baixadas e notificadas.</p>
+                  </button>
+                </div>
+              ) : clearType === 'allPackages' ? (
+                <div className="space-y-6">
+                  <div className="p-4 bg-red-50 rounded-2xl border border-red-100 flex gap-3">
+                    <AlertTriangle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+                    <div className="text-sm text-red-700 space-y-2">
+                      <p>Essa ação irá excluir TODAS as encomendas cadastradas no sistema. Essa ação não pode ser desfeita. Para confirmar, digite LIMPAR.</p>
+                      <div className="bg-white/50 p-3 rounded-xl border border-red-100 space-y-1">
+                        <p className="font-bold">Total a ser removido:</p>
+                        <p>• {stats.total} encomendas no total</p>
+                        <p>• {stats.pending} encomendas pendentes</p>
+                        <p>• {stats.delivered} encomendas baixadas</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-zinc-500 mb-2 uppercase tracking-wider">Digite LIMPAR para confirmar</label>
+                    <input 
+                      type="text"
+                      className="w-full p-4 rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-red-500 font-bold"
+                      placeholder="LIMPAR"
+                      value={confirmationPhrase}
+                      onChange={(e) => setConfirmationPhrase(e.target.value)}
+                    />
+                  </div>
+
+                  <div className="flex flex-col gap-3">
+                    <button
+                      onClick={handleClearAllPackages}
+                      disabled={clearing || confirmationPhrase !== 'LIMPAR'}
+                      className="w-full bg-red-600 text-white py-4 rounded-2xl font-bold hover:bg-red-700 transition-all flex items-center justify-center gap-2 disabled:opacity-50 shadow-lg shadow-red-100"
+                    >
+                      {clearing ? <Loader2 className="w-5 h-5 animate-spin" /> : 'Confirmar e Limpar TUDO'}
+                    </button>
+                    <button
+                      onClick={() => setClearType('options')}
+                      disabled={clearing}
+                      className="w-full bg-zinc-100 text-zinc-600 py-4 rounded-2xl font-bold hover:bg-zinc-200"
+                    >
+                      Voltar
+                    </button>
+                  </div>
                 </div>
               ) : clearType === 'test' ? (
                 <div className="space-y-6">

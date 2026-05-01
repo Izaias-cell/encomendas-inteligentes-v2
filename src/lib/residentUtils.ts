@@ -28,9 +28,12 @@ export const formatResidentAddress = (resident: Morador | any) => {
 export const formatPackageUnit = (pkg: any) => {
   const parts: string[] = [];
   
-  // 1. unit_type + unit_number (fallback to unit_number_raw)
-  const unitType = pkg.unit_type || '';
-  const unitNum = pkg.unit_number || pkg.unit_number_raw || pkg.unit || '';
+  // Prioritize data from joined moradores if available
+  const dataSource = pkg.moradores || pkg;
+  
+  // 1. unit_type + unit_number (fallback to raw fields on pkg)
+  const unitType = dataSource.unit_type || '';
+  const unitNum = dataSource.unidade || dataSource.unit_number || pkg.unit || '';
   
   if (unitNum) {
     if (unitType && unitType.toLowerCase() !== 'unidade') {
@@ -43,16 +46,25 @@ export const formatPackageUnit = (pkg: any) => {
   }
 
   // 2. block
-  if (pkg.block || pkg.bloco) {
-    parts.push(pkg.block || pkg.bloco);
+  const block = dataSource.block || dataSource.bloco || pkg.block || pkg.bloco;
+  if (block) {
+    parts.push(block);
   }
 
-  // 3. tower
-  if (pkg.tower || pkg.lote) {
-    parts.push(`${pkg.tower ? 'Torre' : 'Lote'} ${pkg.tower || pkg.lote}`);
+  // 3. tower/lote
+  const tower = dataSource.tower || pkg.tower;
+  const lote = dataSource.lote || pkg.lote;
+  if (tower || lote) {
+    parts.push(`${tower ? 'Torre' : 'Lote'} ${tower || lote}`);
   }
 
-  // 4. complement
+  // 4. street
+  const street = dataSource.street || pkg.street;
+  if (street) {
+    parts.push(street);
+  }
+
+  // 5. complement
   if (pkg.complement) {
     parts.push(pkg.complement);
   }

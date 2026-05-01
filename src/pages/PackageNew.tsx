@@ -47,7 +47,7 @@ interface PackageNewProps {
   user: Profile;
 }
 
-type Step = 'camera' | 'manual';
+type Step = 'camera' | 'manual' | 'analyzing';
 
 const QUICK_OBSERVATIONS = [
   'Caixa frágil',
@@ -96,24 +96,61 @@ export default function PackageNew({ user }: PackageNewProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isCameraStabilizing, setIsCameraStabilizing] = useState(true);
   const [isCapturing, setIsCapturing] = useState(false);
+  const [showCaptureFeedback, setShowCaptureFeedback] = useState(false);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [diagnosticInfo, setDiagnosticInfo] = useState<any>(null);
+  const [shouldFocusSearch, setShouldFocusSearch] = useState(false);
+  const [isBatch, setIsBatch] = useState(false);
+  const [batchQuantity, setBatchQuantity] = useState(1);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const successAudioRef = useRef<HTMLAudioElement | null>(null);
+  const uploadPromiseRef = useRef<Promise<string | null> | null>(null);
+
+  // Preload sound
+  useEffect(() => {
+    successAudioRef.current = new Audio('/sounds/success.mp3');
+    successAudioRef.current.preload = 'auto';
+    successAudioRef.current.volume = 0.5;
+  }, []);
+
+  const playSuccessSound = () => {
+    if (successAudioRef.current) {
+      successAudioRef.current.currentTime = 0;
+      successAudioRef.current.play().catch(() => {
+        // Fallback beep if file doesn't exist or play fails
+        try {
+          const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+          const oscillator = audioCtx.createOscillator();
+          const gainNode = audioCtx.createGain();
+          oscillator.connect(gainNode);
+          gainNode.connect(audioCtx.destination);
+          oscillator.type = 'sine';
+          oscillator.frequency.setValueAtTime(880, audioCtx.currentTime);
+          gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
+          gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
+          oscillator.start();
+          oscillator.stop(audioCtx.currentTime + 0.1);
+        } catch (e) {
+          console.warn('Fallback sound failed', e);
+        }
+      });
+    }
+  };
 
   // Focus effect for manual step
   useEffect(() => {
-    if (step === 'manual') {
+    if (step === 'manual' && shouldFocusSearch && !selectedResident) {
       const timer = setTimeout(() => {
         if (searchInputRef.current) {
           searchInputRef.current.focus();
         }
-      }, 400); // Slightly longer delay to ensure UI transition completes on mobile
+      }, 100); 
       return () => clearTimeout(timer);
     }
-  }, [step, isManualUnitSearch]);
+  }, [step, shouldFocusSearch, isManualUnitSearch, selectedResident]);
 
-  const APP_VERSION = "2.2.0-diag";
-  const BUILD_TIME = "2026-04-27 07:25";
+  const APP_VERSION = "2.2.1-flow";
+  const BUILD_TIME = "2026-04-27 17:55";
   const ENVIRONMENT = window.location.hostname.includes('ais-dev') ? 'preview' : 'produção';
 
   // Heurística de gênero para diferenciação visual (lilás para feminino)
@@ -330,17 +367,14 @@ export default function PackageNew({ user }: PackageNewProps) {
   const capturePhoto = async () => {
     if (!videoRef.current || !canvasRef.current || isCameraStabilizing || isCapturing) return;
     
-    // Feedback visual imediato (flash) e tátil (vibração)
+    // Feedback visual imediato (flash)
     setIsCapturing(true);
-    if ('vibrate' in navigator) {
-      try { navigator.vibrate(50); } catch (e) {}
-    }
     
     const video = videoRef.current;
     const canvas = canvasRef.current;
     
-    // Resolução otimizada para velocidade (máximo 1024px)
-    const MAX_DIMENSION = 1024; 
+    // Resolução otimizada para precisão OCR (máximo 1600px conforme solicitado)
+    const MAX_DIMENSION = 1600; 
     let width = video.videoWidth;
     let height = video.videoHeight;
     
@@ -355,59 +389,57 @@ export default function PackageNew({ user }: PackageNewProps) {
     
     const context = canvas.getContext('2d', { alpha: false });
     if (context) {
-      // Captura imediata (sem filtros para velocidade máxima)
+      // Captura de alta fidelidade para armazenamento
+      context.imageSmoothingEnabled = true;
+      context.imageSmoothingQuality = 'high';
       context.drawImage(video, 0, 0, width, height);
+      const base64 = canvas.toDataURL('image/jpeg', 0.90);
+
+      // Captura de baixa resolução para OCR (Alta velocidade e foco no essencial)
+      const OCR_MAX = 600; 
+      let ocrWidth = video.videoWidth;
+      let ocrHeight = video.videoHeight;
+      const ocrRatio = Math.min(OCR_MAX / ocrWidth, OCR_MAX / ocrHeight);
+      ocrWidth = Math.round(ocrWidth * ocrRatio);
+      ocrHeight = Math.round(ocrHeight * ocrRatio);
+
+      const ocrCanvas = document.createElement('canvas');
+      ocrCanvas.width = ocrWidth;
+      ocrCanvas.height = ocrHeight;
+      const ocrCtx = ocrCanvas.getContext('2d', { alpha: false });
+      let ocrBase64 = base64; // Fallback
+      if (ocrCtx) {
+        ocrCtx.imageSmoothingEnabled = true;
+        ocrCtx.imageSmoothingQuality = 'medium';
+        ocrCtx.drawImage(video, 0, 0, ocrWidth, ocrHeight);
+        ocrBase64 = ocrCanvas.toDataURL('image/jpeg', 0.70);
+      }
       
-      // Compressão rápida (0.75)
-      const base64 = canvas.toDataURL('image/jpeg', 0.75);
-      
-      // Mudar fluxo IMEDIATAMENTE (antes de cálculos pesados)
-      setStep('manual');
+      // Mudar fluxo IMEDIATAMENTE para manual
+      setStep('manual'); 
       stopCamera();
       
       // Salva no estado
       setPhotoUrl(base64);
-      setDebugOcrImage(base64); 
-      setIsOcrLoading(true);
-      setStatusMessage('Processando...');
+      setDebugOcrImage(ocrBase64); 
+      setIsOcrLoading(false); // No OCR loading spinner
+      setStatusMessage('Entrada Manual');
+      setShouldFocusSearch(true); 
+      setIsManualUnitSearch(true); 
 
-      // Processa OCR/Upload em background
-      setTimeout(() => {
-        processImageWithWait(base64).finally(() => {
-          setIsCapturing(false);
-        });
-      }, 50);
+      // Inicia o fluxo de processamento (Apenas Upload em background, OCR FICA DESATIVADO mas mantido no código)
+      processImageFlow(base64, ocrBase64, false); // Mudei para aceitar skipOcr
     } else {
       setIsCapturing(false);
     }
   };
 
-  const processingRef = useRef(false);
-
-  const processImageWithWait = async (base64: string) => {
-    if (processingRef.current) return;
-    processingRef.current = true;
-    setIsOcrLoading(true);
-    
-    // Limpa estados de detecção anterior para evitar confusão/artefatos, especialmente em retentativas
-    setRecipientName('');
-    setUnitNumber('');
-    setMatchingResidents([]);
-    setSelectedResident(null);
-    setOcrConfidence(null);
-    setIsAiSearch(false);
-    setIsManualUnitSearch(true);
-
+  const processImageFlow = async (base64: string, ocrBase64: string, runOcr: boolean = true) => {
     try {
-      setStatusMessage('Processando...');
-      let finalBase64 = base64;
-
-      // 1. Inicia upload em paralelo
-      const uploadPromise = (async () => {
+      // 1. Inicia upload em background (Prova Jurídica)
+      uploadPromiseRef.current = (async () => {
         try {
-          const storageBase64 = base64;
-
-          const res = await fetch(storageBase64);
+          const res = await fetch(base64);
           const blob = await res.blob();
           const file = new File([blob], "package_photo.jpg", { type: "image/jpeg" });
           const fileName = `${Date.now()}_${Math.random().toString(36).substring(7)}.jpg`;
@@ -422,144 +454,167 @@ export default function PackageNew({ user }: PackageNewProps) {
               .from('packages')
               .getPublicUrl(filePath);
             setPhotoUrl(publicUrl);
+            return publicUrl;
           }
-        } catch (storageErr) {
-          console.error('Erro no upload paralelo:', storageErr);
+          return null;
+        } catch (e) {
+          console.error('Erro no upload de prova:', e);
+          return null;
         }
       })();
 
-      // 2. Leitura inteligente com Gemini
+      // Se não for para rodar OCR, apenas encerramos aqui (o step já foi mudado para manual)
+      if (!runOcr) {
+        setIsOcrLoading(false);
+        setIsCapturing(false);
+        return;
+      }
+
+      // 2. Executa OCR
+      const result = await processImageWithWait(base64, ocrBase64);
+
+      if (result && (result.casa || result.inicial || result.destinatario)) {
+        await handleOCRResult(result);
+        setStep('manual'); // Garantir que está no passo manual para mostrar os campos
+      } else {
+        fallbackToManual();
+      }
+    } catch (error) {
+      console.error('Erro no fluxo de imagem:', error);
+      fallbackToManual();
+    } finally {
+      setIsOcrLoading(false);
+      setIsCapturing(false);
+    }
+  };
+
+  const fallbackToManual = () => {
+    // Pequeno atraso para o usuário perceber que a IA não identificou automaticamente
+    setTimeout(() => {
+      setOcrConfidence('baixa');
+      setShouldFocusSearch(true);
+      setStatusMessage('Entrada Manual');
+      setStep('manual');
+      setIsOcrLoading(false);
+      toast('Identifique o morador manualmente', { icon: '⌨️' });
+    }, 600);
+  };
+
+  const handleOCRResult = async (parsedData: any) => {
+    const unitToUse = parsedData.casa || '';
+    const initialToUse = parsedData.inicial || '';
+    const nameToUse = parsedData.destinatario || '';
+    const confidence = parsedData.confianca as 'alta' | 'media' | 'baixa';
+
+    setDiagnosticInfo((prev: any) => ({
+      ...prev,
+      ocrStatus: 'SUCESSO',
+      detectedName: nameToUse,
+      detectedHouse: unitToUse,
+      detectedInitial: initialToUse,
+      confidence: confidence,
+      ocrTimestamp: new Date().toLocaleTimeString()
+    }));
+    
+    setOcrConfidence(confidence);
+
+    if (unitToUse && !unitNumber) setUnitNumber(unitToUse);
+    if (nameToUse && !recipientName) setRecipientName(nameToUse);
+    
+    if ((unitToUse || initialToUse || nameToUse) && user?.condominium_id) {
+      if (!searchTerm) {
+        setStatusMessage('Buscando Morador...');
+      }
+      
+      const matches = await findMatchingResidents(
+        user.condominium_id,
+        unitToUse,
+        nameToUse,
+        undefined,
+        initialToUse
+      );
+ 
+      if (matches.length > 0) {
+        setMatchingResidents(matches.slice(0, 10));
+        setIsAiSearch(true);
+        const term = unitToUse || nameToUse || initialToUse;
+        
+        // SÓ ATUALIZA o campo de busca se o usuário ainda não tiver digitado nada
+        if (!searchTerm) {
+          setSearchTerm(term);
+          setIsManualUnitSearch(!!unitToUse);
+        }
+      } else if (unitToUse) {
+        if (!searchTerm) {
+          setSearchTerm(unitToUse);
+          setIsManualUnitSearch(true);
+        }
+        const normalizedUnitSearch = normalizeUnit(unitToUse);
+        const houseMatches = allResidents
+          .filter(r => normalizeUnit(r.unidade || '').includes(normalizedUnitSearch))
+          .map(r => ({ resident: r, score: 100 }));
+        
+        if (houseMatches.length > 0) {
+          setMatchingResidents(houseMatches);
+          setOcrConfidence('media');
+        }
+      } else if (!searchTerm) {
+        fallbackToManual();
+      }
+    } else {
+      fallbackToManual();
+    }
+  };
+
+  const processingRef = useRef(false);
+
+  const processImageWithWait = async (base64: string, ocrBase64?: string) => {
+    try {
+      const startTime = Date.now();
+      const finalOcrBase64 = ocrBase64 || base64;
+      setStatusMessage('LENDO ETIQUETA...'); // Mensagem mais clara
+      
+      // Limpa estados de detecção anterior
+      setRecipientName('');
+      setUnitNumber('');
+      setMatchingResidents([]);
+      setSelectedResident(null);
+      setOcrConfidence(null);
+      setIsAiSearch(false);
+      setIsManualUnitSearch(true);
+
       const ocrPromise = (async () => {
         try {
-          setStatusMessage('Analisando...');
-          setDiagnosticInfo((prev: any) => ({ ...prev, ocrStatus: 'PROCESSANDO...', ocrError: null }));
-          const parsedData = await extractBasicText(finalBase64);
-          
-          if (parsedData) {
-            setDiagnosticInfo((prev: any) => ({
-              ...prev,
-              ocrStatus: 'SUCESSO',
-              rawOcrText: parsedData.texto_bruto,
-              detectedName: parsedData.nome_detectado,
-              detectedHouse: parsedData.casa_detectada,
-              confidence: parsedData.confianca,
-              ocrTimestamp: new Date().toLocaleTimeString()
-            }));
-
-            const nameToUse = parsedData.nome_detectado;
-            const unitToUse = parsedData.casa_detectada;
-            const confidence = parsedData.confianca as 'alta' | 'media' | 'baixa';
-            
-            setOcrConfidence(confidence);
-
-            // Só preencher o que é essencial para busca
-            if (nameToUse) setRecipientName(nameToUse);
-            if (unitToUse) setUnitNumber(unitToUse);
-            
-            if ((nameToUse || unitToUse) && user?.condominium_id) {
-              const matches = await findMatchingResidents(
-                user.condominium_id,
-                unitToUse || '',
-                nameToUse || ''
-              );
-
-              if (matches.length > 0) {
-                const topMatch = matches[0];
-                setMatchingResidents(matches.slice(0, 5));
-                setIsAiSearch(true);
-                
-                // Se tivermos alta confiança na extração e um match razoável
-                if (topMatch.score >= 180 && confidence === 'alta') {
-                  handleSelectResident(topMatch.resident);
-                } else {
-                  // Se for sugestão, preenchemos o termo de busca para mostrar os cards
-                  setSearchTerm(nameToUse || unitToUse || '');
-                  
-                  // Se detectou nome mas não detectou casa, muda para busca por nome para mostrar os moradores sugeridos
-                  if (nameToUse && !unitToUse) {
-                    setIsManualUnitSearch(false);
-                  }
-                  
-                  // Se encontrou algo, garantimos que não fique em 'baixa' total
-                  if (confidence === 'baixa') setOcrConfidence('media');
-                }
-              } else if (unitToUse) {
-                // Se identificou a casa mas não achou morador exato, mostra moradores daquela casa
-                setSearchTerm(unitToUse);
-                setIsManualUnitSearch(true);
-                
-                // Buscar moradores desta unidade manualmente para mostrar nos cards
-                const normalizedUnitSearch = unitToUse.toLowerCase().replace(/[^0-9]/g, '');
-                const houseMatches = allResidents
-                  .filter(r => (r.unidade || '').toLowerCase().includes(normalizedUnitSearch))
-                  .map(r => ({ resident: r, score: 100 }));
-                
-                if (houseMatches.length > 0) {
-                  setMatchingResidents(houseMatches);
-                  // Se encontrou moradores na casa, não é confiança 'baixa'
-                  setOcrConfidence('media');
-                }
-              }
-            } else if (confidence === 'baixa') {
-              // Se não achou nada e a confiança é baixa, forçamos o estado de baixa
-              setOcrConfidence('baixa');
-            }
-          } else {
-            setOcrConfidence('baixa');
-          }
+          const parsedData = await extractBasicText(finalOcrBase64);
+          return parsedData;
         } catch (err: any) {
-          console.error("Erro no OCR promise:", err);
-          setDiagnosticInfo((prev: any) => ({
-            ...prev,
-            ocrStatus: 'ERRO',
-            ocrError: err?.message || String(err),
-            ocrTimestamp: new Date().toLocaleTimeString()
-          }));
-          setOcrConfidence('baixa');
+          console.error("Erro no OCR:", err);
+          return null;
         }
-        return true;
       })();
 
-      // Aguarda OCR ou 20 segundos para não desistir antes da IA terminar
-      const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve('timeout'), 20000));
+      const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve('timeout'), 15000));
       
       const raceResult = await Promise.race([
-        ocrPromise.then(() => 'success'),
+        ocrPromise,
         timeoutPromise
       ]);
 
-      if (raceResult === 'timeout') {
-        console.warn("OCR timeout atingido (20s)");
-        setDiagnosticInfo((prev: any) => ({
-          ...prev,
-          ocrStatus: 'TIMEOUT',
-          ocrError: 'A IA demorou mais de 20s para responder. Verifique sua conexão ou tente novamente.',
-          ocrTimestamp: new Date().toLocaleTimeString()
-        }));
-        
-        // Se deu timeout, forçamos o estado de baixa para liberar o preenchimento manual após o tempo limite
-        if (!ocrConfidence) {
-          setOcrConfidence('baixa');
-        }
+      // Feedback visual mínimo de 1.8 segundos para dar tempo do usuário ver a análise
+      const elapsedTime = Date.now() - startTime;
+      const minWait = 1800; // 1.8 segundos
+      if (elapsedTime < minWait) {
+        await new Promise(resolve => setTimeout(resolve, minWait - elapsedTime));
       }
 
-      setIsOcrLoading(false);
-      setStep('manual');
-      
-      // Se após o timeout/OCR ainda não tivermos confiança definida, assume baixa se nada foi achado
-      setOcrConfidence(prev => {
-        if (!prev && !recipientName && !unitNumber) return 'baixa';
-        return prev;
-      });
+      if (raceResult === 'timeout') {
+        return null;
+      }
 
-      await uploadPromise;
+      return raceResult;
     } catch (err) {
-      console.warn("[IA APOIO] Erro no processamento:", err);
-      setStep('manual');
-      setIsOcrLoading(false);
-    } finally {
-      processingRef.current = false;
-      setIsOcrLoading(false);
+      console.warn("[IA] Erro:", err);
+      return null;
     }
   };
 
@@ -619,13 +674,6 @@ export default function PackageNew({ user }: PackageNewProps) {
 
       if (matches.length > 0) {
         setMatchingResidents(matches);
-        
-        // Auto-select if extremely high confidence (exact match)
-        const topMatch = matches[0];
-        if (topMatch.score >= 180 && searchTerm.length >= 3 && !isAiSearch) {
-          handleSelectResident(topMatch.resident);
-          // Notificação de sucesso removida conforme solicitado
-        }
       } else {
         setMatchingResidents([]);
       }
@@ -706,6 +754,7 @@ export default function PackageNew({ user }: PackageNewProps) {
       setStep('camera');
       setPhotoUrl('');
       setDebugOcrImage(null);
+      setShouldFocusSearch(false);
     }
     
     setSelectedResident(null);
@@ -716,6 +765,8 @@ export default function PackageNew({ user }: PackageNewProps) {
     setTrackingNumber('');
     setNotes('');
     setSearchTerm('');
+    setIsBatch(false);
+    setBatchQuantity(1);
     // No "next package" mode, we keep the unit search active
     setIsManualUnitSearch(true);
     setMatchingResidents([]);
@@ -737,34 +788,47 @@ export default function PackageNew({ user }: PackageNewProps) {
     // Pequeno delay para garantir que o render do input (autoFocus) não interfira
     setTimeout(() => {
       if (searchInputRef.current) {
-        searchInputRef.current.value = ''; // Limpar explicitamente
+        searchInputRef.current.value = ''; 
         searchInputRef.current.focus();
       }
     }, 150);
   };
 
-  const handleSubmit = async (e?: React.FormEvent, directResident?: Morador, shouldNotify: boolean = false) => {
+  const registrarEncomenda = async (e?: React.FormEvent, directResident?: Morador, shouldNotify: boolean = false) => {
     if (e) e.preventDefault();
     
     if (isSaving) return;
-
+    
     const targetResident = directResident || selectedResident;
     
     if (!targetResident || !user) {
-      toast.error('Selecione um morador para continuar');
-      setLoading(false);
-      setIsSaving(false);
+      toast.error('Selecione um morador para salvar');
       return;
     }
 
-    toast.loading('Registrando encomenda...', { id: 'saving-package' });
     setLoading(true);
     setIsSaving(true);
+    setStatusMessage('SALVANDO...');
+    const toastId = toast.loading('Salvando encomenda...', { id: 'saving-package' });
+
     try {
-      // Obter o usuário logado para capturar o ID se disponível (opcional)
+      // 0. Garantir que a foto foi enviada (Prova Jurídica)
+      let finalPhotoUrl = photoUrl;
+      console.log("[SALVAMENTO] Iniciando com foto:", finalPhotoUrl?.substring(0, 50));
+      
+      if (finalPhotoUrl.startsWith('data:') && uploadPromiseRef.current) {
+        setStatusMessage('FINALIZANDO FOTO...');
+        const uploadedUrl = await uploadPromiseRef.current;
+        if (uploadedUrl) {
+          finalPhotoUrl = uploadedUrl;
+          setPhotoUrl(uploadedUrl);
+        }
+      }
+
+      // 1. Obter o usuário logado para capturar o ID se disponível
       const { data: { user: authUser } } = await supabase.auth.getUser();
 
-      // 0. Verificar se o morador já tem encomendas pendentes para agrupar
+      // 2. Verificar agrupamento (encomendas pendentes do mesmo morador)
       const { data: existingPackages } = await supabase
         .from('packages')
         .select('id, pickup_code, pickup_token')
@@ -773,8 +837,6 @@ export default function PackageNew({ user }: PackageNewProps) {
         .order('received_at', { ascending: false });
 
       const hasExisting = existingPackages && existingPackages.length > 0;
-      
-      // Tenta encontrar um token e código já existentes no grupo
       const existingToken = existingPackages?.find(p => p.pickup_token)?.pickup_token;
       const existingCode = existingPackages?.find(p => p.pickup_code)?.pickup_code;
 
@@ -782,7 +844,7 @@ export default function PackageNew({ user }: PackageNewProps) {
       const finalPickupToken = existingToken || (Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15));
       const totalPackages = (existingPackages?.length || 0) + 1;
 
-      // Se houver encomendas existentes, garantir que todas tenham o mesmo token e código
+      // Se houver encomendas existentes, sincroniza códigos
       if (hasExisting) {
         await supabase
           .from('packages')
@@ -794,117 +856,104 @@ export default function PackageNew({ user }: PackageNewProps) {
           .eq('status', 'received');
       }
 
-      // 1. Preparar a notificação
-      const directMessage = prepareWhatsAppNotification(
-        targetResident,
-        condoName,
-        finalPickupCode,
-        carrier,
-        finalPickupToken,
-        totalPackages,
-        'disponivel',
-        undefined,
-        undefined,
-        photoUrl
-      ) || `Olá, ${targetResident.nome}! Sua encomenda chegou na portaria. Código: ${finalPickupCode}`;
+      // 3. Preparar mensagem
+      const isBatchNote = isBatch || batchQuantity > 1;
+      const batchLabel = isBatchNote ? ` (Lote de ${batchQuantity} encomendas)` : '';
+      const finalNotes = isBatchNote ? (notes ? `${notes}, Lote de ${batchQuantity} encomendas` : `Lote de ${batchQuantity} encomendas`) : notes;
 
-    // 2. Salvar a encomenda no Supabase
+      let directMessage = `Olá, ${targetResident.nome}! Sua encomenda chegou na portaria de ${condoName}. Código: ${finalPickupCode}${batchLabel}`;
+      try {
+        const prepared = prepareWhatsAppNotification(
+          targetResident,
+          condoName,
+          finalPickupCode,
+          carrier,
+          finalPickupToken,
+          totalPackages,
+          'disponivel',
+          undefined,
+          undefined,
+          finalPhotoUrl
+        );
+        if (prepared) directMessage = prepared;
+      } catch (e) {
+        console.error("Erro ao preparar mensagem:", e);
+      }
+
+      // 4. Montar objeto da encomenda (Campos mínimos obrigatórios e estáveis)
       const packageData = {
         condominium_id: user.condominium_id,
         recipient_id: targetResident.id,
-        
         unit_number: unitNumber || targetResident.unidade || '',
-        unit_type: unitType || targetResident.unit_type || '',
-        
-        block: targetResident.block || targetResident.bloco,
-        tower: targetResident.tower || targetResident.lote,
-        complement: targetResident.observacoes,
         carrier,
         tracking_code: trackingNumber,
-        notes,
-        photo_url: photoUrl,
+        notes: finalNotes,
+        photo_url: finalPhotoUrl,
         received_by: user.id,
         received_at: new Date().toISOString(),
-        porter_name: getCurrentPorter(), // Nome legível para auditoria rápida
-        recebido_por: getCurrentPorter(), // Novo campo solicitado
-        created_by: user.id,
-        ...(authUser?.id ? { registered_by: authUser.id } : {}),
         pickup_code: finalPickupCode,
         pickup_token: finalPickupToken,
-        pickup_qr_code: 'active',
-        qr_code_generated_at: new Date().toISOString(),
-        status: 'received',
-        whatsapp_status: targetResident.telefone ? 'pendente' : 'no_recipient',
+        status: 'received', // Valor aceito pelo banco conforme requisito
+        whatsapp_notified: false,
+        whatsapp_sent: false,
+        whatsapp_status: targetResident.telefone ? 'pending' : 'no_recipient',
         whatsapp_message: directMessage
       };
+
+      console.log("[SALVAMENTO] Objeto final:", packageData);
 
       const { data: newPackage, error: insertError } = await supabase
         .from('packages')
         .insert([packageData])
-        .select()
+        .select('*')
         .single();
 
       if (insertError) {
-        console.error('Erro ao inserir encomenda:', insertError);
-        toast.error('Erro ao salvar encomenda: ' + (insertError.message || 'Erro desconhecido'), { id: 'saving-package' });
-        setLoading(false);
-        setIsSaving(false);
-        return;
+        console.error("[ERRO_CRITICO] Falha ao inserir no banco:", insertError);
+        throw new Error(insertError.message);
       }
 
       if (!newPackage) {
-        toast.error('Erro ao recuperar encomenda salva', { id: 'saving-package' });
-        setLoading(false);
-        setIsSaving(false);
-        return;
+        throw new Error('Erro ao confirmar salvamento da encomenda.');
       }
 
-      // 3. Notificação via WhatsApp (Apenas se solicitado e morador tiver telefone)
+      console.log("[SUCESSO] Encomenda salva com ID:", newPackage.id);
+
+      // 5. Notificação via WhatsApp Z-API (Se configurado)
       if (shouldNotify && targetResident.telefone) {
-        // Verifica se a API está configurada e ativa
         const apiActive = condoSettings?.whatsapp_mode === 'api_automatica' && 
                         condoSettings?.api_url && 
                         condoSettings?.api_token;
 
         if (apiActive) {
           try {
-            const result = await sendWhatsAppMessage(targetResident.telefone, directMessage, user.condominium_id, {
+            await sendWhatsAppMessage(targetResident.telefone, directMessage, user.condominium_id, {
               api_url: condoSettings?.api_url,
               api_token: condoSettings?.api_token,
               instance_id: condoSettings?.instance_id,
               whatsapp_provider: condoSettings?.whatsapp_provider,
-              photo_url: photoUrl
+              photo_url: finalPhotoUrl
             });
             
-            if (result.status_envio === 'sucesso') {
-              const now = new Date().toISOString();
-              await supabase
-                .from('packages')
-                .update({ 
-                  whatsapp_status: 'enviado', 
-                  last_notification_at: now,
-                  whatsapp_sent_at: now,
-                  notification_mode: 'api'
-                })
-                .eq('id', newPackage.id);
-              
-              toast.success('Notificação enviada via WhatsApp', { icon: '📱' });
-            } else {
-              console.warn('Falha no envio da Z-API:', result.error);
-            }
+            await supabase
+              .from('packages')
+              .update({ 
+                whatsapp_status: 'enviado', 
+                whatsapp_notified: true,
+                whatsapp_sent: true,
+                notified_at: new Date().toISOString(),
+                last_notification_at: new Date().toISOString(),
+                whatsapp_sent_at: new Date().toISOString(),
+                notification_mode: 'api'
+              })
+              .eq('id', newPackage.id);
           } catch (err) {
             console.error('Erro no envio automático:', err);
           }
         }
-
-        // WhatsApp MANUAL - REMOVIDO window.open AUTOMÁTICO para não interromper o fluxo do porteiro
-        // O porteiro poderá notificar todos de uma vez depois no painel da portaria
-        if (condoSettings?.whatsapp_mode === 'manual_assistido' || !apiActive) {
-          console.log('Notificação manual pendente - porteiro deve usar "Notificar Todos" no painel.');
-        }
       }
 
-      // Log action
+      // 6. Auditoria
       try {
         await registrarAuditoria({
           condominio_id: user.condominium_id || '',
@@ -915,21 +964,26 @@ export default function PackageNew({ user }: PackageNewProps) {
           acao: 'CREATE',
           tabela_afetada: 'encomendas',
           registro_id: newPackage.id,
-          descricao: `Encomenda cadastrada para ${targetResident.nome} - ${targetResident.unidade}`,
-          metodo: photoUrl ? 'OCR' : 'MANUAL'
+          descricao: `Encomenda registrada para ${targetResident.nome} - ${targetResident.unidade}`,
+          metodo: finalPhotoUrl ? 'FOTO' : 'MANUAL'
         });
       } catch (logErr) {
         console.warn('Erro ao logar ação:', logErr);
       }
 
-      toast.success('Encomenda registrada', { id: 'saving-package' });
-      resetForm(); // Volta para a câmera para a próxima encomenda (Sempre abrir câmera primeiro)
+      // 7. Sucesso e Feedback
+      playSuccessSound();
+      toast.success('Encomenda registrada com sucesso!', { id: toastId, icon: '📦' });
+      
+      // Limpar e voltar para câmera
+      resetForm();
     } catch (error: any) {
-      toast.error('Erro inesperado: ' + error.message, { id: 'saving-package' });
-      setIsSaving(false);
+      console.error('Erro ao registrar encomenda:', error);
+      toast.error('Erro ao salvar: ' + (error.message || 'Verifique sua conexão'), { id: toastId });
     } finally {
       setLoading(false);
       setIsSaving(false);
+      setStatusMessage('');
     }
   };
 
@@ -962,7 +1016,7 @@ export default function PackageNew({ user }: PackageNewProps) {
             <ArrowLeft className="w-6 h-6 text-gray-600" />
           </button>
           <h1 className="text-lg font-semibold text-gray-900 leading-tight text-center">
-            {step === 'manual' ? 'Novo Registro' : 'Capturar Etiqueta'}
+            {step === 'manual' ? 'Novo Registro' : step === 'analyzing' ? 'Analisando Etiqueta' : 'Capturar Etiqueta'}
             <div className="flex items-center justify-center gap-1.5 mt-0.5">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
               <span className={`text-[10px] font-bold uppercase tracking-wider ${getCurrentPorter() === 'Selecione o Porteiro' ? 'text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200' : 'text-emerald-600'}`}>
@@ -979,6 +1033,47 @@ export default function PackageNew({ user }: PackageNewProps) {
 
       <div className="max-w-2xl mx-auto px-4 py-6">
         <AnimatePresence mode="wait">
+          {step === 'analyzing' && (
+            <motion.div
+              key="analyzing"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="flex flex-col items-center justify-center min-h-[60vh] space-y-8"
+            >
+              <div className="relative">
+                <div className="w-32 h-32 border-4 border-indigo-100 rounded-full flex items-center justify-center">
+                  <div className="w-24 h-24 border-4 border-indigo-600 rounded-full border-t-transparent animate-spin" />
+                </div>
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <Sparkles className="w-10 h-10 text-indigo-600 animate-pulse" />
+                </div>
+              </div>
+              
+              <div className="text-center space-y-2">
+                <h2 className="text-2xl font-black text-indigo-900 uppercase tracking-tighter">Lendo Encomenda</h2>
+                <p className="text-gray-500 font-medium animate-pulse">{statusMessage}</p>
+              </div>
+
+              {photoUrl && (
+                <div className="w-48 aspect-square rounded-3xl overflow-hidden border-4 border-white shadow-2xl relative">
+                  <img src={photoUrl} alt="Preview" className="w-full h-full object-cover blur-[2px] opacity-50" />
+                  <div className="absolute inset-0 bg-indigo-600/20 mix-blend-overlay" />
+                  <div className="absolute inset-0 flex items-center justify-center">
+                    <div className="w-full h-1 bg-indigo-500 shadow-[0_0_15px_rgba(79,70,229,0.8)] animate-[scan_2s_ease-in-out_infinite]" />
+                  </div>
+                </div>
+              )}
+              
+              <button 
+                onClick={() => setStep('manual')}
+                className="text-indigo-600 font-bold text-xs uppercase tracking-widest hover:underline"
+              >
+                Pular e digitar manual
+              </button>
+            </motion.div>
+          )}
+
           {step === 'camera' && (
             <motion.div
               key="camera"
@@ -1005,6 +1100,25 @@ export default function PackageNew({ user }: PackageNewProps) {
                         transition={{ duration: 0.1 }}
                         className="absolute inset-0 bg-white z-[100]"
                       />
+                    )}
+                  </AnimatePresence>
+
+                  {/* Feedback "Foto Capturada" */}
+                  <AnimatePresence>
+                    {showCaptureFeedback && (
+                      <motion.div 
+                        initial={{ opacity: 0, scale: 0.8 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0, scale: 1.1 }}
+                        className="absolute inset-0 z-[110] flex items-center justify-center bg-emerald-500/90 backdrop-blur-sm"
+                      >
+                        <div className="flex flex-col items-center gap-3 text-white">
+                          <div className="w-20 h-20 bg-white/20 rounded-full flex items-center justify-center">
+                            <CheckCircle className="w-10 h-10" />
+                          </div>
+                          <p className="text-xl font-black uppercase tracking-widest">Foto capturada ✔</p>
+                        </div>
+                      </motion.div>
                     )}
                   </AnimatePresence>
 
@@ -1036,12 +1150,15 @@ export default function PackageNew({ user }: PackageNewProps) {
                     <button
                       onClick={capturePhoto}
                       disabled={isCameraStabilizing || isOcrLoading}
-                      className={`w-20 h-20 bg-white rounded-full flex items-center justify-center shadow-2xl active:scale-90 transition-all ${isCameraStabilizing || isOcrLoading ? 'opacity-50 scale-90' : 'opacity-100'}`}
+                      className={`w-28 h-28 bg-white rounded-full flex flex-col items-center justify-center shadow-2xl active:scale-95 transition-all border-8 border-gray-100 ${isCameraStabilizing || isOcrLoading ? 'opacity-50' : 'opacity-100'}`}
                     >
                       {isCameraStabilizing || isOcrLoading ? (
-                         <div className="w-12 h-12 border-4 border-gray-100 rounded-full border-t-indigo-600 animate-spin" />
+                         <div className="w-10 h-10 border-4 border-gray-100 rounded-full border-t-indigo-600 animate-spin" />
                       ) : (
-                         <div className="w-16 h-16 border-4 border-gray-900 rounded-full" />
+                         <>
+                           <Camera className="w-8 h-8 text-gray-900 mb-1" />
+                           <span className="text-[10px] font-black text-gray-900 uppercase tracking-tighter">TIRAR FOTO</span>
+                         </>
                       )}
                     </button>
                   </div>
@@ -1140,96 +1257,36 @@ export default function PackageNew({ user }: PackageNewProps) {
 
                   {!selectedResident ? (
                     <div className="space-y-4">
-                      {isOcrLoading ? (
-                        <div className="py-12 flex flex-col items-center justify-center text-center space-y-4">
-                          <div className="relative">
-                            <div className="w-16 h-16 border-4 border-indigo-100 rounded-full" />
-                            <div className="w-16 h-16 border-4 border-indigo-600 border-t-transparent animate-spin absolute inset-0 rounded-full" />
-                            <div className="absolute inset-0 flex items-center justify-center">
-                              <Sparkles className="w-6 h-6 text-indigo-600 animate-pulse" />
-                            </div>
-                          </div>
-                          <div className="max-w-[200px]">
-                            <p className="text-gray-900 font-bold animate-pulse">{statusMessage}</p>
-                            <p className="text-gray-500 text-xs mt-1">Aguardando resposta da inteligência artificial...</p>
-                          </div>
+                      {isOcrLoading && (
+                        <div className="flex items-center gap-2 mb-2 animate-pulse">
+                          <Loader2 className="w-4 h-4 text-indigo-600 animate-spin" />
+                          <span className="text-[10px] font-bold text-indigo-600 uppercase tracking-widest">{statusMessage}</span>
                         </div>
-                      ) : (ocrConfidence === 'baixa' && matchingResidents.length === 0) ? (
-                        <div className="py-2 space-y-4">
-                          <div className="bg-amber-50 border border-amber-100 rounded-2xl p-6 text-center">
-                            <div className="w-12 h-12 bg-amber-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                              <AlertCircle className="w-6 h-6 text-amber-600" />
-                            </div>
-                            <h3 className="text-amber-900 font-bold mb-1">Dados não identificados</h3>
-                            <p className="text-amber-700 text-sm mb-6">A IA não conseguiu ler com clareza. Escolha como prosseguir:</p>
-                            
-                            <div className="grid grid-cols-1 gap-3">
-                              <button
-                                type="button"
-                                disabled={isOcrLoading}
-                                onClick={async () => {
-                                  if (photoUrl) {
-                                    setIsOcrLoading(true);
-                                    setOcrConfidence(null);
-                                    setStatusMessage('Preparando imagem...');
-                                    // Delay de segurança antes de reprocessar a mesma foto final
-                                    await new Promise(resolve => setTimeout(resolve, 500));
-                                    processImageWithWait(photoUrl);
-                                  }
-                                }}
-                                className="flex items-center justify-center gap-3 w-full py-4 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 transition-all shadow-md shadow-indigo-100 disabled:opacity-50"
-                              >
-                                {isOcrLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Sparkles className="w-5 h-5" />}
-                                {isOcrLoading ? 'Lendo etiqueta...' : 'Tentar ler foto novamente'}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => resetForm()}
-                                className="flex items-center justify-center gap-3 w-full py-4 bg-emerald-600 text-white rounded-xl font-bold hover:bg-emerald-700 transition-all shadow-md shadow-emerald-100"
-                              >
-                                <Camera className="w-5 h-5" />
-                                Tirar nova foto
-                              </button>
+                      )}
 
-                              {/* Debug de Imagem OCR (Somente se houver imagem de debug) */}
-                              {debugOcrImage && (
-                                <div className="mt-4 p-3 bg-zinc-50 rounded-xl border border-dashed border-zinc-200">
-                                  <p className="text-[10px] font-bold text-zinc-400 uppercase mb-2">DEBUG: Imagem enviada para IA</p>
-                                  <div className="relative aspect-video rounded-lg overflow-hidden bg-black">
-                                    <img src={debugOcrImage} alt="Debug OCR" className="w-full h-full object-contain" />
-                                  </div>
-                                </div>
-                              )}
-
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setIsManualUnitSearch(true);
-                                  setSearchTerm('');
-                                  setOcrConfidence(null);
-                                }}
-                                className="flex items-center justify-center gap-3 w-full py-4 bg-white text-emerald-700 rounded-xl font-bold hover:bg-emerald-50 transition-all border-2 border-emerald-100"
-                              >
-                                <Hash className="w-5 h-5 text-emerald-500" />
-                                Registrar por nº da casa
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setIsManualUnitSearch(false);
-                                  setSearchTerm('');
-                                  setOcrConfidence(null);
-                                }}
-                                className="flex items-center justify-center gap-3 w-full py-4 bg-white text-indigo-700 rounded-xl font-bold hover:bg-indigo-50 transition-all border-2 border-indigo-100"
-                              >
-                                <Search className="w-5 h-5 text-indigo-500" />
-                                Buscar por nome
-                              </button>
+                      {/* Bloco de erro discreto se a IA falhou e não temos sugestões */}
+                          {ocrConfidence === 'baixa' && matchingResidents.length === 0 && (
+                            <div className="bg-zinc-50 border border-zinc-200 rounded-2xl p-4 mb-6 flex items-center gap-4 animate-in fade-in slide-in-from-top-4">
+                              <div className="w-10 h-10 bg-zinc-200 rounded-full flex items-center justify-center shrink-0">
+                                <Info className="w-5 h-5 text-zinc-500" />
+                              </div>
+                              <div className="flex-1">
+                                <h3 className="text-zinc-900 font-bold text-sm">Não foi possível identificar automaticamente</h3>
+                                <p className="text-zinc-500 text-[11px]">Digite o número da casa abaixo para continuar.</p>
+                              </div>
+                              <div className="flex gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => resetForm()}
+                                  className="p-2 border border-zinc-200 text-zinc-600 rounded-lg hover:bg-zinc-100 transition-colors"
+                                  title="Tirar nova foto"
+                                >
+                                  <Camera className="w-4 h-4" />
+                                </button>
+                              </div>
                             </div>
-                          </div>
-                        </div>
-                      ) : (
-                        <>
+                          )}
+
                           {ocrConfidence === 'baixa' && matchingResidents.length > 0 && (
                             <div className="bg-amber-50 border border-amber-100 rounded-2xl p-4 mb-4 flex items-center gap-3 animate-in fade-in slide-in-from-top-2">
                               <AlertCircle className="w-5 h-5 text-amber-600 shrink-0" />
@@ -1269,16 +1326,37 @@ export default function PackageNew({ user }: PackageNewProps) {
                           <User className="w-4 h-4" />
                           Por Nome
                         </button>
-                        
-                        {/* Botão OCR Secundário */}
-                        <button
-                          type="button"
-                          onClick={() => setStep('camera')}
-                          className="p-3.5 bg-white border border-gray-200 rounded-xl text-indigo-600 hover:bg-indigo-50 transition-all shadow-sm"
-                          title="Usar Câmera/IA"
-                        >
-                          <Camera className="w-5 h-5" />
-                        </button>
+                      </div>
+
+                      {/* Batch Registration Selector */}
+                      <div className="bg-indigo-50 border border-indigo-100 rounded-2xl p-4 mb-4 flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <Truck className="w-5 h-5 text-indigo-600" />
+                          <div>
+                            <p className="text-xs font-bold text-indigo-900 uppercase tracking-tight">Registro em Lote</p>
+                            <p className="text-[10px] text-indigo-600">Várias encomendas juntas</p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <button
+                            type="button"
+                            onClick={() => setBatchQuantity(Math.max(1, batchQuantity - 1))}
+                            className="w-10 h-10 bg-white border border-indigo-200 rounded-xl flex items-center justify-center text-indigo-600 font-bold active:scale-90"
+                          >
+                            -
+                          </button>
+                          <span className="text-xl font-black text-indigo-900 w-6 text-center">{batchQuantity}</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setBatchQuantity(batchQuantity + 1);
+                              setIsBatch(true);
+                            }}
+                            className="w-10 h-10 bg-white border border-indigo-200 rounded-xl flex items-center justify-center text-indigo-600 font-bold active:scale-90"
+                          >
+                            +
+                          </button>
+                        </div>
                       </div>
 
                       <div className="relative mb-6">
@@ -1336,10 +1414,9 @@ export default function PackageNew({ user }: PackageNewProps) {
                                 key={resident.id}
                                 type="button"
                                 onClick={() => {
-                                  // Seleciona e tenta salvar imediatamente se desejar fluxo ultra rápido
+                                  // Seleciona e salva automaticamente (com notificação desativada conforme pedido)
                                   handleSelectResident(resident);
-                                  // Se tivermos as informações básicas, podemos salvar direto
-                                  handleSubmit(undefined, resident, true);
+                                  registrarEncomenda(undefined, resident, false);
                                 }}
                                 className={`w-full relative flex flex-col p-4 rounded-2xl transition-all border-2 text-left outline-none hover:shadow-lg active:scale-[0.98] cursor-pointer touch-manipulation group ${
                                   isBest 
@@ -1442,15 +1519,13 @@ export default function PackageNew({ user }: PackageNewProps) {
                           </div>
                         </div>
                       )}
-                        </>
-                      )}
                     </div>
                   ) : (
                     <div className="space-y-5">
                       {/* Card do Morador Selecionado (Clickable to save) */}
                       <button
                         type="button"
-                        onClick={() => handleSubmit(undefined, undefined, true)}
+                        onClick={() => registrarEncomenda(undefined, undefined, false)}
                         disabled={loading || isOcrLoading}
                         className={`w-full px-4 py-5 rounded-2xl border-2 flex items-center justify-between shadow-sm transition-all active:scale-[0.97] text-left group ${
                           isFemale(selectedResident.nome) 
@@ -1575,7 +1650,7 @@ export default function PackageNew({ user }: PackageNewProps) {
                       <button
                         type="button"
                         disabled={loading || isOcrLoading}
-                        onClick={() => handleSubmit(undefined, undefined, true)}
+                        onClick={() => registrarEncomenda(undefined, undefined, false)}
                         className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-bold flex items-center justify-center gap-2 hover:bg-indigo-700 shadow-lg shadow-indigo-100 transition-all disabled:opacity-50 active:scale-[0.98]"
                       >
                         {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Save className="w-5 h-5" />}
@@ -1684,6 +1759,12 @@ export default function PackageNew({ user }: PackageNewProps) {
                         <p className="text-white/40 text-[8px] uppercase font-bold mb-1">Casa Identificada</p>
                         <p className="text-xs text-yellow-300 font-bold bg-yellow-400/10 p-2 rounded-lg border border-yellow-400/20">
                           {diagnosticInfo.detectedHouse || 'vazio'}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-white/40 text-[8px] uppercase font-bold mb-1">Inicial Morador</p>
+                        <p className="text-xs text-yellow-300 font-bold bg-yellow-400/10 p-2 rounded-lg border border-yellow-400/20">
+                          {diagnosticInfo.detectedInitial || 'vazio'}
                         </p>
                       </div>
                     </div>

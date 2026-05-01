@@ -29,9 +29,9 @@ async function callWithRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T
 }
 
 export async function getRawTextFromImage(base64Image: string): Promise<string | null> {
-  const model = "gemini-3.1-flash-lite-preview";
+  const model = "gemini-3-flash-preview";
   
-  const prompt = "Identifique e extraia o NOME DO DESTINATÁRIO, a UNIDADE (CASA/APTO), TRANSPORTADORA e CÓDIGO DE RASTREIO desta etiqueta. Dê atenção ESPECIAL a anotações MANUAIS grandes (ex: 'C 123', 'Ap 101'). Se houver anotação manual da unidade, ela tem prioridade. Retorne as informações de forma clara.";
+  const prompt = "Analise esta imagem de etiqueta de encomenda. IGNORE códigos de barras, QR codes e textos muito pequenos. PRIORIZE: 1. Números grandes escritos à mão (geralmente o número da casa). 2. Nome do destinatário em destaque. 3. Unidade/Casa. Procure por anotações manuais em destaque, elas são a prioridade absoluta. Retorne o texto estruturado.";
 
   try {
     const response = await callWithRetry(() => ai.models.generateContent({
@@ -50,7 +50,6 @@ export async function getRawTextFromImage(base64Image: string): Promise<string |
         }
       ],
       config: {
-        thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
         temperature: 0,
         maxOutputTokens: 400,
       },
@@ -64,26 +63,23 @@ export async function getRawTextFromImage(base64Image: string): Promise<string |
 }
 
 export async function extractBasicText(base64Image: string) {
-  const model = "gemini-3.1-flash-lite-preview";
+  const model = "gemini-3-flash-preview";
   
-  const prompt = `Analise a etiqueta de encomenda nesta imagem e extraia as informações seguindo estas etapas:
+  const prompt = `Analise esta etiqueta ou marcação manual. 
 
-1. TEXTO BRUTO: Extraia TODO o texto visível na imagem de forma literal.
-2. DESTINATÁRIO: Identifique o nome do destinatário. 
-   - DICA: Geralmente está próximo à palavra "DESTINATÁRIO", "Destinatário" ou "NOME".
-3. UNIDADE/CASA: Identifique o número da casa ou unidade.
-   - Procure por termos como "Casa", "C.", "UN", "Unidade", "Lote" seguidos de um número.
-   - Exemplo: "Casa 241", "C241", "C-241".
+REGRAS CRÍTICAS:
+1. FOCO NO NÚMERO DA CASA: Procure por números GRANDES e isolados.
+2. IGNORE: Códigos de barras, endereços da transportadora, textos minúsculos de termos e condições.
+3. MARCAÇÃO MANUAL: Se houver algo escrito à caneta/pincel, use isso como verdade absoluta.
 
-Regras de Saída:
-- Se encontrar qualquer texto, não retorne erro.
-- Se identificar nome ou casa, retorne-os nos campos correspondentes.
+MODO A (Transportadora): Extraia destinatário e número da casa.
+MODO B (Manual): Extraia o número GRANDE (casa) e inicial isolada.
 
-Retorne APENAS o JSON conforme o esquema:
+Retorne APENAS o JSON:
 {
-  "texto_bruto": "todo o texto extraído da imagem",
-  "nome_detectado": "nome identificado",
-  "casa_detectada": "número da casa",
+  "casa": "número identificado ou vazio",
+  "inicial": "letra maiúscula identificada ou vazio",
+  "destinatario": "nome completo identificado ou vazio",
   "confianca": "alta | media | baixa"
 }`;
 
@@ -104,17 +100,18 @@ Retorne APENAS o JSON conforme o esquema:
         }
       ],
       config: {
-        thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
+        temperature: 0,
+        maxOutputTokens: 150,
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.OBJECT,
           properties: {
-            texto_bruto: { type: Type.STRING, description: "Todo o texto extraído da imagem" },
-            nome_detectado: { type: Type.STRING, description: "Nome do destinatário identificado" },
-            casa_detectada: { type: Type.STRING, description: "Número da casa ou unidade identificado" },
-            confianca: { type: Type.STRING, enum: ["alta", "media", "baixa"], description: "Nível de confiança da extração" }
+            casa: { type: Type.STRING },
+            inicial: { type: Type.STRING },
+            destinatario: { type: Type.STRING },
+            confianca: { type: Type.STRING, enum: ["alta", "media", "baixa"] }
           },
-          required: ["texto_bruto", "nome_detectado", "casa_detectada", "confianca"]
+          required: ["casa", "inicial", "destinatario", "confianca"]
         }
       },
     }));
@@ -129,7 +126,7 @@ Retorne APENAS o JSON conforme o esquema:
 }
 
 export async function analyzePackageLabel(base64Image: string, residentList?: string[]) {
-  const model = "gemini-3.1-flash-lite-preview";
+  const model = "gemini-3-flash-preview";
   
   const residentContext = residentList && residentList.length > 0 
     ? `\nCONTEXTO: Os seguintes moradores estão cadastrados neste condomínio. Use esta lista para tentar encontrar o melhor match, mesmo que o nome na etiqueta esteja abreviado ou com pequenos erros:\n${residentList.join('\n')}`
@@ -137,20 +134,12 @@ export async function analyzePackageLabel(base64Image: string, residentList?: st
 
   const prompt = `Analise esta etiqueta de encomenda e identifique o morador destinatário.
   
-  OBJETIVO:
-  - Identificar o nome do morador (mesmo que parcial ou aproximado).
-  - Identificar a unidade (casa/apto).
-  - Identificar a transportadora (Carrier).
-  - Identificar o código de rastreio (Tracking Number).
+  OBJETIVO PRINCIPAL: ENCONTRAR O NÚMERO DA CASA/UNIDADE.
   
-  PRIORIDADE DE UNIDADE:
-  - Procure por marcações MANUAIS grandes (escritas a caneta/marcador) como "C 123", "C123", "Casa 45", "Ap 202", "Apto 101".
-  - Se encontrar "C" seguido de número, interprete 'C' como 'Casa'.
-  
-  REGRAS:
-  - Seja tolerante com erros de OCR ou abreviações.
-  - Se houver uma lista de moradores no contexto, tente associar a etiqueta a um deles.
-  - Extraia o que for possível, mesmo que incompleto.
+  REGRAS DE PRIORIDADE:
+  1. MARCAÇÕES MANUAIS: Procure por números GRANDES escritos à mão. Se houver "C123" ou "123" isolado e grande, considere como a casa.
+  2. NOME DO DESTINATÁRIO: Identifique o nome principal.
+  3. IGNORE TOTALMENTE: Códigos de barras, logos de transportadoras (Amazon, Mercado Livre), textos legais minúsculos.
   
   ${residentContext}
   
@@ -173,7 +162,6 @@ export async function analyzePackageLabel(base64Image: string, residentList?: st
         }
       ],
       config: {
-        thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.OBJECT,

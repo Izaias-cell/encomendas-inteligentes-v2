@@ -30,7 +30,7 @@ export default function PackageList({ user }: PackageListProps) {
     try {
       const { data, error } = await supabase
         .from('packages')
-        .select('*, package_id:id, recipient_name:recipient_name_raw, unit_label:unit_number')
+        .select('*, moradores(nome, unidade, unit_type, block, street), package_id:id, unit_label:unit_number')
         .eq('condominium_id', user.condominium_id)
         .order('received_at', { ascending: false });
 
@@ -56,7 +56,7 @@ export default function PackageList({ user }: PackageListProps) {
 
   const getFilteredPackages = () => {
     const filtered = packages.filter((p: any) => 
-      p.recipient_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (p.moradores?.nome || "").toLowerCase().includes(searchTerm.toLowerCase()) ||
       p.unit_label?.toLowerCase().includes(searchTerm.toLowerCase()) ||
       p.carrier?.toLowerCase().includes(searchTerm.toLowerCase()) ||
       p.tracking_code?.toLowerCase().includes(searchTerm.toLowerCase())
@@ -229,7 +229,9 @@ export default function PackageList({ user }: PackageListProps) {
               </div>
               
               <div className="flex items-center justify-between mb-4">
-                <h3 className="text-xl font-bold text-zinc-900">{pkg.recipient_name}</h3>
+                <h3 className="text-xl font-bold text-zinc-900 truncate pr-2" title={pkg.moradores?.nome}>
+                  {pkg.moradores?.nome || 'Morador não identificado'}
+                </h3>
                 {getWhatsAppBadge(pkg.whatsapp_status)}
               </div>
               

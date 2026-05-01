@@ -308,7 +308,7 @@ const ResidentPortal = () => {
                   )}
                   <div className="flex justify-between items-center py-3 border-b border-zinc-50">
                     <span className="text-zinc-400 text-sm">Unidade</span>
-                    <span className="font-bold text-zinc-900">{selectedPkg.unit_number_raw}</span>
+                    <span className="font-bold text-zinc-900">{selectedPkg.unit_number}</span>
                   </div>
                 </div>
 

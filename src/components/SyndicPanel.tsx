@@ -157,7 +157,12 @@ const Dashboard = ({ user, residents = [], logs = [], systemStatus }: any) => {
       // Fetch all packages to calculate stats
       const { data: packages, error } = await supabase
         .from('packages')
-        .select('*, package_id:id, recipient_name:recipient_name_raw, unit_label:unit_number')
+        .select(`
+          *, 
+          moradores(nome, unidade, block, street),
+          package_id:id, 
+          unit_label:unit_number
+        `)
         .eq('condominium_id', user.condominium_id);
 
       if (error) {
@@ -544,13 +549,12 @@ const PackagesList = ({ user, counts: externalCounts }: any) => {
     setLoading(true);
     setError(false);
     try {
-      // Fetch all packages to ensure consistency with Dashboard stats
       const { data, error } = await supabase
         .from('packages')
         .select(`
           *, 
+          moradores(nome, unidade, block, street),
           package_id:id, 
-          recipient_name:recipient_name_raw, 
           unit_label:unit_number
         `)
         .eq('condominium_id', user.condominium_id)
@@ -593,7 +597,7 @@ const PackagesList = ({ user, counts: externalCounts }: any) => {
   const filtered = packages.filter((p: any) => {
     const searchLower = searchTerm.toLowerCase();
     return (
-      (p.recipient_name || '').toLowerCase().includes(searchLower) ||
+      (p.moradores?.nome || '').toLowerCase().includes(searchLower) ||
       (p.unit_label || '').toLowerCase().includes(searchLower) ||
       (p.carrier || '').toLowerCase().includes(searchLower) ||
       (p.pickup_code || '').toLowerCase().includes(searchLower) ||
@@ -1269,8 +1273,8 @@ const HistoryTab = ({ user }: any) => {
         .from('packages')
         .select(`
           *, 
+          moradores(nome, unidade, block, street),
           package_id:id,
-          recipient_name:recipient_name_raw, 
           unit_label:unit_number
         `)
         .eq('condominium_id', user.condominium_id)
@@ -1300,7 +1304,7 @@ const HistoryTab = ({ user }: any) => {
   const filtered = packages.filter(pkg => {
     const matchesSearch = 
       pkg.recipient_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      pkg.recipient_name_raw?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (pkg.moradores?.nome || "").toLowerCase().includes(searchTerm.toLowerCase()) ||
       pkg.unit_label?.includes(searchTerm) ||
       pkg.unit_number?.includes(searchTerm);
     
@@ -1336,7 +1340,7 @@ const HistoryTab = ({ user }: any) => {
     ];
 
     const rows = filtered.map(pkg => [
-      pkg.recipient_name_raw || "",
+      pkg.moradores?.nome || "",
       formatPackageUnit(pkg) || "",
       pkg.status === 'delivered' ? 'Retirada' : 'Pendente',
       formatSafeDateTime(pkg.received_at) || "",
@@ -1377,7 +1381,7 @@ const HistoryTab = ({ user }: any) => {
     doc.text(`Total de registros: ${filtered.length}`, 14, 36);
 
     const tableData = filtered.map(pkg => [
-      pkg.recipient_name_raw || "",
+      pkg.moradores?.nome || "",
       formatPackageUnit(pkg) || "",
       formatSafeDateTime(pkg.received_at) || "",
       pkg.delivered_at ? formatSafeDateTime(pkg.delivered_at) : "Pendente",
@@ -1468,7 +1472,7 @@ const HistoryTab = ({ user }: any) => {
                 filtered.map((pkg) => (
                   <tr key={pkg.id} className="hover:bg-zinc-50/50 transition-colors">
                     <td className="px-6 py-4">
-                      <p className="text-sm font-bold text-zinc-900">{pkg.recipient_name_raw}</p>
+                      <p className="text-sm font-bold text-zinc-900">{pkg.moradores?.nome || 'Morador'}</p>
                     </td>
                     <td className="px-6 py-4">
                       <p className="text-sm text-zinc-600">{formatPackageUnit(pkg)}</p>
@@ -2167,7 +2171,7 @@ const SettingsPanel = ({ user, systemStatus, onUpdateUser }: any) => {
         .from('packages')
         .select('id')
         .eq('condominium_id', user.condominium_id)
-        .or('recipient_name_raw.ilike.%teste%,recipient_name_raw.ilike.%demo%,recipient_name_raw.ilike.%test%,notes.ilike.%teste%,notes.ilike.%demo%,notes.ilike.%test%');
+        .or('notes.ilike.%teste%,notes.ilike.%demo%,notes.ilike.%test%');
 
       if (fetchError) throw fetchError;
 

@@ -95,8 +95,8 @@ const Retirada = () => {
       }
     }
 
-    // 2. Segunda prioridade: Dados da própria encomenda (unit_number ou unit_number_raw)
-    const pkgUnit = packageData.unit_number || packageData.unit_number_raw || '';
+    // 2. Segunda prioridade: Dados da própria encomenda (unit_number)
+    const pkgUnit = packageData.unit_number || '';
     const pkgType = packageData.unit_type || '';
     const pkgBlock = packageData.block || packageData.bloco || '';
 
@@ -130,7 +130,7 @@ const Retirada = () => {
         <div className="p-8 flex flex-col items-center">
           {/* Resident Info */}
           <div className="text-center mb-8">
-            <h2 className="text-2xl font-bold text-zinc-900">{resident?.nome || packageData.recipient_name_raw}</h2>
+            <h2 className="text-2xl font-bold text-zinc-900">{resident?.nome || 'Morador'}</h2>
             <p className="text-zinc-500 font-medium">
               Unidade: {getUnitDisplay()}
             </p>

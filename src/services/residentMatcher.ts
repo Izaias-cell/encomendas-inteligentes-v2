@@ -135,9 +135,10 @@ export const findMatchingResidents = async (
   condominiumId: string,
   unit: string,
   name: string,
-  details?: any
+  details?: any,
+  initial?: string
 ): Promise<ScoredResident[]> => {
-  if (!unit && !name && !details) {
+  if (!unit && !name && !details && !initial) {
     return [];
   }
 
@@ -154,6 +155,7 @@ export const findMatchingResidents = async (
   const normalizedOcrName = normalizeName(rawOcrName);
   const ocrParts = getNameParts(rawOcrName);
   const normalizedOcrUnit = normalizeUnit(unit || '').toLowerCase();
+  const ocrInitial = (initial || '').toUpperCase().trim();
   
   // Se tivermos detalhes da unidade (número isolado), usamos também
   const ocrUnitNum = details?.number ? normalizeUnit(details.number).toLowerCase() : '';
@@ -220,10 +222,19 @@ export const findMatchingResidents = async (
       }
     }
 
+    // Match de Inicial (Prioridade conforme solicitado)
+    if (ocrInitial && resFullName.startsWith(ocrInitial)) {
+      nameScore += 120; // Bônus alto para a inicial do morador
+    }
+
     // 3. CÁLCULO DE SCORE COMBINADO
     
-    // Unidade + Nome Forte
-    if (unitMatches && nameScore >= 50) {
+    // Unidade + Nome/Inicial Forte
+    if (unitMatches && nameScore >= 100) {
+      score = 400 + nameScore;
+    }
+    // Unidade + Nome Médio
+    else if (unitMatches && nameScore >= 50) {
       score = 300 + nameScore;
     }
     // Unidade + Nome Fraco
