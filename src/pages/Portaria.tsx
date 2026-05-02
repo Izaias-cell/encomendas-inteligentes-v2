@@ -65,6 +65,14 @@ export default function Portaria({ user }: PortariaProps) {
   const [residents, setResidents] = useState<Morador[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
+  const [notifyAfter, setNotifyAfter] = useState(() => {
+    return localStorage.getItem('notify_after_registration') === 'true';
+  });
+
+  useEffect(() => {
+    localStorage.setItem('notify_after_registration', notifyAfter.toString());
+  }, [notifyAfter]);
+
   const [activeTab, setActiveTab] = useState<'pending' | 'delivered' | 'all' | 'residents'>('pending');
   const [activeResidentMenu, setActiveResidentMenu] = useState<string | null>(null);
   const navigate = useNavigate();
@@ -186,7 +194,6 @@ export default function Portaria({ user }: PortariaProps) {
           whatsapp_status: 'enviado',
           last_notification_at: nowString,
           whatsapp_sent_at: nowString,
-          notification_mode: 'manual',
           whatsapp_message: message,
           pickup_code: groupCode,
           pickup_token: groupToken
@@ -211,19 +218,20 @@ export default function Portaria({ user }: PortariaProps) {
         last_notification_at: nowString, 
         pickup_code: groupCode,
         pickup_token: groupToken,
-        whatsapp_message: message,
-        notification_mode: 'manual'
+        whatsapp_message: message
       } : p));
       
       // Sincronizar com o banco para garantir sincronia total
-      fetchData();
+      // fetchData();
     } catch (e) {
       console.error('Exceção crítica no processo de notificação:', e);
     }
 
     // 2. Abrir WhatsApp após garantir atualização no banco (o catch não trava o window.open se o usuário preferir)
     window.open(link, '_blank');
-    
+    setNotifyQueue(prev =>
+  prev.filter((_, index) => index !== currentIndex)
+);
     // REGRA OBRIGATÓRIA: Avançar ou fechar a fila imediatamente ao clicar, 
     // garantindo que o item suma da "lista de notificações" instantaneamente
     if (currentIndex + 1 < notifyQueue.length) {
@@ -352,7 +360,91 @@ export default function Portaria({ user }: PortariaProps) {
     migrateStatuses();
   }, [user.condominium_id]);
 
-  const [individualNotifyData, setIndividualNotifyData] = useState<any>(null);
+  // Removed individualNotifyData state as per request for direct flows
+  const handleDirectNotify = async (pkg: any) => {
+    const resident = residents.find(r => r.id === pkg.recipient_id);
+    
+    if (!resident) {
+      toast.error('Morador não encontrado');
+      return;
+    }
+
+    try {
+      // Busca todas as encomendas que ainda não foram notificadas para esse morador usando a regra unificada
+      const moradorPackages = getPackagesNeedingNotification(packages).filter(p => p.recipient_id === resident.id);
+      
+      if (moradorPackages.length === 0) {
+        toast.error('Não há novas encomendas para notificar');
+        return;
+      }
+
+      // Garante pickup_code/token
+      let pickupCode = pkg.pickup_code;
+      if (!pickupCode) pickupCode = generatePickupCode();
+      const pickupToken = pkg.pickup_token || Math.random().toString(36).substring(2, 8).toUpperCase();
+
+      const message = prepareWhatsAppNotification(
+        resident,
+        condoName || 'Condomínio',
+        pickupCode,
+        undefined,
+        pickupToken,
+        moradorPackages.length || 1,
+        'disponivel',
+        undefined,
+        undefined,
+        pkg.photo_url // Foto da encomenda clicada
+      );
+
+      if (!message) throw new Error('Não foi possível preparar a mensagem');
+
+      const pkgIds = moradorPackages.map(p => p.id);
+      const nowString = new Date().toISOString();
+
+      // REGRA OBRIGATÓRIA: Abrir WhatsApp imediatamente (antes do await para evitar bloqueio de popup)
+      const whatsappLink = getWhatsAppLink(resident.telefone, message, pkg.photo_url);
+      window.open(whatsappLink, '_blank');
+      
+      // REGRA OBRIGATÓRIA: Atualizar status no banco EM SEGUIDA
+      const { error } = await supabase
+        .from('packages')
+        .update({ 
+          whatsapp_notified: true,
+          whatsapp_sent: true,
+          notified_at: nowString,
+          whatsapp_status: 'enviado',
+          whatsapp_sent_at: nowString,
+          last_notification_at: nowString,
+          whatsapp_message: message,
+          pickup_code: pickupCode,
+          pickup_token: pickupToken
+        })
+        .in('id', pkgIds);
+
+      if (error) {
+        console.error('Erro ao atualizar pacotes no banco:', error);
+      }
+      
+      // Atualização local imediata
+      setPackages(prev => prev.map(p => pkgIds.includes(p.id) ? { 
+        ...p, 
+        whatsapp_status: 'enviado',
+        whatsapp_notified: true,
+        whatsapp_sent: true,
+        notified_at: nowString,
+        whatsapp_sent_at: nowString,
+        last_notification_at: nowString,
+        whatsapp_message: message,
+        pickup_code: pickupCode,
+        pickup_token: pickupToken
+      } : p));
+
+      toast.success('WhatsApp aberto para ' + resident.nome);
+    } catch (e) {
+      console.error(e);
+      toast.error('Erro ao processar notificação');
+    }
+  };
 
   const getWhatsAppBadge = (status: string, pkg?: any) => {
     // PRIORIDADE ABSOLUTA: whatsapp_sent / whatsapp_notified
@@ -376,13 +468,13 @@ export default function Portaria({ user }: PortariaProps) {
         onClick={(e) => {
           e.preventDefault();
           e.stopPropagation();
-          if (pkg) setIndividualNotifyData(pkg);
+          if (pkg) handleDirectNotify(pkg);
         }}
-        className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border bg-amber-50 border-amber-200 text-amber-600 transition-all hover:scale-105 active:scale-95 cursor-pointer shadow-sm hover:shadow-md hover:bg-amber-100" 
+        className="flex items-center gap-2 px-3 py-1.5 rounded-xl border bg-indigo-600 text-white transition-all hover:bg-indigo-700 active:scale-95 cursor-pointer shadow-md hover:shadow-lg" 
         title="Clique para enviar notificação WhatsApp"
       >
-        <MessageSquare className="w-3.5 h-3.5" />
-        <span className="text-[10px] font-bold uppercase tracking-tight">Notificar</span>
+        <Send className="w-4 h-4" />
+        <span className="text-[10px] font-black uppercase tracking-widest">Notificar Morador</span>
       </button>
     );
   };
@@ -454,7 +546,7 @@ export default function Portaria({ user }: PortariaProps) {
         setIsWaitingForReturn(false);
         
         // Verifica quantas notificações RESTAM AGORA no banco
-        const pendentesAgora = getPackagesNeedingNotification(latestPackages, latestResidents);
+        const pendentesAgora = notifyQueue.filter((_, index) => index > notifyIndex);
         
         if (pendentesAgora.length === 0) {
           // Todas enviadas! Força estado de sucesso (o useEffect se encarregará de fechar automaticamente)
@@ -577,7 +669,9 @@ export default function Portaria({ user }: PortariaProps) {
                 pickup_code: pCode,
                 pickup_token: pToken
               } : p));
-
+              setPackages(prev =>
+  prev.filter(p => p.id ! == pkg.id)
+); 
               const { error: updateError } = await supabase
                 .from('packages')
                 .update({ 
@@ -587,7 +681,6 @@ export default function Portaria({ user }: PortariaProps) {
                   whatsapp_status: 'enviado',
                   last_notification_at: nowString,
                   whatsapp_sent_at: nowString,
-                  notification_mode: 'api',
                   whatsapp_message: finalMessage,
                   pickup_code: pCode,
                   pickup_token: pToken
@@ -670,8 +763,7 @@ export default function Portaria({ user }: PortariaProps) {
           notified_at: nowString,
           whatsapp_status: 'enviado',
           last_notification_at: nowString,
-          whatsapp_sent_at: nowString,
-          notification_mode: 'manual'
+          whatsapp_sent_at: nowString
         })
         .eq('id', pkgId);
       
@@ -688,8 +780,7 @@ export default function Portaria({ user }: PortariaProps) {
         whatsapp_sent: true,
         notified_at: nowString,
         whatsapp_sent_at: nowString,
-        last_notification_at: nowString,
-        notification_mode: 'manual'
+        last_notification_at: nowString
       } : p));
       
       if (manualIndex + 1 >= batchPackages.length) {
@@ -1023,105 +1114,7 @@ export default function Portaria({ user }: PortariaProps) {
     }
   };
 
-  const handleIndividualNotifySend = async () => {
-    if (!individualNotifyData) return;
-    const pkg = individualNotifyData;
-    const resident = residents.find(r => r.id === pkg.recipient_id);
-    
-    if (!resident) {
-      toast.error('Morador não encontrado');
-      return;
-    }
-
-    try {
-      setLoading(true);
-      
-      // Busca todas as encomendas que ainda não foram notificadas para esse morador usando a regra unificada
-      const moradorPackages = getPackagesNeedingNotification(packages).filter(p => p.recipient_id === resident.id);
-      
-      if (moradorPackages.length === 0) {
-        toast.error('Não há novas encomendas para notificar');
-        return;
-      }
-
-      // Garante pickup_code/token
-      let pickupCode = pkg.pickup_code;
-      if (!pickupCode) pickupCode = generatePickupCode();
-      const pickupToken = pkg.pickup_token || Math.random().toString(36).substring(2, 8).toUpperCase();
-
-      const message = prepareWhatsAppNotification(
-        resident,
-        condoName || 'Condomínio',
-        pickupCode,
-        undefined,
-        pickupToken,
-        moradorPackages.length || 1,
-        'disponivel',
-        undefined,
-        undefined,
-        pkg.photo_url // Foto da encomenda clicada
-      );
-
-      if (!message) throw new Error('Não foi possível preparar a mensagem');
-
-      const pkgIds = moradorPackages.map(p => p.id);
-      console.log('moradorPackages:', moradorPackages);
-      console.log('pkgIds individual:', pkgIds);
-      const nowString = new Date().toISOString();
-
-      // REGRA OBRIGATÓRIA: Atualizar status no banco ANTES de abrir o WhatsApp
-      console.log('ENTROU NA FUNÇÃO DE ENVIO');
-      const { error } = await supabase
-        .from('packages')
-        .update({ 
-          whatsapp_notified: true,
-          whatsapp_sent: true,
-          notified_at: nowString,
-          whatsapp_status: 'enviado',
-          whatsapp_sent_at: nowString,
-          last_notification_at: nowString,
-          whatsapp_message: message,
-          pickup_code: pickupCode,
-          pickup_token: pickupToken
-        })
-        .in('id', pkgIds);
-        console.log('Erro update individual:', error);
-
-      if (error) {
-        console.error('Erro ao atualizar pacotes no banco:', error);
-        throw error;
-      }
-      console.log('Atualizado no banco:', pkgIds);
-      console.log('Erro update:', error);
-
-      // 2. Abrir WhatsApp após sucesso no banco
-      const whatsappLink = getWhatsAppLink(resident.telefone, message, pkg.photo_url);
-      window.open(whatsappLink, '_blank');
-      
-      // Atualização local imediata
-      setPackages(prev => prev.map(p => pkgIds.includes(p.id) ? { 
-        ...p, 
-        whatsapp_status: 'enviado',
-        whatsapp_notified: true,
-        whatsapp_sent: true,
-        notified_at: nowString,
-        whatsapp_sent_at: nowString,
-        last_notification_at: nowString,
-        whatsapp_message: message,
-        pickup_code: pickupCode,
-        pickup_token: pickupToken
-      } : p));
-      
-
-      toast.success('Notificação iniciada!');
-      setIndividualNotifyData(null);
-      fetchData();
-    } catch (err: any) {
-      toast.error('Erro ao notificar: ' + err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
+  // handleIndividualNotifySend was removed to be handled directly by handleDirectNotify
 
   const handleDeleteResident = (resident: Morador) => {
     setResidentToDelete(resident);
@@ -1263,7 +1256,7 @@ export default function Portaria({ user }: PortariaProps) {
         setPackages(pkgs);
         
         // Sincronizar batchPackages para notificações automáticas usando a regra robusta
-        const pendentesAviso = getPackagesNeedingNotification(pkgs)
+       // const pendentesAviso = getPackagesNeedingNotification(pkgs)
       }
 
       if (resResult.error) {
@@ -1530,7 +1523,6 @@ export default function Portaria({ user }: PortariaProps) {
       // Notificar Todos queue state
       setModoEnvio(null);
       setIsNotifyingAll(false);
-      setIndividualNotifyData(null);
       setShowBatchModal(false);
       setNotifyQueue([]);
       setNotifyIndex(0);
@@ -1672,36 +1664,35 @@ export default function Portaria({ user }: PortariaProps) {
             <Plus className="w-6 h-6" />
             TIRAR FOTO
           </button>
-          {activeTab === 'pending' && (
-            <motion.button
-              type="button"
-              id="notify-all-btn"
-              disabled={!hasPendingNotifications() || isNotifyingAll || isBatchSending || notificationSuccess}
-              onClick={(e) => {
-                e.preventDefault();
-                handleNotifyAll();
-              }}
-              className={`flex-1 md:flex-none px-6 py-4 rounded-2xl font-bold transition-all flex items-center justify-center gap-3 shadow-lg ${
-                notificationSuccess 
-                  ? 'bg-emerald-50 text-emerald-600 border border-emerald-200'
-                  : hasPendingNotifications() 
-                    ? 'bg-zinc-900 text-white hover:bg-zinc-800 shadow-zinc-200' 
-                    : 'bg-zinc-100 text-zinc-400 cursor-not-allowed shadow-none'
-              }`}
-            >
-              {notificationSuccess ? (
-                <>
-                  <CheckCircle className="w-5 h-5" />
-                  TODAS AS NOTIFICAÇÕES FORAM ENVIADAS
-                </>
-              ) : (
-                <>
-                  <Zap className={`w-5 h-5 ${hasPendingNotifications() ? 'text-amber-400' : 'text-zinc-300'}`} />
-                  Notificar todos
-                </>
-              )}
-            </motion.button>
-          )}
+          <div className="bg-white/80 backdrop-blur-md border border-zinc-100 px-6 py-4 rounded-3xl flex items-center gap-5 shadow-sm min-w-[320px] mt-2 md:mt-0">
+            <div className="flex items-center gap-3">
+              <span className={`text-[11px] font-black transition-colors ${!notifyAfter ? 'text-rose-600' : 'text-zinc-300'}`}>OFF</span>
+              <button
+                type="button"
+                id="toggle-notify-after"
+                onClick={() => setNotifyAfter(!notifyAfter)}
+                className={`relative w-20 h-10 rounded-full transition-all duration-300 shadow-inner p-1.5 ${
+                  notifyAfter ? 'bg-emerald-600' : 'bg-rose-600'
+                }`}
+              >
+                <motion.div 
+                  layout
+                  transition={{ type: "spring", stiffness: 500, damping: 30 }}
+                  className={`w-7 h-7 bg-white rounded-full shadow-lg flex items-center justify-center ${
+                    notifyAfter ? 'ml-auto' : 'mr-auto'
+                  }`}
+                >
+                  <div className={`w-2 h-2 rounded-full ${notifyAfter ? 'bg-emerald-600' : 'bg-rose-600'}`} />
+                </motion.div>
+              </button>
+              <span className={`text-[11px] font-black transition-colors ${notifyAfter ? 'text-emerald-600' : 'text-zinc-300'}`}>ON</span>
+            </div>
+
+            <div className="flex-1 flex flex-col border-l border-zinc-100 pl-5 min-w-0">
+              <span className="text-[10px] font-black uppercase tracking-[0.2em] text-zinc-400 leading-none mb-1">Sistema de Envio</span>
+              <span className="text-sm font-bold text-zinc-800 leading-tight">NOTIFICAR APÓS REGISTRO</span>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -1827,6 +1818,7 @@ export default function Portaria({ user }: PortariaProps) {
                     }
                   }}
                   onViewLabel={(url) => setViewPhotoUrl(url)}
+                  onNotify={handleDirectNotify}
                   handleDeliver={handleDeliver}
                   setQrPackage={setQrPackage}
                 />
@@ -2334,86 +2326,7 @@ export default function Portaria({ user }: PortariaProps) {
         )}
       </AnimatePresence>
 
-      {/* Modal de Notificação Individual */}
-      <AnimatePresence>
-        {individualNotifyData && (
-          <div className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-zinc-900/80 backdrop-blur-sm">
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-md overflow-hidden p-8"
-            >
-              <div className="text-center mb-8">
-                <div className="w-20 h-20 bg-emerald-50 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-6">
-                  <Smartphone className="w-10 h-10" />
-                </div>
-                <h3 className="text-2xl font-bold text-zinc-900 mb-2">Notificar Morador</h3>
-                <p className="text-zinc-500">Confirme os dados antes de enviar</p>
-              </div>
-
-              <div className="bg-zinc-50 p-6 rounded-3xl border border-zinc-100 space-y-4 mb-8">
-                <div className="flex items-center gap-4">
-                  <div className="w-12 h-12 bg-white rounded-2xl flex items-center justify-center text-zinc-400 border border-zinc-100">
-                    <User className="w-6 h-6" />
-                  </div>
-                  <div>
-                    <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Morador</p>
-                    <p className="font-bold text-zinc-900">
-                      {individualNotifyData.moradores?.nome || 'Morador não identificado'}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-4">
-                  <div className="w-12 h-12 bg-white rounded-2xl flex items-center justify-center text-zinc-400 border border-zinc-100">
-                    <Home className="w-6 h-6" />
-                  </div>
-                  <div>
-                    <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Unidade</p>
-                    <p className="font-bold text-zinc-900">{formatPackageUnit(individualNotifyData)}</p>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-4">
-                  <div className="w-12 h-12 bg-white rounded-2xl flex items-center justify-center text-emerald-600 border border-zinc-100">
-                    <PackageIcon className="w-6 h-6" />
-                  </div>
-                  <div>
-                    <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Encomendas Pendentes</p>
-                    <p className="font-bold text-zinc-900">
-                      {getPackagesNeedingNotification(packages).filter(p => p.recipient_id === individualNotifyData.recipient_id).length} item(s)
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex flex-col gap-3">
-                <button
-                  onClick={handleIndividualNotifySend}
-                  disabled={loading}
-                  className="w-full bg-emerald-600 text-white py-5 rounded-2xl font-bold hover:bg-emerald-700 transition-all shadow-xl shadow-emerald-200 flex items-center justify-center gap-3"
-                >
-                  {loading ? (
-                    <Loader2 className="w-6 h-6 animate-spin" />
-                  ) : (
-                    <>
-                      <Send className="w-6 h-6" />
-                      Enviar aviso via WhatsApp
-                    </>
-                  )}
-                </button>
-                <button
-                  onClick={() => setIndividualNotifyData(null)}
-                  className="w-full py-4 text-zinc-500 font-bold hover:bg-zinc-100 rounded-2xl transition-all"
-                >
-                  Cancelar
-                </button>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
+      {/* Modal de Notificação Individual REMOVIDO para fluxo direto */}
 
       {/* Input de arquivo oculto para captura de foto de entrega */}
       <input 

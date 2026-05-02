@@ -1,5 +1,5 @@
 import React from 'react';
-import { Package as PackageIcon, Home, Truck, Clock, CheckCircle, ArrowRight, Camera, Hash, Layers, MessageSquare } from 'lucide-react';
+import { Package as PackageIcon, Home, Truck, Clock, CheckCircle, ArrowRight, Camera, Hash, Layers, MessageSquare, Send } from 'lucide-react';
 import { Package } from '../../types';
 import { formatSafeDateTime } from '../../lib/dateUtils';
 import { formatPackageUnit } from '../../lib/residentUtils';
@@ -12,6 +12,7 @@ interface PackageItemProps {
   onCodeRetrieval: () => void;
   onViewPhotos?: (pkg: any) => void;
   onViewLabel?: (url: string) => void;
+  onNotify?: (pkg: any) => void;
   handleDeliver: (id: string, method: any, photo?: string, data?: any) => void;
   setQrPackage: (pkg: any) => void;
 }
@@ -24,9 +25,12 @@ const PackageItem: React.FC<PackageItemProps> = ({
   onCodeRetrieval,
   onViewPhotos,
   onViewLabel,
+  onNotify,
   handleDeliver,
   setQrPackage
 }) => {
+  const isNotified = pkg.whatsapp_sent === true || pkg.whatsapp_notified === true;
+  
   return (
     <div className="bg-white rounded-3xl border border-zinc-100 shadow-sm p-6 hover:shadow-md transition-all group">
       <div className="flex justify-between items-start mb-4">
@@ -158,6 +162,21 @@ const PackageItem: React.FC<PackageItemProps> = ({
       </div>
 
       <div className="grid grid-cols-2 gap-3">
+        {pkg.status === 'received' && !isNotified && (
+          <button 
+            type="button"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onNotify?.(pkg);
+            }}
+            className="col-span-2 bg-indigo-600 text-white py-4 rounded-2xl font-bold hover:bg-indigo-700 transition-all flex items-center justify-center gap-3 text-base shadow-lg shadow-indigo-100 mb-1"
+          >
+            <Send className="w-5 h-5" />
+            NOTIFICAR MORADOR
+          </button>
+        )}
+
         <button 
           type="button"
           onClick={(e) => {

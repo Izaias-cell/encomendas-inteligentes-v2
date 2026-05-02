@@ -82,10 +82,14 @@ export default function PackageNew({ user }: PackageNewProps) {
   const [isManualUnitSearch, setIsManualUnitSearch] = useState(true);
   const [allCondoResidents, setAllCondoResidents] = useState<Morador[]>([]);
   const [cameraActive, setCameraActive] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
   const [flashOn, setFlashOn] = useState(false);
   const [condoSettings, setCondoSettings] = useState<CondominiumSettings | null>(null);
   const [foundPartialData, setFoundPartialData] = useState(false);
   const [isAiSearch, setIsAiSearch] = useState(false);
+  const [notifyAfter] = useState(() => {
+    return localStorage.getItem('notify_after_registration') === 'true';
+  });
   const [statusMessage, setStatusMessage] = useState('Lendo etiqueta...');
   const [allResidents, setAllResidents] = useState<Morador[]>([]);
   const [isWaitingForReturn, setIsWaitingForReturn] = useState(false);
@@ -94,8 +98,11 @@ export default function PackageNew({ user }: PackageNewProps) {
   const [debugOcrImage, setDebugOcrImage] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
   const [isCameraStabilizing, setIsCameraStabilizing] = useState(true);
   const [isCapturing, setIsCapturing] = useState(false);
+  const [isHighlighting, setIsHighlighting] = useState(false);
+  const [blockAutoCamera, setBlockAutoCamera] = useState(false);
   const [showCaptureFeedback, setShowCaptureFeedback] = useState(false);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [diagnosticInfo, setDiagnosticInfo] = useState<any>(null);
@@ -136,18 +143,6 @@ export default function PackageNew({ user }: PackageNewProps) {
       });
     }
   };
-
-  // Focus effect for manual step
-  useEffect(() => {
-    if (step === 'manual' && shouldFocusSearch && !selectedResident) {
-      const timer = setTimeout(() => {
-        if (searchInputRef.current) {
-          searchInputRef.current.focus();
-        }
-      }, 100); 
-      return () => clearTimeout(timer);
-    }
-  }, [step, shouldFocusSearch, isManualUnitSearch, selectedResident]);
 
   const APP_VERSION = "2.2.1-flow";
   const BUILD_TIME = "2026-04-27 17:55";
@@ -200,11 +195,11 @@ export default function PackageNew({ user }: PackageNewProps) {
 
   // Auto-trigger camera on mount
   useEffect(() => {
-    if (step === 'camera' && !photoUrl && !cameraActive) {
+    if (step === 'camera' && !photoUrl && !cameraActive && !blockAutoCamera) {
       startCamera();
     }
     return () => stopCamera();
-  }, [step, photoUrl]);
+  }, [step, photoUrl, blockAutoCamera]);
 
   // Fetch all residents for AI context
   useEffect(() => {
@@ -239,100 +234,98 @@ export default function PackageNew({ user }: PackageNewProps) {
   }, [user?.condominium_id]);
 
   const startCamera = async () => {
-    // Garantir que qualquer stream anterior seja encerrado antes de iniciar um novo
+    // 1. Verificar suporte
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setCameraError("Câmera não suportada neste dispositivo.");
+      return;
+    }
+
+    // 2. Parar qualquer stream existente antes de abrir uma nova
     stopCamera();
     setIsCameraStabilizing(true);
+    setBlockAutoCamera(false);
+    setCameraError(null);
     
     try {
       let stream: MediaStream;
       
-      // 1. Tenta identificar a câmera traseira pelo label (mais robusto em alguns Androids)
+      // 3. Tentar preferencialmente a câmera traseira
       try {
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        const videoDevices = devices.filter(device => device.kind === 'videoinput');
-        
-        // Procura labels que indiquem câmera traseira
-        const backCamera = videoDevices.find(device => {
-          const label = device.label.toLowerCase();
-          return label.includes('back') || label.includes('traseira') || label.includes('rear') || label.includes('environment');
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: "environment" } },
+          audio: false
         });
-
-        if (backCamera) {
-          console.log("Câmera traseira identificada por ID:", backCamera.label);
+      } catch (err1) {
+        console.warn("Falha ao abrir câmera traseira, tentando frontal...", err1);
+        // 4. Fallback para câmera frontal
+        try {
           stream = await navigator.mediaDevices.getUserMedia({
-            video: {
-              deviceId: { exact: backCamera.deviceId },
-              width: { ideal: 1920, min: 1280 },
-              height: { ideal: 1080, min: 720 },
-              // Adicionamos frameRate ideal para estabilidade
-              frameRate: { ideal: 30, max: 60 }
-            },
+            video: { facingMode: "user" },
             audio: false
           });
-        } else {
-          // Se não achar por label, tenta o modo padrão environment
-          throw new Error("Nenhuma câmera traseira identificada por label");
-        }
-      } catch (labelErr) {
-        console.warn("Falha ao selecionar por label ou ID. Usando facingMode...", labelErr);
-        // Fallback robusto usando facingMode
-        try {
+        } catch (err2) {
+          console.warn("Falha ao abrir câmera frontal, tentando qualquer vídeo...", err2);
+          // 5. Fallback final: qualquer vídeo disponível
           stream = await navigator.mediaDevices.getUserMedia({ 
-            video: { 
-              facingMode: { exact: 'environment' },
-              width: { ideal: 1920, min: 1280 },
-              height: { ideal: 1080, min: 720 }
-            }, 
-            audio: false 
-          });
-        } catch (err) {
-          console.warn("Retrying camera with ideal environment mode...");
-          stream = await navigator.mediaDevices.getUserMedia({ 
-            video: { 
-              facingMode: 'environment',
-              width: { ideal: 1920, min: 1080 },
-              height: { ideal: 1080, min: 720 }
-            }, 
+            video: true, 
             audio: false 
           });
         }
       }
       
+      streamRef.current = stream;
+      
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
+        
+        // Android Chrome precisa de load() em alguns casos após atribuir srcObject
+        try { videoRef.current.load(); } catch(e) {}
+        
         setCameraActive(true);
 
-        // Aguarda estabilização
+        // Aguarda estabilização (foco e exposição contínua se disponível)
         setTimeout(() => {
           setIsCameraStabilizing(false);
-          
-          // Tenta aplicar foco contínuo e exposição automática
           const track = stream.getVideoTracks()[0];
-          if (track.applyConstraints) {
+          if (track && track.applyConstraints) {
             track.applyConstraints({
               advanced: [
                 { focusMode: 'continuous' } as any,
                 { exposureMode: 'continuous' } as any
               ]
-            }).catch(e => console.warn('Constraints not supported:', e));
+            }).catch(() => {});
           }
-        }, 600);
+        }, 800); // 800ms para estabilização térmica e de sensor
       }
-    } catch (err) {
-      console.error("Erro ao acessar câmera:", err);
-      toast.error("Não foi possível acessar a câmera. Use o modo manual.");
-      setStep('manual');
+    } catch (err: any) {
+      console.error("Erro crítico ao acessar câmera:", err);
+      
+      // 6. Tratar erros específicos conforme solicitado
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+        setCameraError("Permissão da câmera negada. Ative nas configurações do navegador.");
+      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+        setCameraError("Nenhuma câmera encontrada no dispositivo.");
+      } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+        setCameraError("A câmera está sendo usada por outro aplicativo ou falhou ao iniciar.");
+      } else {
+        setCameraError("Erro ao abrir câmera. Tente novamente.");
+      }
+      
+      setCameraActive(false);
+      setIsCameraStabilizing(false);
     }
   };
 
   const stopCamera = () => {
-    if (videoRef.current && videoRef.current.srcObject) {
-      const stream = videoRef.current.srcObject as MediaStream;
-      stream.getTracks().forEach(track => track.stop());
-      videoRef.current.srcObject = null;
-      setCameraActive(false);
-      setFlashOn(false);
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
     }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+    setCameraActive(false);
+    setFlashOn(false);
   };
 
   const toggleFlash = async () => {
@@ -755,6 +748,7 @@ export default function PackageNew({ user }: PackageNewProps) {
       setPhotoUrl('');
       setDebugOcrImage(null);
       setShouldFocusSearch(false);
+      setCameraError(null);
     }
     
     setSelectedResident(null);
@@ -779,19 +773,8 @@ export default function PackageNew({ user }: PackageNewProps) {
     setOcrConfidence(null);
     setStatusMessage('Aguardando...');
     
-    // Forçar reinicialização da câmera se estivermos voltando para o step camera
-    if (!stayInManual && step !== 'camera') {
-      setTimeout(() => startCamera(), 100);
-    }
-
-    // Focar no campo de busca se estamos no modo manual
-    // Pequeno delay para garantir que o render do input (autoFocus) não interfira
-    setTimeout(() => {
-      if (searchInputRef.current) {
-        searchInputRef.current.value = ''; 
-        searchInputRef.current.focus();
-      }
-    }, 150);
+    // REMOVIDO: Reinicialização automática da câmera
+    // REMOVIDO: Foco automático no input para evitar abrir teclado
   };
 
   const registrarEncomenda = async (e?: React.FormEvent, directResident?: Morador, shouldNotify: boolean = false) => {
@@ -881,6 +864,9 @@ export default function PackageNew({ user }: PackageNewProps) {
       }
 
       // 4. Montar objeto da encomenda (Campos mínimos obrigatórios e estáveis)
+      const hasValidPhone = !!(targetResident.telefone && targetResident.telefone.replace(/\D/g, '').length >= 10);
+      const shouldOpenWhatsAppNow = hasValidPhone && !notifyAfter;
+      
       const packageData = {
         condominium_id: user.condominium_id,
         recipient_id: targetResident.id,
@@ -894,9 +880,9 @@ export default function PackageNew({ user }: PackageNewProps) {
         pickup_code: finalPickupCode,
         pickup_token: finalPickupToken,
         status: 'received', // Valor aceito pelo banco conforme requisito
-        whatsapp_notified: false,
-        whatsapp_sent: false,
-        whatsapp_status: targetResident.telefone ? 'pending' : 'no_recipient',
+        whatsapp_notified: shouldOpenWhatsAppNow, 
+        whatsapp_sent: shouldOpenWhatsAppNow,
+        whatsapp_status: shouldOpenWhatsAppNow ? 'enviado' : (targetResident.telefone ? 'pending' : 'no_recipient'),
         whatsapp_message: directMessage
       };
 
@@ -943,8 +929,7 @@ export default function PackageNew({ user }: PackageNewProps) {
                 whatsapp_sent: true,
                 notified_at: new Date().toISOString(),
                 last_notification_at: new Date().toISOString(),
-                whatsapp_sent_at: new Date().toISOString(),
-                notification_mode: 'api'
+                whatsapp_sent_at: new Date().toISOString()
               })
               .eq('id', newPackage.id);
           } catch (err) {
@@ -975,7 +960,23 @@ export default function PackageNew({ user }: PackageNewProps) {
       playSuccessSound();
       toast.success('Encomenda registrada com sucesso!', { id: toastId, icon: '📦' });
       
-      // Limpar e voltar para câmera
+      // ENVIO AUTOMÁTICO VIA LINK (SOLICITAÇÃO DO USUÁRIO)
+      if (shouldOpenWhatsAppNow) {
+        try {
+          const link = getWhatsAppLink(targetResident.telefone, directMessage, finalPhotoUrl);
+          window.open(link, '_blank');
+        } catch (linkErr) {
+          console.error('Erro ao abrir link do WhatsApp:', linkErr);
+        }
+      }
+
+      // FLUXO DE ESTABILIDADE: Highlight, Scroll e Reset sem câmera auto
+      setIsHighlighting(true);
+      setTimeout(() => setIsHighlighting(false), 1000);
+      setBlockAutoCamera(true);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      
+      // Limpar campos
       resetForm();
     } catch (error: any) {
       console.error('Erro ao registrar encomenda:', error);
@@ -1088,6 +1089,7 @@ export default function PackageNew({ user }: PackageNewProps) {
                     ref={videoRef} 
                     autoPlay 
                     playsInline 
+                    muted
                     className="w-full h-full object-cover"
                   />
                   {/* Flash Effect na Captura */}
@@ -1122,6 +1124,50 @@ export default function PackageNew({ user }: PackageNewProps) {
                     )}
                   </AnimatePresence>
 
+                  {/* Camera Error Message */}
+                  {cameraError && (
+                    <div className="absolute inset-0 z-30 flex items-center justify-center bg-gray-900/80 backdrop-blur-sm p-8">
+                      <div className="bg-white rounded-3xl p-6 shadow-2xl max-w-xs w-full text-center space-y-6">
+                        <div className="w-16 h-16 bg-red-50 rounded-full flex items-center justify-center mx-auto">
+                          <AlertCircle className="w-10 h-10 text-red-500" />
+                        </div>
+                        <p className="text-gray-900 font-bold leading-tight">{cameraError}</p>
+                        <div className="space-y-3">
+                          <button
+                            onClick={startCamera}
+                            className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-bold flex items-center justify-center gap-2 shadow-lg shadow-indigo-100 transition-all active:scale-95"
+                          >
+                            <Zap className="w-5 h-5" />
+                            TENTAR ABRIR CÂMERA
+                          </button>
+                          <button
+                            onClick={() => {
+                              setCameraError(null);
+                              setStep('manual');
+                            }}
+                            className="w-full py-4 bg-gray-100 text-gray-700 rounded-2xl font-bold flex items-center justify-center gap-2 hover:bg-gray-200 transition-all active:scale-95"
+                          >
+                            <FileText className="w-5 h-5" />
+                            USAR MODO MANUAL
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {!cameraActive && !cameraError && (
+                    <div className="absolute inset-0 bg-gray-900 flex items-center justify-center overflow-hidden">
+                      <div className="absolute inset-0 opacity-20 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-indigo-500 via-transparent to-transparent animate-pulse" />
+                      <div className="text-center relative z-10 px-8">
+                        <div className="w-20 h-20 bg-indigo-500/20 rounded-full flex items-center justify-center mx-auto mb-6">
+                          <Camera className="w-10 h-10 text-indigo-400" />
+                        </div>
+                        <h3 className="text-white font-black text-xl uppercase tracking-widest mb-2">Pronto para Capturar</h3>
+                        <p className="text-indigo-200 text-sm opacity-60">Toque no botão abaixo para iniciar a câmera</p>
+                      </div>
+                    </div>
+                  )}
+
                   {cameraActive && (
                     <button
                       onClick={toggleFlash}
@@ -1147,20 +1193,26 @@ export default function PackageNew({ user }: PackageNewProps) {
                   </div>
 
                   <div className="absolute bottom-8 left-0 right-0 flex justify-center px-8 gap-4">
-                    <button
-                      onClick={capturePhoto}
-                      disabled={isCameraStabilizing || isOcrLoading}
-                      className={`w-28 h-28 bg-white rounded-full flex flex-col items-center justify-center shadow-2xl active:scale-95 transition-all border-8 border-gray-100 ${isCameraStabilizing || isOcrLoading ? 'opacity-50' : 'opacity-100'}`}
+                    <motion.button
+                      onClick={cameraActive ? capturePhoto : startCamera}
+                      animate={isHighlighting ? { scale: [1, 1.1, 1], boxShadow: ["0 0 0px rgba(79,70,229,0)", "0 0 20px rgba(79,70,229,0.5)", "0 0 0px rgba(79,70,229,0)"] } : {}}
+                      transition={{ duration: 0.5, repeat: 1 }}
+                      disabled={(cameraActive && (isCameraStabilizing || isOcrLoading)) || isSaving}
+                      className={`w-28 h-28 bg-white rounded-full flex flex-col items-center justify-center shadow-2xl active:scale-95 transition-all border-8 border-gray-100 ${
+                        (cameraActive && (isCameraStabilizing || isOcrLoading)) || isSaving ? 'opacity-50' : 'opacity-100'
+                      } ${isHighlighting ? 'ring-4 ring-indigo-500 ring-offset-4' : ''}`}
                     >
-                      {isCameraStabilizing || isOcrLoading ? (
+                      {(cameraActive && (isCameraStabilizing || isOcrLoading)) ? (
                          <div className="w-10 h-10 border-4 border-gray-100 rounded-full border-t-indigo-600 animate-spin" />
                       ) : (
                          <>
-                           <Camera className="w-8 h-8 text-gray-900 mb-1" />
-                           <span className="text-[10px] font-black text-gray-900 uppercase tracking-tighter">TIRAR FOTO</span>
+                           <Camera className={`w-8 h-8 mb-1 ${cameraActive ? 'text-indigo-600' : 'text-gray-900'}`} />
+                           <span className="text-[10px] font-black text-gray-900 uppercase tracking-tighter">
+                             {cameraActive ? 'CAPTURAR' : 'TIRAR FOTO'}
+                           </span>
                          </>
                       )}
-                    </button>
+                    </motion.button>
                   </div>
 
                   <canvas ref={canvasRef} className="hidden" />
@@ -1188,9 +1240,11 @@ export default function PackageNew({ user }: PackageNewProps) {
 
               <div className="bg-amber-50 border border-amber-100 rounded-2xl p-4 flex gap-3">
                 <Info className="w-5 h-5 text-amber-600 shrink-0" />
-                <p className="text-sm text-amber-800">
-                  Certifique-se de que o nome do morador e a unidade estejam bem visíveis na foto.
-                </p>
+                <div className="flex-1">
+                  <p className="text-sm text-amber-800 font-medium">
+                    Certifique-se de que o nome do morador e a unidade estejam bem visíveis na foto.
+                  </p>
+                </div>
               </div>
             </motion.div>
           )}
@@ -1367,7 +1421,6 @@ export default function PackageNew({ user }: PackageNewProps) {
                              </div>
                              <input
                                ref={searchInputRef}
-                               autoFocus
                                type="number"
                                inputMode="numeric"
                                placeholder="Casa / Unidade..."
@@ -1381,7 +1434,6 @@ export default function PackageNew({ user }: PackageNewProps) {
                             <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
                             <input
                               ref={searchInputRef}
-                              autoFocus
                               type="text"
                               placeholder="Pesquisar nome do morador..."
                               value={searchTerm}

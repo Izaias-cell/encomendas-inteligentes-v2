@@ -788,19 +788,32 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
   const startCamera = async () => {
     // Pré-carrega o stream antes de mudar o passo para evitar tela preta
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { 
-          facingMode: 'environment',
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        } 
-      });
+      let stream: MediaStream;
+      
+      try {
+        // Tenta primeiro modo environment (traseira)
+        stream = await navigator.mediaDevices.getUserMedia({ 
+          video: { 
+            facingMode: 'environment',
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          } 
+        });
+      } catch (err) {
+        // Fallback para qualquer câmera
+        console.warn("Retrying with any camera...");
+        stream = await navigator.mediaDevices.getUserMedia({ 
+          video: true 
+        });
+      }
+
       setStep('camera');
       // Pequeno delay para garantir que o elemento video está montado
       setTimeout(() => {
         if (videoRef.current) videoRef.current.srcObject = stream;
-      }, 50);
+      }, 100);
     } catch (err) {
+      console.error("Erro ao acessar câmera:", err);
       toast.error("Não foi possível acessar a câmera");
     }
   };

@@ -110,7 +110,6 @@ export interface Package {
   notified_at?: string;
   last_notification_at?: string;
   whatsapp_sent_at?: string;
-  notification_mode?: 'api' | 'manual';
   notification_fallback?: boolean;
   pickup_token?: string;
   pickup_qr_code?: 'active' | 'used' | 'expired';
