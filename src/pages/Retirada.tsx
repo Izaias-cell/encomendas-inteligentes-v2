@@ -138,10 +138,10 @@ const Retirada = () => {
 
           {/* Large Code Display */}
           <div className={`w-full py-10 rounded-[24px] flex flex-col items-center justify-center mb-8 border-2 ${isDelivered ? 'bg-zinc-50 border-zinc-200' : 'bg-emerald-50 border-emerald-100 shadow-inner'}`}>
-            <span className={`text-[10px] font-bold uppercase tracking-[0.3em] mb-2 ${isDelivered ? 'text-zinc-400' : 'text-emerald-600'}`}>
+            <span className={`text-[10px] font-bold uppercase tracking-[0.3em] mb-2 ${isDelivered ? 'text-emerald-600' : 'text-red-600'}`}>
               CÓDIGO DE RETIRADA {allPackages.length > 1 ? 'ÚNICO' : ''}
             </span>
-            <span className={`text-7xl font-black tracking-tighter font-mono ${isDelivered ? 'text-zinc-300 line-through' : 'text-emerald-700'}`}>
+            <span className={`text-7xl font-black tracking-tighter font-mono ${isDelivered ? 'text-emerald-500 line-through' : 'text-red-700'}`}>
               {packageData.pickup_code}
             </span>
             

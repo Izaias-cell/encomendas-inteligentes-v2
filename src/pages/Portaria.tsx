@@ -2,6 +2,7 @@ import React, { useEffect, useState, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { Package, Profile, Morador } from '../types';
+import { feedback } from '../lib/feedback';
 import { 
   Package as PackageIcon, 
   Plus, 
@@ -28,6 +29,7 @@ import {
   Edit,
   Save,
   MessageSquare,
+  MessageCircle,
   Camera,
   Eye,
   Trash2,
@@ -90,6 +92,26 @@ export default function Portaria({ user }: PortariaProps) {
   const [condoName, setCondoName] = useState('');
   const [currentPorter, setCurrentPorter] = useState(getCurrentPorter());
   const [showPorterModal, setShowPorterModal] = useState(false);
+  const [showConfirmDelivery, setShowConfirmDelivery] = useState(false);
+  const [packageToConfirm, setPackageToConfirm] = useState<Package | null>(null);
+
+  // Pulse animation state for "TIRAR FOTO" button
+  const [pulseKey, setPulseKey] = useState(0);
+
+  useEffect(() => {
+    const triggerPulse = () => {
+      setPulseKey(prev => prev + 1);
+    };
+    
+    // Initial trigger
+    const timer = setTimeout(triggerPulse, 500);
+
+    window.addEventListener('focus', triggerPulse);
+    return () => {
+      window.removeEventListener('focus', triggerPulse);
+      clearTimeout(timer);
+    };
+  }, []);
 
   // 7. Função única para processar/filtrar encomendas que precisam de aviso
   const getPackagesNeedingNotification = (pkgList: Package[]) => {
@@ -122,6 +144,7 @@ export default function Portaria({ user }: PortariaProps) {
   // Notificar Todos queue state
   const [isNotifyingAll, setIsNotifyingAll] = useState(false);
   const [isWaitingForReturn, setIsWaitingForReturn] = useState(false);
+  const [lastNotifiedPackageId, setLastNotifiedPackageId] = useState<string | null>(null);
   const [notifyQueue, setNotifyQueue] = useState<any[]>([]);
   const [notifyIndex, setNotifyIndex] = useState(0);
   const [modoEnvio, setModoEnvio] = useState<'individual' | 'batch' | 'mass_manual' | null>(null);
@@ -246,7 +269,7 @@ export default function Portaria({ user }: PortariaProps) {
       }, 500);
     }
 
-    setIsWaitingForReturn(false);
+    setIsWaitingForReturn(true);
   };
 
   const handleNotifyAll = () => {
@@ -254,6 +277,7 @@ export default function Portaria({ user }: PortariaProps) {
     const pendentesAviso = getPackagesNeedingNotification(packages)
 
     if (pendentesAviso.length === 0) {
+      feedback.error();
       toast.error('Nenhuma encomenda pendente de aviso encontrada.');
       return;
     }
@@ -374,6 +398,7 @@ export default function Portaria({ user }: PortariaProps) {
       const moradorPackages = getPackagesNeedingNotification(packages).filter(p => p.recipient_id === resident.id);
       
       if (moradorPackages.length === 0) {
+        feedback.error();
         toast.error('Não há novas encomendas para notificar');
         return;
       }
@@ -439,6 +464,8 @@ export default function Portaria({ user }: PortariaProps) {
         pickup_token: pickupToken
       } : p));
 
+      setLastNotifiedPackageId(pkg.package_id || pkg.id);
+      setIsWaitingForReturn(true);
       toast.success('WhatsApp aberto para ' + resident.nome);
     } catch (e) {
       console.error(e);
@@ -448,34 +475,38 @@ export default function Portaria({ user }: PortariaProps) {
 
   const getWhatsAppBadge = (status: string, pkg?: any) => {
     // PRIORIDADE ABSOLUTA: whatsapp_sent / whatsapp_notified
-    // Se pkg não foi passado, tenta inferir pelo status (fallback)
     const isActuallySent = pkg 
       ? (pkg.whatsapp_sent === true || pkg.whatsapp_notified === true)
       : ['sent', 'enviado', 'delivered', 'read'].includes((status || '').toLowerCase());
     
     if (isActuallySent) {
       return (
-        <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border bg-emerald-50 border-emerald-100 text-emerald-600 transition-all cursor-default shadow-sm border-dashed">
-          <MessageSquare className="w-3.5 h-3.5" />
-          <span className="text-[10px] font-bold uppercase tracking-tight">Já Avisado</span>
+        <div className="flex items-center gap-2 px-5 py-0.5 text-emerald-600 transition-all cursor-default opacity-90 hover:opacity-100 bg-emerald-50/50 rounded-full border border-emerald-100">
+          <span className="text-[12px] font-black uppercase tracking-wide">💬 Avisado</span>
         </div>
       );
     }
 
     return (
-      <button 
-        type="button"
+      <motion.div 
+        animate={{ 
+          scale: [1, 1.05, 1],
+        }}
+        transition={{ 
+          duration: 1.5, 
+          repeat: Infinity,
+          ease: "easeInOut"
+        }}
         onClick={(e) => {
           e.preventDefault();
           e.stopPropagation();
           if (pkg) handleDirectNotify(pkg);
         }}
-        className="flex items-center gap-2 px-3 py-1.5 rounded-xl border bg-indigo-600 text-white transition-all hover:bg-indigo-700 active:scale-95 cursor-pointer shadow-md hover:shadow-lg" 
-        title="Clique para enviar notificação WhatsApp"
+        className="flex items-center gap-1.5 px-3 py-1.5 bg-red-50 text-red-600 transition-all cursor-pointer hover:bg-red-100 rounded-full border border-red-200 shadow-sm"
+        title="Clique para avisar o morador"
       >
-        <Send className="w-4 h-4" />
-        <span className="text-[10px] font-black uppercase tracking-widest">Notificar Morador</span>
-      </button>
+        <span className="text-[10px] font-black uppercase tracking-tight">💬 Avisar Morador</span>
+      </motion.div>
     );
   };
 
@@ -495,42 +526,9 @@ export default function Portaria({ user }: PortariaProps) {
   const qrScannerRef = useRef<Html5Qrcode | null>(null);
   const isTransitioningRef = useRef(false);
   const isScanningRef = useRef(false);
-  const successAudioRef = useRef<HTMLAudioElement | null>(null);
 
   const playSuccessSound = () => {
-    try {
-      if (successAudioRef.current) {
-        successAudioRef.current.currentTime = 0;
-        successAudioRef.current.play().catch(() => playFallbackBeep());
-      } else {
-        playFallbackBeep();
-      }
-    } catch (err) {
-      console.warn('[Audio] Falha ao tocar som:', err);
-      playFallbackBeep();
-    }
-  };
-
-  const playFallbackBeep = () => {
-    try {
-      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-      const oscillator = audioCtx.createOscillator();
-      const gainNode = audioCtx.createGain();
-
-      oscillator.connect(gainNode);
-      gainNode.connect(audioCtx.destination);
-
-      oscillator.type = 'sine';
-      oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); // Tom A5
-      gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
-      gainNode.gain.linearRampToValueAtTime(0.1, audioCtx.currentTime + 0.05);
-      gainNode.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.15);
-
-      oscillator.start(audioCtx.currentTime);
-      oscillator.stop(audioCtx.currentTime + 0.2);
-    } catch (e) {
-      // Falha silenciosa
-    }
+    feedback.success();
   };
 
   const anim = (props: any) => props;
@@ -538,46 +536,67 @@ export default function Portaria({ user }: PortariaProps) {
   useEffect(() => {
     const handleFocus = async () => {
       console.log('[Portaria] Janela focada, recarregando dados...');
-      const result = await fetchData();
+      const result = await fetchData(true); // Silent refresh
       if (!result) return;
-      const { packages: latestPackages, residents: latestResidents } = result;
+      const { packages: latestPackages } = result;
       
-      if (isNotifyingAll && isWaitingForReturn) {
+      if (isWaitingForReturn) {
         setIsWaitingForReturn(false);
         
-        // Verifica quantas notificações RESTAM AGORA no banco
-        const pendentesAgora = notifyQueue.filter((_, index) => index > notifyIndex);
-        
-        if (pendentesAgora.length === 0) {
-          // Todas enviadas! Força estado de sucesso (o useEffect se encarregará de fechar automaticamente)
-          setNotifyIndex(notifyQueue.length);
+        if (isNotifyingAll) {
+          // No modo queue, o avanço do index já acontece no clique. 
+          // O handleFocus pode servir para garantir sincronia ou fechar se acabou.
+          const pendentesNoBanco = latestPackages.filter(p => !p.whatsapp_notified && p.status === 'received');
+          
+          if (pendentesNoBanco.length === 0) {
+            setNotifyIndex(notifyQueue.length);
+            toast.success('Todas as notificações pendentes foram enviadas.', { icon: '✅' });
+          } else if (notifyIndex >= notifyQueue.length) {
+            // Fila local acabou mas banco ainda tem? Recalcular se necessário ou apenas fechar.
+            setIsNotifyingAll(false);
+          }
         } else {
-          // Ainda restam notificações. Avançar para o próximo
-          setNotifyIndex(prev => prev + 1);
+          // Lógica de avanço automático para o próximo card (individual)
+          // Verificamos o próximo pendente na lista filtrada ATUAL
+          
+          setTimeout(() => {
+            const lowerSearch = searchTerm.toLowerCase();
+            const nextPkg = latestPackages.find(p => {
+              const matchesTab = activeTab === 'pending' ? p.status === 'received' : 
+                               activeTab === 'delivered' ? p.status === 'delivered' : true;
+              const matchesSearch = !searchTerm || (
+                p.unidade?.toLowerCase().includes(lowerSearch) ||
+                p.tracking_code?.toLowerCase().includes(lowerSearch) ||
+                p.carrier?.toLowerCase().includes(lowerSearch) ||
+                p.moradores?.nome?.toLowerCase().includes(lowerSearch)
+              );
+              
+              return matchesTab && matchesSearch && !p.whatsapp_notified && p.status === 'received';
+            });
+
+            if (nextPkg) {
+              const elementId = `package-${nextPkg.package_id || nextPkg.id}`;
+              const element = document.getElementById(elementId);
+              if (element) {
+                element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                // Feedback visual de destaque
+                element.classList.add('ring-4', 'ring-emerald-500', 'ring-offset-4', 'transition-all');
+                setTimeout(() => element.classList.remove('ring-4', 'ring-emerald-500', 'ring-offset-4'), 2000);
+              }
+            } else {
+              toast.success('Todas as notificações pendentes foram enviadas.', { icon: '✅' });
+            }
+          }, 150);
         }
       }
     };
     window.addEventListener('focus', handleFocus);
     return () => window.removeEventListener('focus', handleFocus);
-  }, [user?.condominium_id, isNotifyingAll, isWaitingForReturn, notifyQueue.length]);
+  }, [user?.condominium_id, isNotifyingAll, isWaitingForReturn, notifyQueue.length, notifyIndex, activeTab, searchTerm]);
 
   useEffect(() => {
     isScanningRef.current = isScanning;
   }, [isScanning]);
-
-  // Pré-carregamento do som de confirmação para dispositivos móveis
-  useEffect(() => {
-    console.log('[Áudio] Iniciando pré-carregamento do áudio de sucesso...');
-    try {
-      successAudioRef.current = new Audio('/sounds/success.mp3');
-      successAudioRef.current.preload = 'auto';
-      successAudioRef.current.volume = 0.6;
-      successAudioRef.current.load();
-      console.log('[Áudio] Áudio de sucesso carregado e pronto para uso');
-    } catch (err) {
-      console.error('[Áudio] Erro ao pré-carregar áudio:', err);
-    }
-  }, []);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -917,6 +936,7 @@ export default function Portaria({ user }: PortariaProps) {
       }
 
       if (orParts.length === 0) {
+        feedback.error();
         toast.error('Conteúdo do QR Code inválido');
         setQrScanStatus('error');
         setTimeout(() => {
@@ -1213,15 +1233,16 @@ export default function Portaria({ user }: PortariaProps) {
       case 'pickup_code': return 'CÓDIGO';
       case 'photo':
       case 'foto': return 'RETIRADA COM FOTO';
+      case 'CONFIRMADO_PELO_MORADOR': return 'CONFIRMADO PELO MORADOR';
       default: return '-';
     }
   };
 
-  const fetchData = async () => {
+  const fetchData = async (silent = false) => {
     if (!user?.condominium_id) return;
     
     try {
-      setLoading(true);
+      if (!silent) setLoading(true);
       
       // Primeiro busca as configurações para saber se o modo leve está ativado
       const { data: settingsData } = await supabase
@@ -1365,7 +1386,7 @@ export default function Portaria({ user }: PortariaProps) {
     }
   };
 
-  const handleDeliver = async (pkgId: string, method: 'manual' | 'qr_code' | 'photo' | 'foto' | 'code' | 'CÓDIGO' = 'manual', photoOverride?: string, packageData?: Package) => {
+  const handleDeliver = async (pkgId: string, method: 'manual' | 'qr_code' | 'photo' | 'foto' | 'code' | 'CÓDIGO' | 'CONFIRMADO_PELO_MORADOR' = 'manual', photoOverride?: string, packageData?: Package) => {
     if (!pkgId) {
       toast.error('ID da encomenda não encontrado');
       return;
@@ -1448,6 +1469,7 @@ export default function Portaria({ user }: PortariaProps) {
         const currentMethod = finalMethod as string;
         const metodoTraduzido = 
           currentMethod === 'qr_code' ? 'QR' : 
+          currentMethod === 'CONFIRMADO_PELO_MORADOR' ? 'MORADOR' :
           (currentMethod === 'CÓDIGO' || currentMethod === 'code' || currentMethod === 'manual') ? 'CODIGO' : 'FOTO';
 
         const residentData = residents.find(r => r.id === activePackage?.recipient_id);
@@ -1547,6 +1569,7 @@ export default function Portaria({ user }: PortariaProps) {
 
     } catch (error: any) {
       console.error('Erro ao entregar encomenda:', error);
+      feedback.error();
       toast.error(`Erro: ${error.message || 'Falha ao confirmar entrega'}`);
       setQrScanStatus('success');
       return false;
@@ -1618,15 +1641,16 @@ export default function Portaria({ user }: PortariaProps) {
             <p className="text-zinc-500 font-medium truncate max-w-[60%] md:max-w-none">{condoName}</p>
             <button 
               onClick={() => setShowPorterModal(true)}
-              className={`flex items-center gap-2.5 text-[10px] md:text-xs font-semibold uppercase tracking-widest flex-shrink-0 whitespace-nowrap px-3 py-1.5 rounded-xl border transition-all active:scale-95 ${
+              className={`flex items-center gap-1.5 text-[10px] whitespace-nowrap px-3 py-1.5 rounded-full border transition-all active:scale-95 flex-shrink-0 ${
                 currentPorter === 'Selecione o Porteiro' 
                   ? 'bg-amber-50 text-amber-600 border-amber-200 animate-pulse' 
-                  : 'text-zinc-400 hover:bg-zinc-50 border-transparent hover:border-zinc-100'
+                  : 'text-zinc-500 bg-zinc-50 border-zinc-200 hover:bg-zinc-100'
               }`}
               title="Trocar Porteiro"
             >
-              <User className={`w-4 h-4 ${currentPorter === 'Selecione o Porteiro' ? 'text-amber-500' : ''}`} />
-              <span>Porteiro: {currentPorter}</span>
+              <span className="font-medium uppercase tracking-tight flex items-center gap-1.5">
+                {currentPorter === 'Selecione o Porteiro' ? '👤 SELECIONE O PORTEIRO' : `👤 ${currentPorter.toUpperCase()}`}
+              </span>
             </button>
           </div>
           <p className="text-zinc-400 text-sm mt-2 flex items-center justify-between">
@@ -1653,44 +1677,98 @@ export default function Portaria({ user }: PortariaProps) {
               CÓDIGO DE RETIRADA
             </button>
           </div>
-          <button
+          <motion.button
+            key={`photo-btn-pulse-${pulseKey}`}
             type="button"
             onClick={(e) => {
               e.preventDefault();
               navigate('/packages/new');
             }}
+            animate={{
+              scale: [1, 1.05, 1],
+              boxShadow: [
+                "0 10px 15px -3px rgba(16, 185, 129, 0.1), 0 4px 6px -2px rgba(16, 185, 129, 0.05)",
+                "0 20px 25px -5px rgba(16, 185, 129, 0.3), 0 8px 10px -6px rgba(16, 185, 129, 0.15)",
+                "0 10px 15px -3px rgba(16, 185, 129, 0.1), 0 4px 6px -2px rgba(16, 185, 129, 0.05)"
+              ]
+            }}
+            transition={{
+              duration: 0.8,
+              repeat: 2, // Total de 3 pulsos
+              ease: "easeInOut"
+            }}
             className="flex-1 md:flex-none bg-emerald-600 text-white px-6 py-4 rounded-2xl font-bold hover:bg-emerald-700 transition-all flex items-center justify-center gap-3 shadow-lg shadow-emerald-200"
           >
             <Plus className="w-6 h-6" />
             TIRAR FOTO
-          </button>
-          <div className="bg-white/80 backdrop-blur-md border border-zinc-100 px-6 py-4 rounded-3xl flex items-center gap-5 shadow-sm min-w-[320px] mt-2 md:mt-0">
-            <div className="flex items-center gap-3">
-              <span className={`text-[11px] font-black transition-colors ${!notifyAfter ? 'text-rose-600' : 'text-zinc-300'}`}>OFF</span>
-              <button
+          </motion.button>
+          {/* MODO DE NOTIFICAÇÃO - Versão padronizada: Altura igual aos botões superiores e mais compacta */}
+          <div className="bg-white/90 backdrop-blur-md border border-zinc-100 py-2.5 px-6 rounded-2xl shadow-sm min-w-[320px] flex-1 md:flex-none mt-2 md:mt-0 flex flex-col justify-center min-h-[64px]">
+            <h3 className="text-[10px] font-black text-zinc-400 uppercase tracking-[0.3em] mb-1.5 text-center">
+              MODO DE NOTIFICAÇÃO
+            </h3>
+            
+            <div className="flex items-center justify-between gap-4">
+              {/* Opção Esquerda */}
+              <button 
                 type="button"
-                id="toggle-notify-after"
-                onClick={() => setNotifyAfter(!notifyAfter)}
-                className={`relative w-20 h-10 rounded-full transition-all duration-300 shadow-inner p-1.5 ${
-                  notifyAfter ? 'bg-emerald-600' : 'bg-rose-600'
-                }`}
+                onClick={() => {
+                  setNotifyAfter(false);
+                  if (navigator.vibrate) navigator.vibrate(10);
+                }}
+                className={`flex-1 text-center transition-all ${!notifyAfter ? 'opacity-100 scale-105' : 'opacity-20 hover:opacity-40'}`}
               >
-                <motion.div 
-                  layout
-                  transition={{ type: "spring", stiffness: 500, damping: 30 }}
-                  className={`w-7 h-7 bg-white rounded-full shadow-lg flex items-center justify-center ${
-                    notifyAfter ? 'ml-auto' : 'mr-auto'
-                  }`}
-                >
-                  <div className={`w-2 h-2 rounded-full ${notifyAfter ? 'bg-emerald-600' : 'bg-rose-600'}`} />
-                </motion.div>
+                <p className={`text-[12px] font-black leading-tight uppercase transition-colors ${!notifyAfter ? 'text-indigo-600' : 'text-zinc-900'}`}>
+                  ENVIO AUTOMÁTICO
+                </p>
+                <p className="text-[9px] font-bold text-zinc-400 uppercase tracking-tighter mt-0">
+                  Envia na hora
+                </p>
               </button>
-              <span className={`text-[11px] font-black transition-colors ${notifyAfter ? 'text-emerald-600' : 'text-zinc-300'}`}>ON</span>
-            </div>
 
-            <div className="flex-1 flex flex-col border-l border-zinc-100 pl-5 min-w-0">
-              <span className="text-[10px] font-black uppercase tracking-[0.2em] text-zinc-400 leading-none mb-1">Sistema de Envio</span>
-              <span className="text-sm font-bold text-zinc-800 leading-tight">NOTIFICAR APÓS REGISTRO</span>
+              {/* Switch Central */}
+              <div 
+                className="relative w-20 h-10 bg-zinc-100 rounded-full cursor-pointer p-1 shadow-inner shrink-0 flex items-center"
+                onClick={() => {
+                  setNotifyAfter(!notifyAfter);
+                  if (navigator.vibrate) navigator.vibrate(15);
+                }}
+              >
+                <div className="absolute inset-0 flex items-center justify-between px-3 pointer-events-none">
+                  <div className={`w-1.5 h-1.5 rounded-full transition-colors ${!notifyAfter ? 'bg-indigo-600' : 'bg-zinc-300'}`} />
+                  <div className={`w-1.5 h-1.5 rounded-full transition-colors ${notifyAfter ? 'bg-orange-600' : 'bg-zinc-300'}`} />
+                </div>
+                
+                <motion.div
+                  animate={{ x: notifyAfter ? 40 : 0 }}
+                  transition={{ type: "spring", stiffness: 500, damping: 30 }}
+                  className={`w-8 h-8 rounded-full shadow-lg flex items-center justify-center transition-colors relative z-10 ${notifyAfter ? 'bg-orange-600' : 'bg-indigo-600'}`}
+                >
+                  <motion.div 
+                    animate={{ rotate: notifyAfter ? 180 : 0 }}
+                    className="text-white"
+                  >
+                    <ArrowRight className="w-4 h-4" />
+                  </motion.div>
+                </motion.div>
+              </div>
+
+              {/* Opção Direita */}
+              <button 
+                type="button"
+                onClick={() => {
+                  setNotifyAfter(true);
+                  if (navigator.vibrate) navigator.vibrate(10);
+                }}
+                className={`flex-1 text-center transition-all ${notifyAfter ? 'opacity-100 scale-105' : 'opacity-20 hover:opacity-40'}`}
+              >
+                <p className={`text-[12px] font-black leading-tight uppercase transition-colors ${notifyAfter ? 'text-orange-600' : 'text-zinc-900'}`}>
+                  APÓS REGISTRO
+                </p>
+                <p className="text-[9px] font-bold text-zinc-400 uppercase tracking-tighter mt-0">
+                  Avisar depois
+                </p>
+              </button>
             </div>
           </div>
         </div>
@@ -1724,7 +1802,7 @@ export default function Portaria({ user }: PortariaProps) {
         <button 
           type="button"
           onClick={(e) => { e.preventDefault(); setActiveTab('residents'); }}
-          className={`px-6 py-3 rounded-xl font-bold transition-all flex items-center gap-2 whitespace-nowrap ${activeTab === 'residents' ? 'bg-white text-emerald-600 shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
+          className={`px-6 py-3 rounded-xl font-bold transition-all flex items-center gap-2 whitespace-nowrap ${activeTab === 'residents' ? 'bg-white text-blue-600 shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
         >
           <Users className="w-5 h-5" />
           MORADORES ({residents.length})
@@ -1732,15 +1810,15 @@ export default function Portaria({ user }: PortariaProps) {
       </div>
 
       {activeTab === 'residents' && (
-        <div className="bg-emerald-50 border border-emerald-100 rounded-2xl p-4 mb-8 flex flex-wrap gap-8">
+        <div className="bg-blue-50 border border-blue-100 rounded-2xl p-4 mb-8 flex flex-wrap gap-8">
           <div>
-            <p className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest mb-1">Total de Moradores</p>
-            <p className="text-2xl font-bold text-emerald-900">{residents.length}</p>
+            <p className="text-[10px] font-bold text-blue-600 uppercase tracking-widest mb-1">Total de Moradores</p>
+            <p className="text-2xl font-bold text-blue-900">{residents.length}</p>
           </div>
-          <div className="w-px h-10 bg-emerald-200 hidden sm:block" />
+          <div className="w-px h-10 bg-blue-200 hidden sm:block" />
           <div>
-            <p className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest mb-1">Total de Casas</p>
-            <p className="text-2xl font-bold text-emerald-900">
+            <p className="text-[10px] font-bold text-blue-600 uppercase tracking-widest mb-1">Total de Casas</p>
+            <p className="text-2xl font-bold text-blue-900">
               {new Set(residents.filter(r => r.unidade).map(r => `${r.unidade}-${r.block || ''}-${r.street || ''}`)).size}
             </p>
           </div>
@@ -1754,7 +1832,7 @@ export default function Portaria({ user }: PortariaProps) {
           value={searchTerm}
           onChange={(e) => setSearchTerm(e.target.value)}
           className="w-full pl-12 pr-4 py-4 rounded-2xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 transition-all bg-white"
-          placeholder={activeTab !== 'residents' ? "Buscar por destinatário, unidade ou transportadora..." : "Buscar morador por nome ou unidade..."}
+          placeholder={activeTab !== 'residents' ? "Buscar por destinatário ou unidade..." : "Buscar morador por nome ou unidade..."}
         />
       </div>
 
@@ -1766,7 +1844,7 @@ export default function Portaria({ user }: PortariaProps) {
               e.preventDefault();
               navigate('/profiles/new');
             }}
-            className="flex items-center gap-2 px-6 py-3 bg-emerald-600 text-white rounded-2xl font-bold hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-200"
+            className="flex items-center gap-2 px-6 py-3 bg-blue-600 text-white rounded-2xl font-bold hover:bg-blue-700 transition-all shadow-lg shadow-blue-200"
           >
             <UserPlus className="w-5 h-5" />
             Adicionar Morador
@@ -1787,6 +1865,11 @@ export default function Portaria({ user }: PortariaProps) {
                   pkg={pkg}
                   getWhatsAppBadge={getWhatsAppBadge}
                   getDeliveryMethodLabel={getDeliveryMethodLabel}
+                  onDeliver={(p) => {
+                    setQrPackage(p);
+                    setPackageToConfirm(p);
+                    setShowConfirmDelivery(true);
+                  }}
                   onDeliverWithPhoto={(p) => {
                     pendingPackageRef.current = p;
                     setQrPackage(p);
@@ -1795,11 +1878,11 @@ export default function Portaria({ user }: PortariaProps) {
                     setQrScanStatus('validating');
                     fileInputRef.current?.click();
                   }}
-                  onCodeRetrieval={() => {
+                  onCodeRetrieval={(p) => {
+                    setQrPackage(p);
                     setRetrievalMethod('manual');
                     setShowManualInput(true);
                     setIsScanning(true);
-                    setQrPackage(null);
                     setQrScanStatus('idle');
                   }}
                   onViewPhotos={(p) => {
@@ -2479,7 +2562,98 @@ export default function Portaria({ user }: PortariaProps) {
         </div>
       )}
 
-      {/* Modal de Seleção de Porteiro */}
+      {/* Modal de Confirmação de Entrega */}
+      <AnimatePresence>
+        {showConfirmDelivery && packageToConfirm && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-zinc-900/95 backdrop-blur-md">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg overflow-hidden border border-white/10"
+            >
+              <AnimatePresence mode="wait">
+                {isDeliverySuccess ? (
+                  <motion.div
+                    key="success-screen"
+                    initial={{ opacity: 0, scale: 0.8 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0 }}
+                    className="p-12 text-center flex flex-col items-center justify-center min-h-[400px]"
+                  >
+                    <div className="w-24 h-24 bg-emerald-500 text-white rounded-full flex items-center justify-center mb-6 shadow-lg shadow-emerald-200">
+                      <Check className="w-12 h-12" />
+                    </div>
+                    <h3 className="text-4xl font-black text-emerald-600 mb-2 uppercase tracking-tighter">
+                      RECEBIMENTO CONFIRMADO
+                    </h3>
+                    <p className="text-zinc-400 font-medium tracking-widest uppercase text-xs">
+                      Entrega registrada com sucesso
+                    </p>
+                  </motion.div>
+                ) : (
+                  <motion.div
+                    key="confirm-screen"
+                    initial={{ opacity: 1 }}
+                    exit={{ opacity: 0, y: -20 }}
+                    className="p-12 text-center"
+                  >
+                    <div className="w-20 h-20 bg-emerald-50 text-emerald-600 rounded-3xl flex items-center justify-center mx-auto mb-8 transform rotate-3">
+                      <CheckCircle className="w-10 h-10" />
+                    </div>
+                    
+                    <h2 className="text-3xl font-black text-zinc-900 mb-4 uppercase tracking-tight">CONFIRMAR ENTREGA</h2>
+                    <p className="text-zinc-500 mb-12 text-lg font-medium leading-tight px-4">
+                      Peça ao morador para confirmar o recebimento na sua frente:
+                    </p>
+
+                    <div className="space-y-8 flex flex-col items-center">
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          setIsDeliverySuccess(true);
+                          playSuccessSound();
+                          
+                          // Registra no banco
+                          await handleDeliver(
+                            packageToConfirm.package_id || packageToConfirm.id, 
+                            'CONFIRMADO_PELO_MORADOR' as any, 
+                            undefined, 
+                            packageToConfirm
+                          );
+                          
+                          // Aguarda 2 segundos e fecha
+                          setTimeout(() => {
+                            setShowConfirmDelivery(false);
+                            setIsDeliverySuccess(false);
+                            setPackageToConfirm(null);
+                          }, 2000);
+                        }}
+                        className="w-full max-w-sm bg-emerald-600 text-white py-8 rounded-full font-black text-2xl hover:bg-emerald-500 transition-all shadow-xl shadow-emerald-200 flex items-center justify-center gap-4 active:scale-95 group"
+                      >
+                        <span className="group-hover:scale-110 transition-transform">✅</span>
+                        Confirmar recebimento
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowConfirmDelivery(false);
+                          setPackageToConfirm(null);
+                        }}
+                        className="py-4 text-zinc-400 font-bold hover:text-red-500 transition-colors uppercase tracking-[0.3em] text-[10px]"
+                      >
+                        Desistir / Voltar
+                      </button>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       <AnimatePresence>
         {showPorterModal && (
           <div className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-zinc-900/80 backdrop-blur-sm">
@@ -2841,16 +3015,6 @@ export default function Portaria({ user }: PortariaProps) {
                               <div>
                                 <p className="text-[10px] uppercase tracking-widest font-bold text-zinc-500">Unidade</p>
                                 <p className="text-white font-medium">{formatPackageUnit(qrPackage)}</p>
-                              </div>
-                            </div>
-
-                            <div className="flex items-center gap-4 text-zinc-400">
-                              <div className="w-10 h-10 rounded-xl bg-white/5 flex items-center justify-center">
-                                <Truck className="w-5 h-5" />
-                              </div>
-                              <div>
-                                <p className="text-[10px] uppercase tracking-widest font-bold text-zinc-500">Transportadora</p>
-                                <p className="text-white font-medium">{qrPackage.carrier}</p>
                               </div>
                             </div>
 

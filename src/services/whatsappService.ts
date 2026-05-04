@@ -18,6 +18,7 @@ export interface WhatsAppVariables {
   retirado_por?: string;
   hora_retirada?: string;
   photo_url?: string;
+  is_large_package?: boolean;
 }
 
 /**
@@ -74,6 +75,27 @@ export const assembleWhatsAppMessage = (vars: WhatsAppVariables): string => {
     ].join('\n');
   }
 
+  // Modelo especial para ENCOMENDA GRANDE
+  if (vars.is_large_package) {
+    return [
+      `🔔 *AVISO IMPORTANTE – PORTARIA*`,
+      '',
+      `${vars.saudacao}, ${vars.nome_morador}.`,
+      '',
+      `Recebemos uma *ENCOMENDA GRANDE* para sua unidade (${vars.unidade}).`,
+      '',
+      `👉 Por gentileza, solicitamos retirada o mais breve possível devido ao volume.`,
+      '',
+      `📦 Ver encomenda:`,
+      `${vars.photo_url || 'Foto não disponível'}`,
+      '',
+      `🔐 Código de retirada: ${vars.codigo_retirada}`,
+      '',
+      `Obrigado!`,
+      `Portaria`
+    ].join('\n');
+  }
+
   // Modelo padronizado solicitado pelo usuário para encomendas recebidas
   const lines = [
     `${vars.saudacao}, ${vars.nome_morador}!`,
@@ -109,7 +131,8 @@ export const prepareWhatsAppNotification = (
   notificationType: 'disponivel' | 'retirada' = 'disponivel',
   retiradoPor?: string,
   horaRetirada?: string,
-  photoUrl?: string
+  photoUrl?: string,
+  isLargePackage?: boolean
 ): string | null => {
   // Do not notify inactive residents
   if (!resident.ativo) return null;
@@ -134,7 +157,8 @@ export const prepareWhatsAppNotification = (
     tipo_notificacao: notificationType,
     retirado_por: retiradoPor,
     hora_retirada: horaRetirada,
-    photo_url: photoUrl
+    photo_url: photoUrl,
+    is_large_package: isLargePackage
   };
 
   return assembleWhatsAppMessage(vars);

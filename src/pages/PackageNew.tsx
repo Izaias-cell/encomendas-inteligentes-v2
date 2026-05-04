@@ -31,6 +31,7 @@ import {
   Send,
   ArrowRight
 } from 'lucide-react';
+import { feedback } from '../lib/feedback';
 import { supabase } from '../lib/supabase';
 import { Profile, Morador, CondominiumSettings } from '../types';
 import toast from 'react-hot-toast';
@@ -50,12 +51,15 @@ interface PackageNewProps {
 type Step = 'camera' | 'manual' | 'analyzing';
 
 const QUICK_OBSERVATIONS = [
+  'Correios',
+  'Amazon',
+  'Shopee',
+  'Mercado Livre',
+  'TikTok Shop',
   'Caixa frágil',
   'Pacote grande',
-  'Envelope',
-  'Alimento/Perecível',
-  'Geladeira',
-  'Mercado Livre'
+  'Encomenda grande (retirada imediata)',
+  'Envelope'
 ];
 
 export default function PackageNew({ user }: PackageNewProps) {
@@ -87,9 +91,13 @@ export default function PackageNew({ user }: PackageNewProps) {
   const [condoSettings, setCondoSettings] = useState<CondominiumSettings | null>(null);
   const [foundPartialData, setFoundPartialData] = useState(false);
   const [isAiSearch, setIsAiSearch] = useState(false);
-  const [notifyAfter] = useState(() => {
+  const [notifyAfter, setNotifyAfter] = useState(() => {
     return localStorage.getItem('notify_after_registration') === 'true';
   });
+
+  useEffect(() => {
+    localStorage.setItem('notify_after_registration', notifyAfter.toString());
+  }, [notifyAfter]);
   const [statusMessage, setStatusMessage] = useState('Lendo etiqueta...');
   const [allResidents, setAllResidents] = useState<Morador[]>([]);
   const [isWaitingForReturn, setIsWaitingForReturn] = useState(false);
@@ -109,39 +117,16 @@ export default function PackageNew({ user }: PackageNewProps) {
   const [shouldFocusSearch, setShouldFocusSearch] = useState(false);
   const [isBatch, setIsBatch] = useState(false);
   const [batchQuantity, setBatchQuantity] = useState(1);
-  const searchInputRef = useRef<HTMLInputElement>(null);
-  const successAudioRef = useRef<HTMLAudioElement | null>(null);
+  const [detectedHandwrittenUnit, setDetectedHandwrittenUnit] = useState<string | null>(null);
+  const [showResidencyAlert, setShowResidencyAlert] = useState(false);
+  const [ignoreResidencyAlert, setIgnoreResidencyAlert] = useState(false);
+  const [isDetailsExpanded, setIsDetailsExpanded] = useState(true);
+  const [showPickupCode, setShowPickupCode] = useState(false);
+  const unitInputRef = useRef<HTMLInputElement>(null);
   const uploadPromiseRef = useRef<Promise<string | null> | null>(null);
 
-  // Preload sound
-  useEffect(() => {
-    successAudioRef.current = new Audio('/sounds/success.mp3');
-    successAudioRef.current.preload = 'auto';
-    successAudioRef.current.volume = 0.5;
-  }, []);
-
   const playSuccessSound = () => {
-    if (successAudioRef.current) {
-      successAudioRef.current.currentTime = 0;
-      successAudioRef.current.play().catch(() => {
-        // Fallback beep if file doesn't exist or play fails
-        try {
-          const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-          const oscillator = audioCtx.createOscillator();
-          const gainNode = audioCtx.createGain();
-          oscillator.connect(gainNode);
-          gainNode.connect(audioCtx.destination);
-          oscillator.type = 'sine';
-          oscillator.frequency.setValueAtTime(880, audioCtx.currentTime);
-          gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
-          gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
-          oscillator.start();
-          oscillator.stop(audioCtx.currentTime + 0.1);
-        } catch (e) {
-          console.warn('Fallback sound failed', e);
-        }
-      });
-    }
+    feedback.success();
   };
 
   const APP_VERSION = "2.2.1-flow";
@@ -409,19 +394,23 @@ export default function PackageNew({ user }: PackageNewProps) {
       }
       
       // Mudar fluxo IMEDIATAMENTE para manual
-      setStep('manual'); 
       stopCamera();
-      
-      // Salva no estado
       setPhotoUrl(base64);
       setDebugOcrImage(ocrBase64); 
-      setIsOcrLoading(false); // No OCR loading spinner
+      setIsOcrLoading(false);
       setStatusMessage('Entrada Manual');
-      setShouldFocusSearch(true); 
       setIsManualUnitSearch(true); 
+      
+      setStep('manual');
+      
+      // Ativa o foco com um pequeno delay para garantir que o estado de 'manual' disparou o render do input
+      setTimeout(() => {
+        setShouldFocusSearch(true);
+      }, 100);
 
-      // Inicia o fluxo de processamento (Apenas Upload em background, OCR FICA DESATIVADO mas mantido no código)
-      processImageFlow(base64, ocrBase64, false); // Mudei para aceitar skipOcr
+      // Inicia o fluxo de processamento (Apenas Upload em background)
+      // Agora habilitamos o OCR para o recurso "EVITAR ERRO" em background
+      processImageFlow(base64, ocrBase64, true); 
     } else {
       setIsCapturing(false);
     }
@@ -498,6 +487,11 @@ export default function PackageNew({ user }: PackageNewProps) {
     const initialToUse = parsedData.inicial || '';
     const nameToUse = parsedData.destinatario || '';
     const confidence = parsedData.confianca as 'alta' | 'media' | 'baixa';
+
+    // Armazena o número identificado para comparação posterior (EVITAR ERRO)
+    if (unitToUse && confidence === 'alta') {
+      setDetectedHandwrittenUnit(unitToUse);
+    }
 
     setDiagnosticInfo((prev: any) => ({
       ...prev,
@@ -736,6 +730,7 @@ export default function PackageNew({ user }: PackageNewProps) {
       };
       reader.readAsDataURL(file);
     } catch (error: any) {
+      feedback.error();
       toast.error('Erro ao carregar foto: ' + error.message);
       setStep('camera');
       setLoading(false);
@@ -749,6 +744,9 @@ export default function PackageNew({ user }: PackageNewProps) {
       setDebugOcrImage(null);
       setShouldFocusSearch(false);
       setCameraError(null);
+      setDetectedHandwrittenUnit(null);
+      setShowResidencyAlert(false);
+      setIgnoreResidencyAlert(false);
     }
     
     setSelectedResident(null);
@@ -769,6 +767,8 @@ export default function PackageNew({ user }: PackageNewProps) {
     setIsAiSearch(false);
     setLoading(false);
     setIsSaving(false);
+    setIsDetailsExpanded(true);
+    setShowPickupCode(false);
     setIsOcrLoading(false);
     setOcrConfidence(null);
     setStatusMessage('Aguardando...');
@@ -777,10 +777,57 @@ export default function PackageNew({ user }: PackageNewProps) {
     // REMOVIDO: Foco automático no input para evitar abrir teclado
   };
 
+  useEffect(() => {
+    if (shouldFocusSearch && step === 'manual') {
+      const timer = setTimeout(() => {
+        if (unitInputRef.current) {
+          unitInputRef.current.focus();
+          // Tentativa extra para garantir em dispositivos móveis
+          setTimeout(() => unitInputRef.current?.focus(), 50);
+          setShouldFocusSearch(false);
+        }
+      }, 400); // Delay de 400ms conforme solicitado
+      return () => clearTimeout(timer);
+    }
+  }, [shouldFocusSearch, step]);
+
+  useEffect(() => {
+    if (selectedResident && detectedHandwrittenUnit && !ignoreResidencyAlert) {
+      const normalizedDetected = normalizeUnit(detectedHandwrittenUnit).replace(/[^0-9]/g, '');
+      const normalizedSelected = normalizeUnit(selectedResident.unidade || '').replace(/[^0-9]/g, '');
+      
+      if (normalizedDetected && normalizedSelected && normalizedDetected !== normalizedSelected) {
+        setShowResidencyAlert(true);
+      } else {
+        setShowResidencyAlert(false);
+      }
+    } else {
+      setShowResidencyAlert(false);
+    }
+  }, [selectedResident, detectedHandwrittenUnit, ignoreResidencyAlert]);
+
+  // Removed: Auto-expand logic as it's now open by default
   const registrarEncomenda = async (e?: React.FormEvent, directResident?: Morador, shouldNotify: boolean = false) => {
     if (e) e.preventDefault();
     
     if (isSaving) return;
+
+    const residentToUse = directResident || selectedResident;
+
+    // Recurso EVITAR ERRO: Interceptar se houver divergência e o alerta não foi ignorado
+    if (residentToUse && detectedHandwrittenUnit && !ignoreResidencyAlert) {
+      const normalizedDetected = normalizeUnit(detectedHandwrittenUnit).replace(/[^0-9]/g, '');
+      const normalizedSelected = normalizeUnit(residentToUse.unidade || '').replace(/[^0-9]/g, '');
+      
+      if (normalizedDetected && normalizedSelected && normalizedDetected !== normalizedSelected) {
+        setShowResidencyAlert(true);
+        // Se foi um clique direto na lista, selecionamos o morador mas NÃO salvamos ainda
+        if (directResident) {
+          handleSelectResident(directResident);
+        }
+        return;
+      }
+    }
     
     const targetResident = directResident || selectedResident;
     
@@ -843,6 +890,7 @@ export default function PackageNew({ user }: PackageNewProps) {
       const isBatchNote = isBatch || batchQuantity > 1;
       const batchLabel = isBatchNote ? ` (Lote de ${batchQuantity} encomendas)` : '';
       const finalNotes = isBatchNote ? (notes ? `${notes}, Lote de ${batchQuantity} encomendas` : `Lote de ${batchQuantity} encomendas`) : notes;
+      const isLargePackage = notes.includes('Encomenda grande (retirada imediata)');
 
       let directMessage = `Olá, ${targetResident.nome}! Sua encomenda chegou na portaria de ${condoName}. Código: ${finalPickupCode}${batchLabel}`;
       try {
@@ -850,13 +898,14 @@ export default function PackageNew({ user }: PackageNewProps) {
           targetResident,
           condoName,
           finalPickupCode,
-          carrier,
+          finalNotes,
           finalPickupToken,
           totalPackages,
           'disponivel',
           undefined,
           undefined,
-          finalPhotoUrl
+          finalPhotoUrl,
+          isLargePackage
         );
         if (prepared) directMessage = prepared;
       } catch (e) {
@@ -980,6 +1029,7 @@ export default function PackageNew({ user }: PackageNewProps) {
       resetForm();
     } catch (error: any) {
       console.error('Erro ao registrar encomenda:', error);
+      feedback.error();
       toast.error('Erro ao salvar: ' + (error.message || 'Verifique sua conexão'), { id: toastId });
     } finally {
       setLoading(false);
@@ -997,42 +1047,45 @@ export default function PackageNew({ user }: PackageNewProps) {
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 pb-20">
-      {/* Header */}
-      <div className="bg-white border-b sticky top-0 z-10">
-        <div className="max-w-2xl mx-auto px-4 h-16 flex items-center justify-between">
-          <button 
-            onClick={() => {
-              setLoading(false);
-              setIsSaving(false);
-              setIsOcrLoading(false);
-              if (step === 'manual') {
-                resetForm();
-              } else {
-                navigate('/portaria');
-              }
-            }}
-            className="p-2 hover:bg-gray-100 rounded-full transition-colors"
-          >
-            <ArrowLeft className="w-6 h-6 text-gray-600" />
-          </button>
-          <h1 className="text-lg font-semibold text-gray-900 leading-tight text-center">
-            {step === 'manual' ? 'Novo Registro' : step === 'analyzing' ? 'Analisando Etiqueta' : 'Capturar Etiqueta'}
-            <div className="flex items-center justify-center gap-1.5 mt-0.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-              <span className={`text-[10px] font-bold uppercase tracking-wider ${getCurrentPorter() === 'Selecione o Porteiro' ? 'text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200' : 'text-emerald-600'}`}>
-                Porteiro: {getCurrentPorter()}
+    <div className="min-h-screen bg-gray-100 flex justify-center overflow-x-hidden">
+      <div className="w-full max-w-[480px] bg-gray-50 min-h-screen relative flex flex-col shadow-2xl overflow-x-hidden">
+        {/* Header */}
+        <div className="bg-white border-b sticky top-0 z-10 w-full">
+          <div className="px-4 h-16 flex items-center justify-between">
+            <button 
+              onClick={() => {
+                setLoading(false);
+                setIsSaving(false);
+                setIsOcrLoading(false);
+                if (step === 'manual') {
+                  resetForm();
+                } else {
+                  navigate('/portaria');
+                }
+              }}
+              className="p-2 hover:bg-gray-100 rounded-full transition-colors"
+            >
+              <ArrowLeft className="w-6 h-6 text-gray-600" />
+            </button>
+            <h1 className="text-base font-semibold text-gray-900 leading-tight text-center flex-1 mx-2">
+              <span className="block truncate">
+                {step === 'manual' ? 'Novo Registro' : step === 'analyzing' ? 'Analisando Etiqueta' : 'Capturar Etiqueta'}
               </span>
-            </div>
-            <div className="mt-1 text-[8px] text-gray-400 font-medium uppercase tracking-[0.2em]">
-              Fluxo Rápido
-            </div>
-          </h1>
-          <div className="w-10" />
+              <div className="flex items-center justify-center gap-1.5 mt-0.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+                <span className={`text-[9px] font-medium uppercase tracking-tight whitespace-nowrap px-3 py-1 rounded-full border ${getCurrentPorter() === 'Selecione o Porteiro' ? 'text-amber-600 bg-amber-50 border-amber-200' : 'text-emerald-600 bg-emerald-50 border-emerald-200'}`}>
+                  {getCurrentPorter() === 'Selecione o Porteiro' ? '👤 SELECIONE O PORTEIRO' : `👤 ${getCurrentPorter().toUpperCase()}`}
+                </span>
+              </div>
+              <div className="mt-1 text-[8px] text-gray-400 font-medium uppercase tracking-[0.2em]">
+                Fluxo Rápido
+              </div>
+            </h1>
+            <div className="w-10" />
+          </div>
         </div>
-      </div>
 
-      <div className="max-w-2xl mx-auto px-4 py-6">
+        <div className="flex-1 px-4 py-6">
         <AnimatePresence mode="wait">
           {step === 'analyzing' && (
             <motion.div
@@ -1177,20 +1230,9 @@ export default function PackageNew({ user }: PackageNewProps) {
                       {flashOn ? <Zap className="w-6 h-6 text-yellow-400 fill-yellow-400" /> : <ZapOff className="w-6 h-6" />}
                     </button>
                   )}
-                  <div className="absolute inset-0 flex items-center justify-center pointer-events-none p-12">
-                    <div className="w-full aspect-[4/3] border-2 border-white/50 rounded-2xl relative">
-                      {/* Cantos reforçados para o guia */}
-                      <div className="absolute -top-1 -left-1 w-6 h-6 border-t-4 border-l-4 border-indigo-500 rounded-tl-lg" />
-                      <div className="absolute -top-1 -right-1 w-6 h-6 border-t-4 border-r-4 border-indigo-500 rounded-tr-lg" />
-                      <div className="absolute -bottom-1 -left-1 w-6 h-6 border-b-4 border-l-4 border-indigo-500 rounded-bl-lg" />
-                      <div className="absolute -bottom-1 -right-1 w-6 h-6 border-b-4 border-r-4 border-indigo-500 rounded-br-lg" />
-                      
-                      {/* Texto de instrução no guia */}
-                      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-white/50 text-[10px] font-bold uppercase tracking-widest text-center whitespace-nowrap">
-                        Enquadre a etiqueta aqui
-                      </div>
-                    </div>
-                  </div>
+
+                  {/* Overlay removido conforme solicitação */}
+
 
                   <div className="absolute bottom-8 left-0 right-0 flex justify-center px-8 gap-4">
                     <motion.button
@@ -1318,28 +1360,6 @@ export default function PackageNew({ user }: PackageNewProps) {
                         </div>
                       )}
 
-                      {/* Bloco de erro discreto se a IA falhou e não temos sugestões */}
-                          {ocrConfidence === 'baixa' && matchingResidents.length === 0 && (
-                            <div className="bg-zinc-50 border border-zinc-200 rounded-2xl p-4 mb-6 flex items-center gap-4 animate-in fade-in slide-in-from-top-4">
-                              <div className="w-10 h-10 bg-zinc-200 rounded-full flex items-center justify-center shrink-0">
-                                <Info className="w-5 h-5 text-zinc-500" />
-                              </div>
-                              <div className="flex-1">
-                                <h3 className="text-zinc-900 font-bold text-sm">Não foi possível identificar automaticamente</h3>
-                                <p className="text-zinc-500 text-[11px]">Digite o número da casa abaixo para continuar.</p>
-                              </div>
-                              <div className="flex gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() => resetForm()}
-                                  className="p-2 border border-zinc-200 text-zinc-600 rounded-lg hover:bg-zinc-100 transition-colors"
-                                  title="Tirar nova foto"
-                                >
-                                  <Camera className="w-4 h-4" />
-                                </button>
-                              </div>
-                            </div>
-                          )}
 
                           {ocrConfidence === 'baixa' && matchingResidents.length > 0 && (
                             <div className="bg-amber-50 border border-amber-100 rounded-2xl p-4 mb-4 flex items-center gap-3 animate-in fade-in slide-in-from-top-2">
@@ -1420,8 +1440,8 @@ export default function PackageNew({ user }: PackageNewProps) {
                                <Hash className="w-5 h-5 text-indigo-400" />
                              </div>
                              <input
-                               ref={searchInputRef}
-                               type="number"
+                               ref={unitInputRef}
+                               type="tel"
                                inputMode="numeric"
                                placeholder="Casa / Unidade..."
                                value={searchTerm}
@@ -1433,7 +1453,7 @@ export default function PackageNew({ user }: PackageNewProps) {
                           <div className="relative">
                             <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
                             <input
-                              ref={searchInputRef}
+                              ref={unitInputRef}
                               type="text"
                               placeholder="Pesquisar nome do morador..."
                               value={searchTerm}
@@ -1604,95 +1624,154 @@ export default function PackageNew({ user }: PackageNewProps) {
                 </div>
 
                 {/* Package Details */}
-                <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 space-y-6">
-                  <div className="flex items-center gap-2">
-                    <div className="w-8 h-8 bg-emerald-50 rounded-lg flex items-center justify-center">
-                      <Package className="w-5 h-5 text-emerald-600" />
-                    </div>
-                    <h2 className="text-xs font-bold text-gray-400 uppercase tracking-[0.2em]">Detalhes Opcionais</h2>
-                  </div>
-
-                  <div className="space-y-4">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
-                        Tipo de Unidade
-                      </label>
-                      <select
-                        value={unitType}
-                        onChange={(e) => setUnitType(e.target.value)}
-                        className="block w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all bg-white"
-                      >
-                        <option value="">Selecione o tipo</option>
-                        <option value="Apartamento">Apartamento</option>
-                        <option value="Casa">Casa</option>
-                        <option value="Lote">Lote</option>
-                        <option value="Sala">Sala</option>
-                        <option value="Bloco">Bloco</option>
-                        <option value="Outro">Outro</option>
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-2">
-                        Observações Rápidas
-                      </label>
-                      <div className="flex flex-wrap gap-2">
-                        {QUICK_OBSERVATIONS.map((obs) => (
-                          <button
-                            key={obs}
-                            type="button"
-                            onClick={() => toggleObservation(obs)}
-                            className={`px-3 py-1.5 rounded-full text-xs font-medium transition-all ${
-                              notes.includes(obs)
-                                ? 'bg-indigo-600 text-white shadow-md'
-                                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                            }`}
-                          >
-                            {obs}
-                          </button>
-                        ))}
+                <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
+                  <div className="space-y-6">
+                    <div className="flex items-center gap-2">
+                      <div className="w-8 h-8 bg-emerald-50 rounded-lg flex items-center justify-center">
+                        <Package className="w-5 h-5 text-emerald-600" />
                       </div>
+                      <h2 className="text-xs font-bold text-gray-400 uppercase tracking-[0.2em]">Detalhes Opcionais</h2>
                     </div>
 
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
-                        Outras Observações
-                      </label>
-                      <div className="relative">
-                        <div className="absolute top-3 left-3 pointer-events-none">
-                          <FileText className="h-5 w-5 text-gray-400" />
+                    <div className="space-y-4">
+                      <div>
+                        <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2">
+                          Observações Rápidas
+                        </label>
+                        <div className="flex flex-wrap gap-2">
+                          {QUICK_OBSERVATIONS.map((obs) => (
+                            <button
+                              key={obs}
+                              type="button"
+                              onClick={() => toggleObservation(obs)}
+                              className={`px-3 py-1.5 rounded-full text-[11px] font-bold transition-all ${
+                                notes.includes(obs)
+                                  ? 'bg-indigo-600 text-white shadow-md'
+                                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                              }`}
+                            >
+                              {obs}
+                            </button>
+                          ))}
                         </div>
-                        <textarea
-                          value={notes}
-                          onChange={(e) => setNotes(e.target.value)}
-                          rows={2}
-                          placeholder="Digite aqui..."
-                          className="block w-full pl-10 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all resize-none"
-                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2">
+                          Outras Observações
+                        </label>
+                        <div className="relative">
+                          <FileText className="absolute top-3 left-3 h-4 w-4 text-gray-400" />
+                          <textarea
+                            value={notes}
+                            onChange={(e) => setNotes(e.target.value)}
+                            rows={2}
+                            placeholder="Detalhes adicionais do pacote..."
+                            className="block w-full pl-10 pr-4 py-3 bg-gray-50 border border-gray-100 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:bg-white transition-all resize-none text-sm text-gray-900"
+                          />
+                        </div>
                       </div>
                     </div>
                   </div>
                 </div>
 
-                {/* Pickup Code Info */}
-                <div className="bg-indigo-900 rounded-2xl p-6 text-white shadow-lg shadow-indigo-200 mb-2">
-                  <div className="flex items-center justify-between mb-4">
-                    <div className="flex items-center gap-2">
-                      <Hash className="w-5 h-5 text-indigo-300" />
-                      <span className="text-sm font-semibold uppercase tracking-wider">Código de Retirada</span>
+                {/* MODO DE NOTIFICAÇÃO - Versão padronizada e legível (Compacta) */}
+                <div className="bg-white rounded-2xl shadow-sm border border-gray-100 py-3 px-6 mb-4 flex flex-col justify-center min-h-[64px]">
+                  <h3 className="text-[10px] font-black text-gray-400 uppercase tracking-[0.3em] mb-1.5 text-center">
+                    Modo de Notificação
+                  </h3>
+                  
+                  <div className="flex items-center justify-between gap-4">
+                    <button 
+                      type="button"
+                      onClick={() => {
+                        setNotifyAfter(false);
+                        if (navigator.vibrate) navigator.vibrate(10);
+                      }}
+                      className={`flex-1 text-center transition-all ${!notifyAfter ? 'opacity-100' : 'opacity-20'}`}
+                    >
+                      <p className={`text-[12px] font-black uppercase transition-colors ${!notifyAfter ? 'text-indigo-600' : 'text-gray-900'}`}>
+                        AUTOMÁTICO
+                      </p>
+                      <p className="text-[9px] font-bold text-gray-400 uppercase tracking-tighter mt-0">
+                        Notificar agora
+                      </p>
+                    </button>
+
+                    <div 
+                      className="relative w-20 h-10 bg-gray-100 rounded-full cursor-pointer p-1 shadow-inner shrink-0 flex items-center"
+                      onClick={() => {
+                        setNotifyAfter(!notifyAfter);
+                        if (navigator.vibrate) navigator.vibrate(15);
+                      }}
+                    >
+                      <motion.div
+                        initial={false}
+                        animate={{ x: notifyAfter ? 40 : 0 }}
+                        transition={{ type: "spring", stiffness: 500, damping: 30 }}
+                        className={`w-8 h-8 rounded-full shadow-md flex items-center justify-center transition-colors relative z-10 ${notifyAfter ? 'bg-orange-600' : 'bg-indigo-600'}`}
+                      >
+                        <ArrowRight className="w-4 h-4 text-white" />
+                      </motion.div>
                     </div>
-                    <span className="text-xs bg-white/20 px-2 py-1 rounded-full">Gerado Automaticamente</span>
+
+                    <button 
+                      type="button"
+                      onClick={() => {
+                        setNotifyAfter(true);
+                        if (navigator.vibrate) navigator.vibrate(10);
+                      }}
+                      className={`flex-1 text-center transition-all ${notifyAfter ? 'opacity-100' : 'opacity-20'}`}
+                    >
+                      <p className={`text-[12px] font-black uppercase transition-colors ${notifyAfter ? 'text-orange-600' : 'text-gray-900'}`}>
+                        EM LOTE
+                      </p>
+                      <p className="text-[9px] font-bold text-gray-400 uppercase tracking-tighter mt-0">
+                        Avisar depois
+                      </p>
+                    </button>
                   </div>
-                  <div className="flex items-center justify-center gap-4">
-                    {pickupCode.split('').map((digit, i) => (
-                      <div key={i} className="w-14 h-20 bg-white/20 rounded-2xl flex items-center justify-center text-5xl font-black border-2 border-white/30 shadow-lg">
-                        {digit}
-                      </div>
-                    ))}
-                  </div>
-                  <p className="text-center text-xs text-indigo-200 mt-4">
-                    Este código será enviado ao morador via WhatsApp junto com o QR Code.
-                  </p>
+                </div>
+
+                {/* Pickup Code Compact Toggle */}
+                <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4 mb-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowPickupCode(!showPickupCode)}
+                    className="w-full flex items-center justify-between px-2 group transition-all"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="text-gray-400 group-hover:text-gray-600 transition-colors">
+                        {showPickupCode ? '🔓' : '🔒'}
+                      </span>
+                      <span className="text-xs font-bold text-gray-400 uppercase tracking-widest group-hover:text-gray-600 transition-colors">
+                        Código de retirada
+                      </span>
+                    </div>
+                    <AnimatePresence mode="wait">
+                      {showPickupCode ? (
+                        <motion.span
+                          key="code-visible"
+                          initial={{ opacity: 0, scale: 0.9 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          exit={{ opacity: 0, scale: 0.9 }}
+                          transition={{ duration: 0.15 }}
+                          className="text-lg font-black text-indigo-600 tracking-widest"
+                        >
+                          {pickupCode}
+                        </motion.span>
+                      ) : (
+                        <motion.span
+                          key="code-hidden"
+                          initial={{ opacity: 0 }}
+                          animate={{ opacity: 1 }}
+                          exit={{ opacity: 0 }}
+                          transition={{ duration: 0.15 }}
+                          className="w-8 h-1.5 bg-gray-100 rounded-full"
+                        />
+                      )}
+                    </AnimatePresence>
+                  </button>
                 </div>
 
                 {/* Final Actions - SALVAR ENCOMENDA appears when resident is selected */}
@@ -1833,7 +1912,75 @@ export default function PackageNew({ user }: PackageNewProps) {
             </motion.div>
           )}
         </AnimatePresence>
+
+        {/* RECURSO EVITAR ERRO: Alerta de Divergência de Residência */}
+        <AnimatePresence>
+          {showResidencyAlert && (
+            <div className="fixed inset-0 z-[150] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-300">
+              <motion.div 
+                initial={{ scale: 0.9, opacity: 0, y: 20 }}
+                animate={{ scale: 1, opacity: 1, y: 0 }}
+                exit={{ scale: 0.9, opacity: 0, y: 20 }}
+                className="bg-white rounded-[32px] shadow-2xl border-4 border-red-100 max-w-sm w-full overflow-hidden"
+              >
+                <div className="bg-red-50 p-8 flex flex-col items-center text-center">
+                  <div className="w-20 h-20 bg-red-100 text-red-600 rounded-full flex items-center justify-center mb-6 shadow-inner animate-pulse">
+                    <AlertCircle className="w-10 h-10" />
+                  </div>
+                  <h3 className="text-2xl font-black text-red-900 mb-2 leading-tight uppercase tracking-tight">
+                    RESIDÊNCIA NÃO CONFERE
+                  </h3>
+                  <p className="text-red-700 font-medium mb-6">
+                    O número capturado na foto parece ser diferente do selecionado.
+                  </p>
+
+                  <div className="w-full grid grid-cols-2 gap-4 mb-8">
+                    <div className="bg-white rounded-2xl p-4 border border-red-100 shadow-sm">
+                      <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Na Foto</p>
+                      <p className="text-2xl font-black text-red-600 font-mono">{detectedHandwrittenUnit}</p>
+                    </div>
+                    <div className="bg-white rounded-2xl p-4 border border-zinc-100 shadow-sm">
+                      <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Digitado</p>
+                      <p className="text-2xl font-black text-zinc-900 font-mono">{(selectedResident || matchingResidents[0]?.resident)?.unidade}</p>
+                    </div>
+                  </div>
+
+                  <p className="text-xs text-red-500 font-bold uppercase tracking-widest mb-8">Verifique antes de registrar.</p>
+
+                  <div className="flex flex-col gap-3 w-full">
+                    <button
+                      onClick={() => {
+                        setShowResidencyAlert(false);
+                        handleClearResident();
+                        setIsManualUnitSearch(true);
+                        setSearchTerm('');
+                        setTimeout(() => unitInputRef.current?.focus(), 300);
+                      }}
+                      className="w-full py-4 bg-red-600 text-white rounded-2xl font-bold text-lg hover:bg-red-700 transition-all shadow-lg shadow-red-200 active:scale-95 flex items-center justify-center gap-2"
+                    >
+                      CORRIGIR NÚMERO
+                    </button>
+                    <button
+                      onClick={() => {
+                        setIgnoreResidencyAlert(true);
+                        setShowResidencyAlert(false);
+                        // Tenta registrar novamente agora que ignore está true
+                        setTimeout(() => {
+                           if (selectedResident) registrarEncomenda(undefined, selectedResident, false);
+                        }, 100);
+                      }}
+                      className="w-full py-4 bg-zinc-100 text-zinc-600 rounded-2xl font-bold hover:bg-zinc-200 transition-all active:scale-95"
+                    >
+                      CONTINUAR MESMO ASSIM
+                    </button>
+                  </div>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
       </div>
     </div>
-  );
+  </div>
+);
 }

@@ -474,6 +474,15 @@ export default function Dashboard({ user }: DashboardProps) {
                 onClick={() => navigate('/profiles/new')}
                 color="bg-emerald-100 text-emerald-600"
               />
+            </>
+          );
+        })()}
+
+        {/* Admin Only Actions */}
+        {(() => {
+          const role = normalizeRole(user.role);
+          return role === 'admin' && (
+            <>
               <ActionCard 
                 title="Usuários" 
                 description="Controle de acesso para administradores, síndicos e porteiros." 
@@ -488,29 +497,23 @@ export default function Dashboard({ user }: DashboardProps) {
                 onClick={() => navigate('/settings')}
                 color="bg-zinc-100 text-zinc-600"
               />
+              <ActionCard 
+                title="ADICIONAR NOVO CONDOMÍNIO" 
+                description="Cadastre um novo condomínio com síndico e porteiros." 
+                icon={Building2} 
+                onClick={() => setShowCondoModal(true)}
+                color="bg-indigo-100 text-indigo-600"
+              />
+              <ActionCard 
+                title="Limpar Dados" 
+                description="Remova moradores de teste e todas as encomendas para iniciar o uso real." 
+                icon={Trash2} 
+                onClick={openClearModal}
+                color="bg-amber-100 text-amber-600"
+              />
             </>
           );
         })()}
-
-        {/* Admin Only Actions */}
-        {normalizeRole(user.role) === 'admin' && (
-          <>
-            <ActionCard 
-              title="ADICIONAR NOVO CONDOMÍNIO" 
-              description="Cadastre um novo condomínio com síndico e porteiros." 
-              icon={Building2} 
-              onClick={() => setShowCondoModal(true)}
-              color="bg-indigo-100 text-indigo-600"
-            />
-            <ActionCard 
-              title="Limpar Dados" 
-              description="Remova moradores de teste e todas as encomendas para iniciar o uso real." 
-              icon={Trash2} 
-              onClick={openClearModal}
-              color="bg-amber-100 text-amber-600"
-            />
-          </>
-        )}
 
         {/* Resident Actions */}
         {normalizeRole(user.role) === 'resident' && (

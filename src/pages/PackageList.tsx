@@ -2,11 +2,12 @@ import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { Package, Profile } from '../types';
-import { Package as PackageIcon, Plus, Loader2, Search, User, Home, Truck, Calendar, CheckCircle, Clock, QrCode, Hash, MessageSquare, ArrowRight } from 'lucide-react';
+import { Package as PackageIcon, Plus, Loader2, Search, User, Home, Truck, Calendar, CheckCircle, Clock, QrCode, Hash, MessageSquare, MessageCircle, AlertCircle, ArrowRight } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { formatDate, formatSafeDateTime } from '../lib/dateUtils';
 import { formatResidentAddress, formatPackageUnit } from '../lib/residentUtils';
 import { ptBR } from 'date-fns/locale';
+import { motion } from 'motion/react';
 
 interface PackageListProps {
   user: Profile;
@@ -106,39 +107,34 @@ export default function PackageList({ user }: PackageListProps) {
     );
   };
 
-  const getWhatsAppBadge = (status: string) => {
-    const variants: any = {
-      pending: 'text-amber-500',
-      pendente: 'text-amber-500',
-      sent: 'text-blue-500',
-      enviado: 'text-blue-600',
-      delivered: 'text-emerald-500',
-      read: 'text-emerald-600',
-      failed: 'text-red-500',
-      error: 'text-red-500',
-      no_recipient: 'text-zinc-400'
-    };
-    const labels: any = {
-      pending: 'Pendente',
-      pendente: 'Pendente',
-      sent: 'Enviado',
-      enviado: 'Enviado',
-      delivered: 'Entregue',
-      read: 'Lido',
-      failed: 'Falhou',
-      error: 'Erro',
-      no_recipient: 'Sem destinatário'
-    };
+  const getWhatsAppBadge = (status: string, pkg?: any) => {
+    // Check if was notified by flag or by status string
+    const isActuallySent = (pkg?.whatsapp_sent || pkg?.whatsapp_notified) || 
+      ['sent', 'enviado', 'delivered', 'read'].includes((status || '').toLowerCase());
     
-    if (!status) return null;
+    if (isActuallySent) {
+      return (
+        <div className="flex items-center gap-2 px-5 py-0.5 text-emerald-600 font-black opacity-90 hover:opacity-100 bg-emerald-50/50 rounded-full border border-emerald-100" title="Avisado">
+          <span className="text-[12px] uppercase tracking-wide">💬 Avisado</span>
+        </div>
+      );
+    }
 
     return (
-      <div className="flex items-center gap-1.5" title={`WhatsApp: ${labels[status] || status}`}>
-        <MessageSquare className={`w-3.5 h-3.5 ${variants[status] || 'text-zinc-400'}`} />
-        <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-tight">
-          {labels[status] || status}
-        </span>
-      </div>
+      <motion.div 
+        animate={{ 
+          scale: [1, 1.05, 1],
+        }}
+        transition={{ 
+          duration: 1.5, 
+          repeat: Infinity,
+          ease: "easeInOut"
+        }}
+        className="flex items-center gap-1.5 px-3 py-1 bg-red-50 text-red-600 font-bold rounded-full border border-red-200 shadow-sm"
+        title="Clique para avisar o morador"
+      >
+        <span className="text-[10px] uppercase tracking-tight">💬 Avisar Morador</span>
+      </motion.div>
     );
   };
 
@@ -180,7 +176,7 @@ export default function PackageList({ user }: PackageListProps) {
           value={searchTerm}
           onChange={(e) => setSearchTerm(e.target.value)}
           className="w-full pl-12 pr-4 py-4 rounded-2xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 transition-all bg-white"
-          placeholder="Buscar por destinatário, unidade ou transportadora..."
+          placeholder="Buscar por destinatário ou unidade..."
         />
       </div>
 
@@ -212,11 +208,9 @@ export default function PackageList({ user }: PackageListProps) {
                       </div>
                     )}
                   </div>
-                  {pkg.isGroup && (
-                    <span className={`absolute -top-3 -right-3 text-white text-sm font-bold w-9 h-9 rounded-full flex items-center justify-center border-2 border-white shadow-lg z-10 group-hover:scale-110 transition-transform ${pkg.status === 'delivered' ? 'bg-[#3B82F6]' : 'bg-emerald-500 shadow-[0_4px_12px_rgba(5,150,105,0.3)]'}`}>
-                      {pkg.count}
-                    </span>
-                  )}
+                  <span className={`absolute -top-3 -right-3 text-white text-sm font-bold w-9 h-9 rounded-full flex items-center justify-center border-2 border-white shadow-lg z-10 group-hover:scale-110 transition-transform ${pkg.status === 'delivered' ? 'bg-emerald-500 shadow-[0_4px_12px_rgba(16,185,129,0.3)]' : 'bg-red-500 shadow-[0_4px_12px_rgba(239,68,68,0.3)]'}`}>
+                    {pkg.isGroup ? pkg.count : 1}
+                  </span>
                 </div>
                 <div className="flex items-center gap-2">
                   {pkg.status !== 'delivered' && pkg.pickup_token && (
@@ -232,7 +226,7 @@ export default function PackageList({ user }: PackageListProps) {
                 <h3 className="text-xl font-bold text-zinc-900 truncate pr-2" title={pkg.moradores?.nome}>
                   {pkg.moradores?.nome || 'Morador não identificado'}
                 </h3>
-                {getWhatsAppBadge(pkg.whatsapp_status)}
+                {getWhatsAppBadge(pkg.whatsapp_status, pkg)}
               </div>
               
               <div className="space-y-3">
@@ -240,28 +234,12 @@ export default function PackageList({ user }: PackageListProps) {
                   <Home className="w-4 h-4 flex-shrink-0" />
                   <p className="font-medium">{formatPackageUnit(pkg)}</p>
                 </div>
-                {!pkg.isGroup && (
-                  <div className="flex items-center gap-3 text-zinc-500 text-sm">
-                    <Truck className="w-4 h-4 flex-shrink-0" />
-                    <p>{pkg.carrier}</p>
-                  </div>
-                )}
-                {pkg.isGroup && (
-                  <div className="bg-zinc-50 rounded-xl p-3 space-y-2">
-                    <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Transportadoras:</p>
-                    <div className="flex flex-wrap gap-2">
-                      {Array.from(new Set(pkg.packages.map((p: any) => p.carrier))).map((c: any, i) => (
-                        <span key={i} className="text-[11px] bg-white border border-zinc-200 px-2 py-0.5 rounded-md text-zinc-600 font-medium">{c}</span>
-                      ))}
-                    </div>
-                  </div>
-                )}
                 <div className="mt-4 pt-4 border-t border-zinc-50 space-y-3">
                   <div className="flex flex-col">
                     <span className="text-[10px] font-bold text-zinc-400 tracking-widest uppercase">
                       Código de retirada {pkg.isGroup ? 'Único' : ''}
                     </span>
-                    <p className={`font-mono text-sm font-bold ${pkg.status === 'delivered' ? 'text-zinc-500' : 'text-emerald-600'}`}>{pkg.pickup_code || '-'}</p>
+                    <p className={`font-mono text-sm font-bold ${pkg.status === 'delivered' ? 'text-emerald-600' : 'text-red-600'}`}>{pkg.pickup_code || '-'}</p>
                   </div>
 
                   {!pkg.isGroup && pkg.tracking_code && (
@@ -373,7 +351,6 @@ export default function PackageList({ user }: PackageListProps) {
 
             <div className="text-left bg-zinc-50 p-4 rounded-xl mb-6">
               <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Detalhes</p>
-              <p className="text-sm font-bold text-zinc-900">{selectedPkg.carrier}</p>
               <p className="text-xs text-zinc-500">Recebido em {formatSafeDateTime(selectedPkg.received_at)}</p>
             </div>
 

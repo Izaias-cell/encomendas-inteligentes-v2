@@ -139,7 +139,7 @@ const ResidentPortal = () => {
             <Package className="w-4 h-4" />
             Pendentes
             {pendingPackages.length > 0 && (
-              <span className="bg-emerald-600 text-white text-[10px] w-5 h-5 rounded-full flex items-center justify-center">
+              <span className="bg-red-600 text-white text-[10px] w-5 h-5 rounded-full flex items-center justify-center">
                 {pendingPackages.length}
               </span>
             )}
@@ -193,7 +193,7 @@ const ResidentPortal = () => {
                         )}
                         <div className="flex flex-col">
                           <span className="text-[9px] font-bold text-zinc-400 tracking-widest uppercase">Código de retirada</span>
-                          <p className={`text-sm font-mono font-bold ${pkg.status === 'delivered' ? 'text-zinc-500' : 'text-emerald-600'}`}>{pkg.pickup_code || '-'}</p>
+                          <p className={`text-sm font-mono font-bold ${pkg.status === 'delivered' ? 'text-emerald-600' : 'text-red-600'}`}>{pkg.pickup_code || '-'}</p>
                         </div>
                       </div>
                     </div>
@@ -302,7 +302,7 @@ const ResidentPortal = () => {
                     <div className="flex justify-between items-center py-3 border-b border-zinc-50">
                       <div className="flex flex-col">
                         <span className="text-zinc-400 text-[10px] font-bold tracking-widest uppercase">Código de retirada</span>
-                        <span className={`font-mono font-black tracking-wider ${selectedPkg.status === 'delivered' ? 'text-zinc-500 text-sm' : 'text-emerald-600 text-lg'}`}>{selectedPkg.pickup_code}</span>
+                        <span className={`font-mono font-black tracking-wider ${selectedPkg.status === 'delivered' ? 'text-emerald-600 text-sm' : 'text-red-600 text-lg'}`}>{selectedPkg.pickup_code}</span>
                       </div>
                     </div>
                   )}

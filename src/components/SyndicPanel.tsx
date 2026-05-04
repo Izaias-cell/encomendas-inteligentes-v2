@@ -768,7 +768,7 @@ const PackagesList = ({ user, counts: externalCounts }: any) => {
         <div className="relative w-full md:w-64">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
           <Input
-            placeholder="Buscar encomenda..."
+            placeholder="Buscar por morador ou unidade..."
             className="pl-10"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
@@ -890,12 +890,6 @@ const PackagesList = ({ user, counts: externalCounts }: any) => {
                 </div>
               </div>
 
-              {/* Linha 5: Transportadora */}
-              <div className="flex items-center gap-2 mb-3 text-zinc-600">
-                <Truck className="w-3.5 h-3.5 text-zinc-400" />
-                <span className="text-xs font-medium truncate">{pkg.carrier || 'Não informada'}</span>
-              </div>
-
               {/* Linha 6: Forma de retirada (QR ou código) */}
               <div className="mt-auto pt-3 border-t border-zinc-100 flex items-center justify-between">
                 <div className="flex items-center gap-1.5">
@@ -963,9 +957,7 @@ const PackagesList = ({ user, counts: externalCounts }: any) => {
                 </p>
               </div>
               <div>
-                <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest block mb-1">Transportadora</label>
-                <p className="font-bold text-zinc-900">{selectedPackage.carrier}</p>
-                <div className="mt-2 space-y-2">
+                <div className="space-y-2">
                   {selectedPackage.tracking_code && (
                     <div className="flex flex-col">
                       <span className="text-[9px] font-bold text-zinc-400 tracking-widest uppercase">Código da etiqueta</span>
@@ -2616,8 +2608,8 @@ export default function SyndicPanel({ user, onLogout, onUpdateUser }: { user: Pr
     { id: 'historico', label: 'Histórico', icon: History },
     { id: 'moradores', label: `MORADORES (${activeResidentsCount})`, icon: Users },
     { id: 'moradores_desativados', label: 'Moradores Desativados', icon: XCircle },
-    { id: 'usuarios', label: 'Usuários', icon: Shield },
-    ...(normalizeRole(user.role) === 'admin' || normalizeRole(user.role) === 'sindico' ? [
+    ...(normalizeRole(user.role) === 'admin' ? [
+      { id: 'usuarios', label: 'Usuários', icon: Shield },
       { id: 'settings', label: 'Configurações', icon: Settings },
       { id: 'audit', label: 'Auditoria', icon: History }
     ] : []),

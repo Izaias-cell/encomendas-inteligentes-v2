@@ -1493,11 +1493,7 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
                         <p className="text-sm text-zinc-500">{formatPackageUnit(qrPackage)}</p>
                       </div>
 
-                      <div className="grid grid-cols-2 gap-3">
-                        <div className="bg-zinc-50 p-4 rounded-2xl border border-zinc-100">
-                          <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Transportadora</p>
-                          <p className="text-sm font-bold text-zinc-900">{qrPackage.carrier}</p>
-                        </div>
+                      <div className="mt-2 space-y-3">
                         <div className="bg-zinc-50 p-4 rounded-2xl border border-zinc-100">
                           <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Recebido em</p>
                           <p className="text-sm font-bold text-zinc-900">{formatSafeDateTime(qrPackage.created_at)}</p>
@@ -2282,11 +2278,11 @@ const AppLayout = ({ user, loading, setUser, handleLogout }: any) => {
                   >
                     Moradores
                   </button>
-                  {(role === 'admin' || role === 'sindico') && (
+                  {role === 'admin' && (
                     <button 
-                      onClick={() => navigate(role === 'sindico' ? '/sindico?tab=users' : '/users')}
+                      onClick={() => navigate('/users')}
                       className={`px-4 py-2 rounded-xl text-sm font-bold transition-all ${
-                        location.pathname === '/users' || (location.pathname === '/sindico' && new URLSearchParams(location.search).get('tab') === 'users')
+                        location.pathname === '/users'
                           ? 'bg-emerald-50 text-emerald-600' 
                           : 'text-zinc-500 hover:bg-zinc-50'
                       }`}
@@ -2347,7 +2343,7 @@ const AppLayout = ({ user, loading, setUser, handleLogout }: any) => {
           <Route path="/settings" element={
             (() => {
               const role = normalizeRole(user.role);
-              return role === 'admin' || role === 'sindico' ? <Settings user={user} /> : <Navigate to="/dashboard" />;
+              return role === 'admin' ? <Settings user={user} /> : <Navigate to="/dashboard" />;
             })()
           } />
           
@@ -2393,8 +2389,8 @@ const AppLayout = ({ user, loading, setUser, handleLogout }: any) => {
                 <button 
                   onClick={() => navigate('/portaria')}
                   className={`flex flex-col items-center gap-1 ${
-                    location.pathname === '/portaria' && !new URLSearchParams(location.search).get('tab') ? 'text-emerald-600' : 'text-zinc-400'
-                  }`}
+                  location.pathname === '/portaria' && !new URLSearchParams(location.search).get('tab') ? 'text-zinc-800' : 'text-zinc-400'
+                }`}
                 >
                   <Package className="w-6 h-6" />
                   <span className="text-[10px] font-bold uppercase tracking-wider">Portaria</span>
@@ -2409,17 +2405,17 @@ const AppLayout = ({ user, loading, setUser, handleLogout }: any) => {
                 className={`flex flex-col items-center gap-1 ${
                   (location.pathname === '/portaria' && new URLSearchParams(location.search).get('tab') === 'residents') || 
                   (location.pathname === '/sindico' && new URLSearchParams(location.search).get('tab') === 'residents') ||
-                  location.pathname === '/profiles' ? 'text-emerald-600' : 'text-zinc-400'
+                  location.pathname === '/profiles' ? 'text-blue-600' : 'text-zinc-400'
                 }`}
               >
                 <Users className="w-6 h-6" />
                 <span className="text-[10px] font-bold uppercase tracking-wider">Moradores</span>
               </button>
-              {(role === 'admin' || role === 'sindico') && (
+              {role === 'admin' && (
                 <button 
-                  onClick={() => navigate(role === 'sindico' ? '/sindico?tab=users' : '/users')}
+                  onClick={() => navigate('/users')}
                   className={`flex flex-col items-center gap-1 ${
-                    location.pathname === '/users' || (location.pathname === '/sindico' && new URLSearchParams(location.search).get('tab') === 'users') ? 'text-emerald-600' : 'text-zinc-400'
+                    location.pathname === '/users' ? 'text-zinc-800' : 'text-zinc-400'
                   }`}
                 >
                   <Shield className="w-6 h-6" />

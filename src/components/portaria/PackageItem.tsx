@@ -1,15 +1,16 @@
 import React from 'react';
-import { Package as PackageIcon, Home, Truck, Clock, CheckCircle, ArrowRight, Camera, Hash, Layers, MessageSquare, Send } from 'lucide-react';
+import { Package as PackageIcon, Home, Clock, CheckCircle, ArrowRight, Camera, Hash, Layers, MessageSquare, MessageCircle, AlertCircle, Send } from 'lucide-react';
 import { Package } from '../../types';
 import { formatSafeDateTime } from '../../lib/dateUtils';
 import { formatPackageUnit } from '../../lib/residentUtils';
 
 interface PackageItemProps {
   pkg: any;
-  getWhatsAppBadge: (status: string) => React.ReactNode;
+  getWhatsAppBadge: (status: string, pkg?: any) => React.ReactNode;
   getDeliveryMethodLabel: (method?: string) => string;
+  onDeliver?: (pkg: any) => void;
   onDeliverWithPhoto: (pkg: any) => void;
-  onCodeRetrieval: () => void;
+  onCodeRetrieval: (pkg: any) => void;
   onViewPhotos?: (pkg: any) => void;
   onViewLabel?: (url: string) => void;
   onNotify?: (pkg: any) => void;
@@ -21,6 +22,7 @@ const PackageItem: React.FC<PackageItemProps> = ({
   pkg, 
   getWhatsAppBadge, 
   getDeliveryMethodLabel,
+  onDeliver,
   onDeliverWithPhoto,
   onCodeRetrieval,
   onViewPhotos,
@@ -30,9 +32,10 @@ const PackageItem: React.FC<PackageItemProps> = ({
   setQrPackage
 }) => {
   const isNotified = pkg.whatsapp_sent === true || pkg.whatsapp_notified === true;
+  const elementId = `package-${pkg.package_id || pkg.id}`;
   
   return (
-    <div className="bg-white rounded-3xl border border-zinc-100 shadow-sm p-6 hover:shadow-md transition-all group">
+    <div id={elementId} className="bg-white rounded-3xl border border-zinc-100 shadow-sm p-6 hover:shadow-md transition-all group">
       <div className="flex justify-between items-start mb-4">
         <div className={`w-14 h-14 rounded-2xl flex items-center justify-center relative transition-colors shrink-0 ${pkg.status === 'delivered' ? 'bg-emerald-50' : 'bg-zinc-100 group-hover:bg-zinc-200'}`}>
           <div className="relative">
@@ -49,11 +52,9 @@ const PackageItem: React.FC<PackageItemProps> = ({
               </div>
             )}
           </div>
-          {pkg.isGroup && (
-            <span className={`absolute -top-3 -right-3 text-white text-sm font-bold w-9 h-9 rounded-full flex items-center justify-center border-2 border-white shadow-lg z-10 group-hover:scale-110 transition-transform ${pkg.status === 'delivered' ? 'bg-[#3B82F6]' : 'bg-emerald-500 shadow-[0_4px_12px_rgba(5,150,105,0.3)]'}`}>
-              {pkg.count}
-            </span>
-          )}
+          <span className={`absolute -top-3 -right-3 text-white text-sm font-bold w-9 h-9 rounded-full flex items-center justify-center border-2 border-white shadow-lg z-10 group-hover:scale-110 transition-transform ${pkg.status === 'delivered' ? 'bg-emerald-500 shadow-[0_4px_12px_rgba(16,185,129,0.3)]' : 'bg-red-500 shadow-[0_4px_12px_rgba(239,68,68,0.3)]'}`}>
+            {pkg.isGroup ? pkg.count : 1}
+          </span>
         </div>
         <div className="flex flex-col items-end gap-1">
           <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider ${pkg.status === 'delivered' ? 'bg-zinc-100 text-zinc-600' : 'bg-amber-100 text-amber-700'}`}>
@@ -76,23 +77,6 @@ const PackageItem: React.FC<PackageItemProps> = ({
           <Home className="w-4 h-4 flex-shrink-0" />
           <p className="font-medium">{formatPackageUnit(pkg)}</p>
         </div>
-        {!pkg.isGroup && (
-          <div className="flex items-center gap-3 text-zinc-500 text-sm">
-            <Truck className="w-4 h-4 flex-shrink-0" />
-            <p>{pkg.carrier}</p>
-          </div>
-        )}
-        
-        {pkg.isGroup && (
-          <div className="bg-zinc-50 rounded-xl p-3 space-y-2">
-            <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Transportadoras:</p>
-            <div className="flex flex-wrap gap-2">
-              {Array.from(new Set(pkg.packages.map((p: any) => p.carrier))).map((c: any, i) => (
-                <span key={i} className="text-[11px] bg-white border border-zinc-200 px-2 py-0.5 rounded-md text-zinc-600 font-medium">{c}</span>
-              ))}
-            </div>
-          </div>
-        )}
         
         <div className="mt-4 pt-4 border-t border-zinc-50 space-y-3">
           <div className="flex flex-col">
@@ -106,9 +90,9 @@ const PackageItem: React.FC<PackageItemProps> = ({
                 e.stopPropagation();
                 if (pkg.status === 'delivered') return;
                 setQrPackage(pkg);
-                handleDeliver(pkg.package_id || pkg.id, 'code', undefined, pkg);
+                onCodeRetrieval(pkg);
               }}
-              className={`font-mono text-2xl font-black tracking-wider text-left transition-all ${pkg.status === 'delivered' ? 'text-zinc-400 cursor-default' : 'text-emerald-600 hover:text-emerald-700 hover:scale-105 active:scale-95'}`}
+              className={`font-mono text-2xl font-black tracking-wider text-left transition-all ${pkg.status === 'delivered' ? 'text-emerald-600 cursor-default' : 'text-red-600 hover:text-red-700 hover:scale-105 active:scale-95'}`}
               title={pkg.status === 'delivered' ? '' : 'Clique para dar baixa usando este código'}
               disabled={pkg.status === 'delivered'}
             >
@@ -162,33 +146,22 @@ const PackageItem: React.FC<PackageItemProps> = ({
       </div>
 
       <div className="grid grid-cols-2 gap-3">
-        {pkg.status === 'received' && !isNotified && (
-          <button 
-            type="button"
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              onNotify?.(pkg);
-            }}
-            className="col-span-2 bg-indigo-600 text-white py-4 rounded-2xl font-bold hover:bg-indigo-700 transition-all flex items-center justify-center gap-3 text-base shadow-lg shadow-indigo-100 mb-1"
-          >
-            <Send className="w-5 h-5" />
-            NOTIFICAR MORADOR
-          </button>
-        )}
-
         <button 
           type="button"
           onClick={(e) => {
             e.preventDefault();
             e.stopPropagation();
-            onDeliverWithPhoto(pkg);
+            if (onDeliver) {
+              onDeliver(pkg);
+            } else {
+              onDeliverWithPhoto(pkg);
+            }
           }}
           disabled={pkg.status === 'delivered'}
           className={`col-span-2 py-4 rounded-2xl font-bold transition-all flex items-center justify-center gap-3 text-base shadow-lg ${pkg.status === 'delivered' ? 'bg-zinc-50 text-zinc-400 cursor-not-allowed' : 'bg-emerald-600 text-white hover:bg-emerald-700 shadow-emerald-900/20'}`}
         >
-          <Camera className={`w-5 h-5 ${pkg.status === 'delivered' ? 'hidden' : ''}`} />
-          {pkg.status === 'delivered' ? 'Entregue' : (pkg.isGroup ? 'ENTREGAR TODAS' : 'ENTREGAR COM FOTO')}
+          <CheckCircle className={`w-5 h-5 ${pkg.status === 'delivered' ? 'hidden' : ''}`} />
+          {pkg.status === 'delivered' ? 'Entregue' : (pkg.isGroup ? 'ENTREGAR TODAS' : 'ENTREGAR')}
         </button>
         {pkg.isGroup && (
           <button 
@@ -204,22 +177,37 @@ const PackageItem: React.FC<PackageItemProps> = ({
             Ver etiquetas
           </button>
         )}
-        <div className="col-span-2 flex gap-2">
-          <button 
-            type="button"
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              onCodeRetrieval();
-            }}
-            className="flex-1 bg-zinc-100 text-zinc-600 py-4 rounded-2xl font-bold hover:bg-zinc-900 hover:text-white transition-all flex items-center justify-center gap-3 text-base"
-          >
-            <Hash className="w-5 h-5" />
-            CÓDIGO
-          </button>
-        </div>
+        {pkg.status !== 'delivered' && (
+          <div className="col-span-2 flex flex-col gap-3 mt-1">
+            <button 
+              type="button"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                onCodeRetrieval(pkg);
+              }}
+              className="w-full bg-zinc-100 text-zinc-600 py-3.5 rounded-2xl font-bold hover:bg-zinc-200 transition-all flex items-center justify-center gap-2.5 text-sm"
+            >
+              <Hash className="w-4 h-4 opacity-70" />
+              VALIDAR POR CÓDIGO
+            </button>
+            <button 
+              type="button"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                onDeliverWithPhoto(pkg);
+              }}
+              className="w-full bg-zinc-100 text-zinc-600 py-3.5 rounded-2xl font-bold hover:bg-zinc-200 transition-all flex items-center justify-center gap-2.5 text-sm"
+            >
+              <Camera className="w-4 h-4 opacity-70" />
+              ENTREGAR COM FOTO
+            </button>
+          </div>
+        )}
       </div>
     </div>
+
   );
 };
 
