@@ -1955,8 +1955,8 @@ export default function Portaria({ user }: PortariaProps) {
 
       {/* Modal de Foto Individual */}
       {viewPhotoUrl && !viewGroupPhotos && (
-        <div className="fixed inset-0 bg-black/90 z-[70] flex items-center justify-center p-4 backdrop-blur-md animate-in fade-in duration-300">
-          <div className="relative max-w-4xl w-full max-h-[90vh] flex flex-col items-center">
+        <div className="fixed inset-0 bg-black/95 z-[70] flex items-center justify-center p-4 backdrop-blur-md animate-in fade-in duration-300">
+          <div className="relative max-w-5xl w-full h-[95vh] flex flex-col items-center justify-center">
             <button 
               type="button"
               onClick={(e) => {
@@ -1964,17 +1964,21 @@ export default function Portaria({ user }: PortariaProps) {
                 setViewPhotoUrl(null);
                 setViewPhotoPkg(null);
               }}
-              className="absolute -top-12 right-0 text-white bg-white/10 hover:bg-white/20 p-2 rounded-full transition-all"
+              className="absolute top-0 right-0 text-white bg-white/10 hover:bg-white/20 p-2 rounded-full transition-all z-10"
             >
-              <Plus className="w-6 h-6 rotate-45" />
+              <Plus className="w-8 h-8 rotate-45" />
             </button>
-            <img 
-              src={viewPhotoUrl} 
-              alt="Foto da etiqueta" 
-              className="max-w-full max-h-[80vh] object-contain rounded-2xl shadow-2xl border-4 border-white/10"
-              referrerPolicy="no-referrer"
-            />
-            <div className="mt-6 flex gap-4">
+            
+            <div className="flex-1 w-full flex items-center justify-center overflow-hidden">
+              <img 
+                src={viewPhotoUrl} 
+                alt="Foto da etiqueta" 
+                className="max-w-full max-h-full object-contain rounded-3xl shadow-2xl border-2 border-white/10"
+                referrerPolicy="no-referrer"
+              />
+            </div>
+
+            <div className="mt-8 flex gap-4 w-full max-w-md">
               <button
                 type="button"
                 onClick={(e) => {
@@ -1982,7 +1986,7 @@ export default function Portaria({ user }: PortariaProps) {
                   setViewPhotoUrl(null);
                   setViewPhotoPkg(null);
                 }}
-                className="bg-white text-zinc-900 px-8 py-3 rounded-xl font-bold hover:bg-zinc-100 transition-all"
+                className="flex-1 bg-white/10 text-white border border-white/20 px-8 py-4 rounded-2xl font-bold hover:bg-white/20 transition-all backdrop-blur-md"
               >
                 Fechar
               </button>
@@ -1990,35 +1994,11 @@ export default function Portaria({ user }: PortariaProps) {
                 href={viewPhotoUrl} 
                 target="_blank" 
                 rel="noopener noreferrer"
-                className="bg-emerald-600 text-white px-8 py-3 rounded-xl font-bold hover:bg-emerald-700 transition-all flex items-center gap-2"
+                className="flex-1 bg-emerald-600 text-white px-8 py-4 rounded-2xl font-bold hover:bg-emerald-700 transition-all flex items-center justify-center gap-2 shadow-lg shadow-emerald-900/20"
               >
-                Abrir imagem original
+                Abrir original
               </a>
             </div>
-
-            {viewPhotoPkg?.status === 'received' && (
-              <div className="mt-8 flex flex-col items-center gap-4 bg-white/5 backdrop-blur-xl p-8 rounded-[2.5rem] border border-white/10 max-w-sm w-full animate-in slide-in-from-bottom-4 duration-500">
-                <p className="text-white text-center text-sm font-medium leading-relaxed opacity-80">
-                  Morador conferiu a encomenda pela foto. <br/>
-                  Toque abaixo para confirmar o recebimento.
-                </p>
-                <button
-                  type="button"
-                  onClick={async (e) => {
-                    e.preventDefault();
-                    if (!viewPhotoPkg) return;
-                    await handleDeliver(viewPhotoPkg.package_id || viewPhotoPkg.id, 'CONFIRMADO_PELO_MORADOR', undefined, viewPhotoPkg);
-                    setViewPhotoUrl(null);
-                    setViewPhotoPkg(null);
-                    toast.success('RECEBIMENTO CONFIRMADO');
-                  }}
-                  className="w-full bg-emerald-500 hover:bg-emerald-600 active:scale-95 text-white py-5 rounded-2xl font-black text-xl shadow-[0_10px_30px_rgba(16,185,129,0.3)] transition-all flex items-center justify-center gap-3"
-                >
-                  <Check className="w-6 h-6" />
-                  ENTREGAR
-                </button>
-              </div>
-            )}
           </div>
         </div>
       )}
@@ -2673,11 +2653,11 @@ export default function Portaria({ user }: PortariaProps) {
                     </div>
 
                     {packageToConfirm.photo_url && (
-                      <div className="w-full bg-zinc-50 rounded-[2.5rem] overflow-hidden mb-4 flex items-center justify-center border border-zinc-100 shadow-sm min-h-[350px]">
+                      <div className="w-full bg-zinc-50 rounded-[2.5rem] overflow-hidden mb-6 border-2 border-zinc-100 shadow-md">
                         <img 
                           src={packageToConfirm.photo_url} 
                           alt="Foto da encomenda" 
-                          className="max-w-full max-h-[55vh] object-contain"
+                          className="w-full h-auto min-h-[350px] max-h-[60vh] object-cover rounded-[2.5rem]"
                           referrerPolicy="no-referrer"
                         />
                       </div>
