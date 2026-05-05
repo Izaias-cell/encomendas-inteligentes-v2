@@ -122,7 +122,9 @@ export default function PackageNew({ user }: PackageNewProps) {
   const [ignoreResidencyAlert, setIgnoreResidencyAlert] = useState(false);
   const [isDetailsExpanded, setIsDetailsExpanded] = useState(true);
   const [showPickupCode, setShowPickupCode] = useState(false);
+  const [isUnitInputFocused, setIsUnitInputFocused] = useState(false);
   const unitInputRef = useRef<HTMLInputElement>(null);
+  const residentsSectionRef = useRef<HTMLDivElement>(null);
   const uploadPromiseRef = useRef<Promise<string | null> | null>(null);
 
   const playSuccessSound = () => {
@@ -671,6 +673,7 @@ export default function PackageNew({ user }: PackageNewProps) {
   }, [searchTerm, user?.condominium_id, selectedResident, allResidents, foundPartialData, isAiSearch]);
 
   const handleSelectResident = async (resident: Morador) => {
+    unitInputRef.current?.blur();
     setSelectedResident(resident);
     setRecipientName(resident.nome || '');
     setUnitNumber(resident.unidade || '');
@@ -790,6 +793,32 @@ export default function PackageNew({ user }: PackageNewProps) {
       return () => clearTimeout(timer);
     }
   }, [shouldFocusSearch, step]);
+
+  // Efeito de rolagem automática ao digitar número da casa (Mobile UX)
+  useEffect(() => {
+    if (isManualUnitSearch && searchTerm.length > 0 && step === 'manual' && !selectedResident) {
+      const scrollTimer = setTimeout(() => {
+        // Se houver moradores encontrados para esta unidade, fecha o teclado para facilitar visualização
+        if (matchingResidents.length > 0) {
+          unitInputRef.current?.blur();
+          
+          if (residentsSectionRef.current) {
+            // Calcula a posição para deixar o input visível no topo
+            const element = residentsSectionRef.current;
+            const rect = element.getBoundingClientRect();
+            const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
+            const targetY = rect.top + scrollTop - 80; // 80px de margem do topo para evitar esconder atrás de headers e menus do navegador
+
+            window.scrollTo({
+              top: targetY,
+              behavior: 'smooth'
+            });
+          }
+        }
+      }, 500); // Delay de 500ms conforme solicitado por UX de digitação
+      return () => clearTimeout(scrollTimer);
+    }
+  }, [searchTerm, isManualUnitSearch, step, selectedResident, matchingResidents.length]);
 
   useEffect(() => {
     if (selectedResident && detectedHandwrittenUnit && !ignoreResidencyAlert) {
@@ -1085,7 +1114,7 @@ export default function PackageNew({ user }: PackageNewProps) {
           </div>
         </div>
 
-        <div className="flex-1 px-4 py-6">
+        <div className={`flex-1 px-4 py-6 ${isUnitInputFocused ? 'pb-[400px]' : ''}`}>
         <AnimatePresence mode="wait">
           {step === 'analyzing' && (
             <motion.div
@@ -1433,7 +1462,7 @@ export default function PackageNew({ user }: PackageNewProps) {
                         </div>
                       </div>
 
-                      <div className="relative mb-6">
+                      <div ref={residentsSectionRef} className="relative mb-6">
                         {isManualUnitSearch ? (
                            <div className="relative">
                              <div className="absolute left-6 top-1/2 -translate-y-1/2 w-8 h-8 bg-indigo-50 rounded-lg flex items-center justify-center">
@@ -1446,6 +1475,8 @@ export default function PackageNew({ user }: PackageNewProps) {
                                placeholder="Casa / Unidade..."
                                value={searchTerm}
                                onChange={(e) => setSearchTerm(e.target.value)}
+                               onFocus={() => setIsUnitInputFocused(true)}
+                               onBlur={() => setIsUnitInputFocused(false)}
                                className="w-full pl-16 pr-4 py-5 bg-gray-50 border-2 border-transparent focus:border-indigo-500 focus:bg-white rounded-2xl transition-all outline-none text-2xl font-black text-indigo-900 placeholder:text-gray-300"
                              />
                            </div>
@@ -1791,124 +1822,6 @@ export default function PackageNew({ user }: PackageNewProps) {
                   </div>
                 )}
               </form>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* Botão de Diagnóstico (Discreto) */}
-        <div className="fixed bottom-24 right-4 z-[60]">
-          <button 
-            onClick={() => setShowDiagnostics(!showDiagnostics)}
-            className="w-10 h-10 bg-black/20 backdrop-blur-md rounded-full flex items-center justify-center text-white/40 hover:text-white hover:bg-black/40 transition-all border border-white/10"
-            title="Modo Diagnóstico"
-          >
-            <Info className="w-5 h-5" />
-          </button>
-        </div>
-
-        <AnimatePresence>
-          {showDiagnostics && diagnosticInfo && (
-            <motion.div 
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 20 }}
-              className="fixed inset-x-4 bottom-24 top-20 z-[70] bg-black/95 rounded-3xl p-6 overflow-y-auto font-mono text-[10px] text-green-400 shadow-2xl border border-white/10"
-            >
-              <div className="flex justify-between items-center mb-6 border-b border-green-900/30 pb-4">
-                <div className="flex items-center gap-2">
-                  <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
-                  <h2 className="text-sm font-bold text-white uppercase tracking-widest">Diagnóstico OCR</h2>
-                </div>
-                <button onClick={() => setShowDiagnostics(false)} className="text-white hover:bg-white/10 p-2 rounded-full transition-all">
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-              
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                <div className="space-y-6">
-                  <section className="bg-green-950/20 p-4 rounded-2xl border border-green-900/20">
-                    <p className="text-white mb-3 font-bold text-xs flex items-center gap-2">
-                      <CheckCircle className="w-3 h-3" /> [ AMBIENTE ]
-                    </p>
-                    <div className="grid grid-cols-2 gap-2 text-[9px] opacity-80">
-                      <p>Versão App:</p> <p className="text-white">{diagnosticInfo.version}</p>
-                      <p>Build Time:</p> <p className="text-white">{diagnosticInfo.buildTime}</p>
-                      <p>Host:</p> <p className="text-white">{ENVIRONMENT.toUpperCase()}</p>
-                      <p>Origin:</p> <p className="text-white">{window.location.origin.substring(0, 30)}...</p>
-                    </div>
-                  </section>
-
-                  <section className="bg-green-950/20 p-4 rounded-2xl border border-green-900/20">
-                    <p className="text-white mb-3 font-bold text-xs flex items-center gap-2">
-                      <Camera className="w-3 h-3" /> [ IMAGEM FINAL ]
-                    </p>
-                    <div className="grid grid-cols-2 gap-2 text-[9px] opacity-80 mb-4">
-                      <p>Resolução Foto:</p> <p className="text-white">{diagnosticInfo.width}x{diagnosticInfo.height}</p>
-                      <p>Stream Nativo:</p> <p className="text-white">{diagnosticInfo.nativeResolution || '?'}</p>
-                      <p>Tamanho Real:</p> <p className="text-white">{diagnosticInfo.sizeKB} KB</p>
-                      <p>JPEG Quality:</p> <p className="text-white">{diagnosticInfo.quality * 100}%</p>
-                      <p>Captura Local:</p> <p className="text-white">{diagnosticInfo.capturedAt}</p>
-                    </div>
-                    <div className="relative mt-2 border border-green-900/50 overflow-hidden rounded-xl bg-black">
-                      <img src={debugOcrImage || ''} alt="Processada" className="w-full h-auto opacity-80" />
-                      <div className="absolute inset-x-0 bottom-0 bg-black/60 p-1 text-center text-[8px] text-white/50">
-                        Cópia exata enviada para IA
-                      </div>
-                    </div>
-                  </section>
-                </div>
-
-                <div className="space-y-6">
-                  <section className="bg-green-950/20 p-4 rounded-2xl border border-green-900/20">
-                    <p className="text-white mb-3 font-bold text-xs flex items-center gap-2">
-                      <Sparkles className="w-3 h-3 text-yellow-400" /> [ RESPOSTA IA ]
-                    </p>
-                    <div className="grid grid-cols-2 gap-2 text-[9px] opacity-80 mb-4">
-                      <p>Status Chamada:</p> 
-                      <p className={`font-bold ${diagnosticInfo.ocrStatus === 'SUCESSO' ? 'text-green-400' : diagnosticInfo.ocrStatus === 'ERRO' ? 'text-red-400' : 'text-yellow-400'}`}>
-                        {diagnosticInfo.ocrStatus || 'AGUARDANDO'}
-                      </p>
-                      <p>Confiança:</p> <p className={`font-bold ${diagnosticInfo.confidence === 'alta' ? 'text-green-400' : 'text-yellow-400'}`}>{diagnosticInfo.confidence?.toUpperCase() || '...'}</p>
-                      <p>IA Timestamp:</p> <p className="text-white">{diagnosticInfo.ocrTimestamp || 'Pendente'}</p>
-                    </div>
-
-                    {diagnosticInfo.ocrError && (
-                      <div className="mb-4 bg-red-950/30 border border-red-900/50 p-2 rounded-lg text-red-300 text-[8px] leading-tight">
-                        <p className="font-bold mb-1 tracking-wider">[ ERRO DETALHADO ]</p>
-                        {diagnosticInfo.ocrError}
-                      </div>
-                    )}
-                    
-                    <div className="space-y-3">
-                      <div>
-                        <p className="text-white/40 text-[8px] uppercase font-bold mb-1">Nome Identificado</p>
-                        <p className="text-xs text-yellow-300 font-bold bg-yellow-400/10 p-2 rounded-lg border border-yellow-400/20">
-                          {diagnosticInfo.detectedName || 'vazio'}
-                        </p>
-                      </div>
-                      <div>
-                        <p className="text-white/40 text-[8px] uppercase font-bold mb-1">Casa Identificada</p>
-                        <p className="text-xs text-yellow-300 font-bold bg-yellow-400/10 p-2 rounded-lg border border-yellow-400/20">
-                          {diagnosticInfo.detectedHouse || 'vazio'}
-                        </p>
-                      </div>
-                      <div>
-                        <p className="text-white/40 text-[8px] uppercase font-bold mb-1">Inicial Morador</p>
-                        <p className="text-xs text-yellow-300 font-bold bg-yellow-400/10 p-2 rounded-lg border border-yellow-400/20">
-                          {diagnosticInfo.detectedInitial || 'vazio'}
-                        </p>
-                      </div>
-                    </div>
-                  </section>
-
-                  <section className="bg-green-950/20 p-4 rounded-2xl border border-green-900/20">
-                    <p className="text-white mb-2 font-bold text-xs"> [ TEXTO EXTRAÍDO ] </p>
-                    <div className="bg-black/50 p-3 rounded-xl border border-green-900/30 font-mono text-[9px] leading-relaxed max-h-[150px] overflow-y-auto text-green-500/80">
-                      {diagnosticInfo.rawOcrText || 'Nenhum texto bruto disponível ainda.'}
-                    </div>
-                  </section>
-                </div>
-              </div>
             </motion.div>
           )}
         </AnimatePresence>
