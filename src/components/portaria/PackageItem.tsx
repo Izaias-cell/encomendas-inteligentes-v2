@@ -12,7 +12,7 @@ interface PackageItemProps {
   onDeliverWithPhoto: (pkg: any) => void;
   onCodeRetrieval: (pkg: any) => void;
   onViewPhotos?: (pkg: any) => void;
-  onViewLabel?: (url: string) => void;
+  onViewLabel?: (pkg: any) => void;
   onNotify?: (pkg: any) => void;
   handleDeliver: (id: string, method: any, photo?: string, data?: any) => void;
   setQrPackage: (pkg: any) => void;
@@ -115,7 +115,7 @@ const PackageItem: React.FC<PackageItemProps> = ({
               onClick={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
-                onViewLabel?.(pkg.photo_url);
+                onViewLabel?.(pkg);
               }}
               className="w-full mt-2 py-2 bg-zinc-50 text-zinc-600 rounded-xl text-xs font-bold hover:bg-zinc-100 transition-all flex items-center justify-center gap-2 border border-zinc-100"
             >

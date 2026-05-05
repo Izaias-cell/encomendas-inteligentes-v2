@@ -3,7 +3,10 @@
   "short_name": "Encomendas",
   "description": "Sistema de gestão de encomendas",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
+  "display_override": ["standalone", "window-controls-overlay"],
+  "orientation": "portrait",
   "background_color": "#ffffff",
   "theme_color": "#16a34a",
   "icons": [

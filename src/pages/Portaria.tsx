@@ -93,6 +93,7 @@ export default function Portaria({ user }: PortariaProps) {
   const [currentPorter, setCurrentPorter] = useState(getCurrentPorter());
   const [showPorterModal, setShowPorterModal] = useState(false);
   const [showConfirmDelivery, setShowConfirmDelivery] = useState(false);
+  const [isConfirmingDelivery, setIsConfirmingDelivery] = useState(false);
   const [packageToConfirm, setPackageToConfirm] = useState<Package | null>(null);
 
   // Pulse animation state for "TIRAR FOTO" button
@@ -1581,6 +1582,7 @@ export default function Portaria({ user }: PortariaProps) {
 
   const [selectedGroup, setSelectedGroup] = useState<any>(null);
   const [viewPhotoUrl, setViewPhotoUrl] = useState<string | null>(null);
+  const [viewPhotoPkg, setViewPhotoPkg] = useState<Package | null>(null);
   const [viewGroupPhotos, setViewGroupPhotos] = useState<any[] | null>(null);
   const [currentPhotoIndex, setCurrentPhotoIndex] = useState(0);
 
@@ -1874,8 +1876,6 @@ export default function Portaria({ user }: PortariaProps) {
                     pendingPackageRef.current = p;
                     setQrPackage(p);
                     setRetrievalMethod('manual');
-                    setIsScanning(true);
-                    setQrScanStatus('validating');
                     fileInputRef.current?.click();
                   }}
                   onCodeRetrieval={(p) => {
@@ -1891,7 +1891,8 @@ export default function Portaria({ user }: PortariaProps) {
                       .map((item: any) => ({
                         url: item.photo_url,
                         carrier: item.carrier,
-                        received_at: item.received_at
+                        received_at: item.received_at,
+                        package: item
                       }));
                     
                     if (photos.length > 0) {
@@ -1900,7 +1901,10 @@ export default function Portaria({ user }: PortariaProps) {
                       toast.error('Nenhuma etiqueta com foto neste grupo');
                     }
                   }}
-                  onViewLabel={(url) => setViewPhotoUrl(url)}
+                  onViewLabel={(pkg) => {
+                    setViewPhotoUrl(pkg.photo_url);
+                    setViewPhotoPkg(pkg);
+                  }}
                   onNotify={handleDirectNotify}
                   handleDeliver={handleDeliver}
                   setQrPackage={setQrPackage}
@@ -1958,6 +1962,7 @@ export default function Portaria({ user }: PortariaProps) {
               onClick={(e) => {
                 e.preventDefault();
                 setViewPhotoUrl(null);
+                setViewPhotoPkg(null);
               }}
               className="absolute -top-12 right-0 text-white bg-white/10 hover:bg-white/20 p-2 rounded-full transition-all"
             >
@@ -1975,6 +1980,7 @@ export default function Portaria({ user }: PortariaProps) {
                 onClick={(e) => {
                   e.preventDefault();
                   setViewPhotoUrl(null);
+                  setViewPhotoPkg(null);
                 }}
                 className="bg-white text-zinc-900 px-8 py-3 rounded-xl font-bold hover:bg-zinc-100 transition-all"
               >
@@ -1989,6 +1995,30 @@ export default function Portaria({ user }: PortariaProps) {
                 Abrir imagem original
               </a>
             </div>
+
+            {viewPhotoPkg?.status === 'received' && (
+              <div className="mt-8 flex flex-col items-center gap-4 bg-white/5 backdrop-blur-xl p-8 rounded-[2.5rem] border border-white/10 max-w-sm w-full animate-in slide-in-from-bottom-4 duration-500">
+                <p className="text-white text-center text-sm font-medium leading-relaxed opacity-80">
+                  Morador conferiu a encomenda pela foto. <br/>
+                  Toque abaixo para confirmar o recebimento.
+                </p>
+                <button
+                  type="button"
+                  onClick={async (e) => {
+                    e.preventDefault();
+                    if (!viewPhotoPkg) return;
+                    await handleDeliver(viewPhotoPkg.package_id || viewPhotoPkg.id, 'CONFIRMADO_PELO_MORADOR', undefined, viewPhotoPkg);
+                    setViewPhotoUrl(null);
+                    setViewPhotoPkg(null);
+                    toast.success('RECEBIMENTO CONFIRMADO');
+                  }}
+                  className="w-full bg-emerald-500 hover:bg-emerald-600 active:scale-95 text-white py-5 rounded-2xl font-black text-xl shadow-[0_10px_30px_rgba(16,185,129,0.3)] transition-all flex items-center justify-center gap-3"
+                >
+                  <Check className="w-6 h-6" />
+                  ENTREGAR
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -2006,6 +2036,7 @@ export default function Portaria({ user }: PortariaProps) {
                 onClick={() => {
                   setViewGroupPhotos(null);
                   setViewPhotoUrl(null);
+                  setViewPhotoPkg(null);
                 }}
                 className="p-2 bg-white/10 hover:bg-white/20 rounded-full text-white transition-colors"
               >
@@ -2067,7 +2098,10 @@ export default function Portaria({ user }: PortariaProps) {
                   </div>
 
                   <button 
-                    onClick={() => setViewPhotoUrl(null)}
+                    onClick={() => {
+                      setViewPhotoUrl(null);
+                      setViewPhotoPkg(null);
+                    }}
                     className="absolute top-6 right-6 w-12 h-12 bg-white/10 hover:bg-white/20 rounded-full flex items-center justify-center text-white transition-colors z-[90]"
                   >
                     <X className="w-6 h-6" />
@@ -2117,6 +2151,30 @@ export default function Portaria({ user }: PortariaProps) {
                           />
                         ))}
                       </div>
+
+                      {viewGroupPhotos[currentPhotoIndex].package?.status === 'received' && (
+                        <div className="mt-8 flex flex-col items-center gap-3 bg-white/5 backdrop-blur-xl p-6 rounded-[2rem] border border-white/10 w-full max-w-sm animate-in slide-in-from-bottom-4">
+                          <p className="text-white text-center text-sm font-medium opacity-70">
+                            Morador conferiu a encomenda. Toque para confirmar.
+                          </p>
+                          <button
+                            type="button"
+                            onClick={async (e) => {
+                              e.preventDefault();
+                              const pkg = viewGroupPhotos[currentPhotoIndex].package;
+                              if (!pkg) return;
+                              await handleDeliver(pkg.package_id || pkg.id, 'CONFIRMADO_PELO_MORADOR', undefined, pkg);
+                              setViewPhotoUrl(null);
+                              setViewGroupPhotos(null);
+                              toast.success('RECEBIMENTO CONFIRMADO');
+                            }}
+                            className="w-full bg-emerald-500 hover:bg-emerald-600 text-white py-4 rounded-xl font-black text-lg shadow-lg transition-all flex items-center justify-center gap-2"
+                          >
+                            <Check className="w-5 h-5" />
+                            ENTREGAR
+                          </button>
+                        </div>
+                      )}
                     </div>
                   </div>
                 </motion.div>
@@ -2570,8 +2628,20 @@ export default function Portaria({ user }: PortariaProps) {
               initial={{ opacity: 0, scale: 0.9, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.9, y: 20 }}
-              className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg overflow-hidden border border-white/10"
+              className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg overflow-hidden border border-white/10 relative"
             >
+              <button 
+                type="button"
+                onClick={() => {
+                  setShowConfirmDelivery(false);
+                  setPackageToConfirm(null);
+                  setIsConfirmingDelivery(false);
+                }}
+                className="absolute top-6 right-6 w-10 h-10 bg-zinc-100 hover:bg-zinc-200 rounded-full flex items-center justify-center text-zinc-500 transition-all z-10"
+              >
+                <X className="w-5 h-5" />
+              </button>
+
               <AnimatePresence mode="wait">
                 {isDeliverySuccess ? (
                   <motion.div
@@ -2596,43 +2666,84 @@ export default function Portaria({ user }: PortariaProps) {
                     key="confirm-screen"
                     initial={{ opacity: 1 }}
                     exit={{ opacity: 0, y: -20 }}
-                    className="p-12 text-center"
+                    className="p-6 sm:p-8 text-center flex flex-col items-center"
                   >
-                    <div className="w-20 h-20 bg-emerald-50 text-emerald-600 rounded-3xl flex items-center justify-center mx-auto mb-8 transform rotate-3">
-                      <CheckCircle className="w-10 h-10" />
+                    <div className="mb-4">
+                      <h2 className="text-2xl font-black text-zinc-900 uppercase tracking-tight">ENTREGA</h2>
                     </div>
-                    
-                    <h2 className="text-3xl font-black text-zinc-900 mb-4 uppercase tracking-tight">CONFIRMAR ENTREGA</h2>
-                    <p className="text-zinc-500 mb-12 text-lg font-medium leading-tight px-4">
-                      Peça ao morador para confirmar o recebimento na sua frente:
-                    </p>
 
-                    <div className="space-y-8 flex flex-col items-center">
+                    {packageToConfirm.photo_url && (
+                      <div className="w-full bg-zinc-50 rounded-[2.5rem] overflow-hidden mb-4 flex items-center justify-center border border-zinc-100 shadow-sm min-h-[350px]">
+                        <img 
+                          src={packageToConfirm.photo_url} 
+                          alt="Foto da encomenda" 
+                          className="max-w-full max-h-[55vh] object-contain"
+                          referrerPolicy="no-referrer"
+                        />
+                      </div>
+                    )}
+
+                    <div className="mb-8">
+                      <p className="text-zinc-800 text-base font-semibold max-w-[320px] mx-auto leading-tight">
+                        Confira a encomenda antes de confirmar o recebimento.
+                      </p>
+                    </div>
+
+                    <div className="space-y-6 flex flex-col items-center w-full">
                       <button
                         type="button"
+                        disabled={isConfirmingDelivery}
                         onClick={async () => {
-                          setIsDeliverySuccess(true);
-                          playSuccessSound();
+                          if (isConfirmingDelivery) return;
                           
+                          setIsConfirmingDelivery(true);
+                          
+                          // Feedback tátil e sonoro
+                          try {
+                            feedback.success();
+                            if (navigator.vibrate) {
+                              navigator.vibrate(50);
+                            }
+                          } catch (e) {
+                            // Ignorar falhas de feedback
+                          }
+
                           // Registra no banco
-                          await handleDeliver(
-                            packageToConfirm.package_id || packageToConfirm.id, 
-                            'CONFIRMADO_PELO_MORADOR' as any, 
-                            undefined, 
-                            packageToConfirm
-                          );
-                          
-                          // Aguarda 2 segundos e fecha
-                          setTimeout(() => {
-                            setShowConfirmDelivery(false);
-                            setIsDeliverySuccess(false);
-                            setPackageToConfirm(null);
-                          }, 2000);
+                          try {
+                            await handleDeliver(
+                              packageToConfirm.package_id || packageToConfirm.id, 
+                              'CONFIRMADO_PELO_MORADOR' as any, 
+                              undefined, 
+                              packageToConfirm
+                            );
+                            
+                            setIsConfirmingDelivery(false);
+                            setIsDeliverySuccess(true);
+                            
+                            // Aguarda 2 segundos e fecha
+                            setTimeout(() => {
+                              setShowConfirmDelivery(false);
+                              setIsDeliverySuccess(false);
+                              setPackageToConfirm(null);
+                            }, 2000);
+                          } catch (err) {
+                            setIsConfirmingDelivery(false);
+                            // O erro já é tratado pelo handleDeliver/toast
+                          }
                         }}
-                        className="w-full max-w-sm bg-emerald-600 text-white py-8 rounded-full font-black text-2xl hover:bg-emerald-500 transition-all shadow-xl shadow-emerald-200 flex items-center justify-center gap-4 active:scale-95 group"
+                        className="w-full bg-emerald-600 text-white py-10 px-8 rounded-[2.5rem] font-black text-xl hover:bg-emerald-500 transition-all shadow-2xl shadow-emerald-200 flex items-center justify-center gap-3 active:scale-95 group disabled:opacity-70 disabled:active:scale-100"
                       >
-                        <span className="group-hover:scale-110 transition-transform">✅</span>
-                        Confirmar recebimento
+                        {isConfirmingDelivery ? (
+                          <>
+                            <Loader2 className="w-6 h-6 animate-spin" />
+                            Confirmando...
+                          </>
+                        ) : (
+                          <>
+                            <CheckCircle className="w-6 h-6 group-hover:scale-110 transition-transform" />
+                            ✅ CONFIRMAR RECEBIMENTO
+                          </>
+                        )}
                       </button>
 
                       <button
@@ -2640,6 +2751,7 @@ export default function Portaria({ user }: PortariaProps) {
                         onClick={() => {
                           setShowConfirmDelivery(false);
                           setPackageToConfirm(null);
+                          setIsConfirmingDelivery(false);
                         }}
                         className="py-4 text-zinc-400 font-bold hover:text-red-500 transition-colors uppercase tracking-[0.3em] text-[10px]"
                       >
@@ -2786,8 +2898,6 @@ export default function Portaria({ user }: PortariaProps) {
                 pendingPackageRef.current = pkg;
                 setQrPackage(pkg);
                 setRetrievalMethod('manual');
-                setIsScanning(true);
-                setQrScanStatus('validating');
                 fileInputRef.current?.click();
               }}
               className="w-full bg-emerald-600 text-white py-4 rounded-2xl font-bold hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-900/20 flex items-center justify-center gap-3"
