@@ -127,6 +127,7 @@ export default function PackageNew({ user }: PackageNewProps) {
   const unitInputRef = useRef<HTMLInputElement>(null);
   const residentsSectionRef = useRef<HTMLDivElement>(null);
   const uploadPromiseRef = useRef<Promise<string | null> | null>(null);
+  const currentPhotoRef = useRef<string>('');
 
   const playSuccessSound = () => {
     feedback.success();
@@ -399,6 +400,7 @@ export default function PackageNew({ user }: PackageNewProps) {
       // Mudar fluxo IMEDIATAMENTE para manual
       stopCamera();
       setPhotoUrl(base64);
+      currentPhotoRef.current = base64;
       setDebugOcrImage(ocrBase64); 
       setIsOcrLoading(false);
       setStatusMessage('Entrada Manual');
@@ -458,24 +460,35 @@ export default function PackageNew({ user }: PackageNewProps) {
       // 2. Executa OCR
       const result = await processImageWithWait(base64, ocrBase64);
 
+      if (currentPhotoRef.current !== base64) {
+        console.log("[OCR] Cancelando processamento pois o cadastro foi salvo ou cancelado.");
+        return;
+      }
+
       if (result && (result.casa || result.inicial || result.destinatario)) {
         await handleOCRResult(result);
-        setStep('manual'); // Garantir que está no passo manual para mostrar os campos
+        if (currentPhotoRef.current === base64) {
+          setStep('manual'); // Garantir que está no passo manual para mostrar os campos
+        }
       } else {
-        fallbackToManual();
+        fallbackToManual(base64);
       }
     } catch (error) {
       console.error('Erro no fluxo de imagem:', error);
-      fallbackToManual();
+      fallbackToManual(base64);
     } finally {
       setIsOcrLoading(false);
       setIsCapturing(false);
     }
   };
 
-  const fallbackToManual = () => {
+  const fallbackToManual = (originalBase64?: string) => {
     // Pequeno atraso para o usuário perceber que a IA não identificou automaticamente
     setTimeout(() => {
+      if (originalBase64 && currentPhotoRef.current !== originalBase64) {
+        console.log("[OCR] Cancelando fallback manual pois o cadastro foi salvo ou cancelado.");
+        return;
+      }
       setOcrConfidence('baixa');
       setShouldFocusSearch(true);
       setStatusMessage('Entrada Manual');
@@ -745,6 +758,7 @@ export default function PackageNew({ user }: PackageNewProps) {
     if (!stayInManual) {
       setStep('camera');
       setPhotoUrl('');
+      currentPhotoRef.current = '';
       setDebugOcrImage(null);
       setShouldFocusSearch(false);
       setCameraError(null);
@@ -1052,7 +1066,7 @@ export default function PackageNew({ user }: PackageNewProps) {
       // FLUXO DE ESTABILIDADE: Highlight, Scroll e Reset sem câmera auto se abrir WhatsApp
       setIsHighlighting(true);
       setTimeout(() => setIsHighlighting(false), 1000);
-      setBlockAutoCamera(shouldOpenWhatsAppNow);
+      setBlockAutoCamera(false);
       window.scrollTo({ top: 0, behavior: 'smooth' });
       
       // Limpar campos
@@ -1534,8 +1548,9 @@ export default function PackageNew({ user }: PackageNewProps) {
                                 key={resident.id}
                                 type="button"
                                 onClick={() => {
-                                  // Seleciona o morador para que o painel de confirmação apareça
+                                  // Seleciona e salva automaticamente a encomenda após a escolha do morador
                                   handleSelectResident(resident);
+                                  registrarEncomenda(undefined, resident, false);
                                 }}
                                 className={`w-full relative flex flex-col p-4 rounded-2xl transition-all border-2 text-left outline-none hover:shadow-lg active:scale-[0.98] cursor-pointer touch-manipulation group ${
                                   isBest 
