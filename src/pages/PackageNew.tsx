@@ -29,7 +29,8 @@ import {
   ChevronRight,
   Save,
   Send,
-  ArrowRight
+  ArrowRight,
+  ExternalLink
 } from 'lucide-react';
 import { feedback } from '../lib/feedback';
 import { supabase } from '../lib/supabase';
@@ -289,7 +290,7 @@ export default function PackageNew({ user }: PackageNewProps) {
       
       // 6. Tratar erros específicos conforme solicitado
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        setCameraError("Permissão da câmera negada. Ative nas configurações do navegador.");
+        setCameraError("Permissão da câmera negada. Ative nas configurações do navegador ou abra o aplicativo em uma nova aba fora do chat.");
       } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
         setCameraError("Nenhuma câmera encontrada no dispositivo.");
       } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
@@ -875,7 +876,7 @@ export default function PackageNew({ user }: PackageNewProps) {
       let finalPhotoUrl = photoUrl;
       console.log("[SALVAMENTO] Iniciando com foto:", finalPhotoUrl?.substring(0, 50));
       
-      if (finalPhotoUrl.startsWith('data:') && uploadPromiseRef.current) {
+      if (finalPhotoUrl && finalPhotoUrl.startsWith('data:') && uploadPromiseRef.current) {
         setStatusMessage('FINALIZANDO FOTO...');
         const uploadedUrl = await uploadPromiseRef.current;
         if (uploadedUrl) {
@@ -984,7 +985,7 @@ export default function PackageNew({ user }: PackageNewProps) {
       console.log("[SUCESSO] Encomenda salva com ID:", newPackage.id);
 
       // 5. Notificação via WhatsApp Z-API (Se configurado)
-      if (shouldNotify && targetResident.telefone) {
+      if (!notifyAfter && targetResident.telefone) {
         const apiActive = condoSettings?.whatsapp_mode === 'api_automatica' && 
                         condoSettings?.api_url && 
                         condoSettings?.api_token;
@@ -1048,10 +1049,10 @@ export default function PackageNew({ user }: PackageNewProps) {
         }
       }
 
-      // FLUXO DE ESTABILIDADE: Highlight, Scroll e Reset sem câmera auto
+      // FLUXO DE ESTABILIDADE: Highlight, Scroll e Reset sem câmera auto se abrir WhatsApp
       setIsHighlighting(true);
       setTimeout(() => setIsHighlighting(false), 1000);
-      setBlockAutoCamera(true);
+      setBlockAutoCamera(shouldOpenWhatsAppNow);
       window.scrollTo({ top: 0, behavior: 'smooth' });
       
       // Limpar campos
@@ -1086,7 +1087,12 @@ export default function PackageNew({ user }: PackageNewProps) {
                 setLoading(false);
                 setIsSaving(false);
                 setIsOcrLoading(false);
-                if (step === 'manual') {
+                if (photoUrl) {
+                  setPhotoUrl('');
+                  setDebugOcrImage(null);
+                  setStep('camera');
+                  startCamera();
+                } else if (step === 'manual') {
                   resetForm();
                 } else {
                   navigate('/portaria');
@@ -1208,16 +1214,27 @@ export default function PackageNew({ user }: PackageNewProps) {
 
                   {/* Camera Error Message */}
                   {cameraError && (
-                    <div className="absolute inset-0 z-30 flex items-center justify-center bg-gray-900/80 backdrop-blur-sm p-8">
-                      <div className="bg-white rounded-3xl p-6 shadow-2xl max-w-xs w-full text-center space-y-6">
+                    <div className="absolute inset-0 z-30 flex items-end sm:items-center justify-center bg-gray-900/80 backdrop-blur-sm p-4 sm:p-8 pb-20 sm:pb-8">
+                      <div className="bg-white rounded-3xl p-6 shadow-2xl max-w-xs w-full text-center space-y-6 transform -translate-y-12 sm:translate-y-0">
                         <div className="w-16 h-16 bg-red-50 rounded-full flex items-center justify-center mx-auto">
                           <AlertCircle className="w-10 h-10 text-red-500" />
                         </div>
                         <p className="text-gray-900 font-bold leading-tight">{cameraError}</p>
                         <div className="space-y-3">
+                          {window.self !== window.top && (
+                            <a
+                              href={window.location.href}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="w-full py-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl font-bold flex items-center justify-center gap-2 shadow-lg shadow-emerald-100 transition-all active:scale-95 text-sm cursor-pointer"
+                            >
+                              <ExternalLink className="w-5 h-5" />
+                              ABRIR EM NOVA ABA
+                            </a>
+                          )}
                           <button
                             onClick={startCamera}
-                            className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-bold flex items-center justify-center gap-2 shadow-lg shadow-indigo-100 transition-all active:scale-95"
+                            className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-bold flex items-center justify-center gap-2 shadow-lg shadow-indigo-100 transition-all active:scale-95 text-sm"
                           >
                             <Zap className="w-5 h-5" />
                             TENTAR ABRIR CÂMERA
@@ -1227,7 +1244,7 @@ export default function PackageNew({ user }: PackageNewProps) {
                               setCameraError(null);
                               setStep('manual');
                             }}
-                            className="w-full py-4 bg-gray-100 text-gray-700 rounded-2xl font-bold flex items-center justify-center gap-2 hover:bg-gray-200 transition-all active:scale-95"
+                            className="w-full py-4 bg-gray-100 text-gray-700 rounded-2xl font-bold flex items-center justify-center gap-2 hover:bg-gray-200 transition-all active:scale-95 text-sm"
                           >
                             <FileText className="w-5 h-5" />
                             USAR MODO MANUAL
@@ -1517,9 +1534,8 @@ export default function PackageNew({ user }: PackageNewProps) {
                                 key={resident.id}
                                 type="button"
                                 onClick={() => {
-                                  // Seleciona e salva automaticamente (com notificação desativada conforme pedido)
+                                  // Seleciona o morador para que o painel de confirmação apareça
                                   handleSelectResident(resident);
-                                  registrarEncomenda(undefined, resident, false);
                                 }}
                                 className={`w-full relative flex flex-col p-4 rounded-2xl transition-all border-2 text-left outline-none hover:shadow-lg active:scale-[0.98] cursor-pointer touch-manipulation group ${
                                   isBest 
@@ -1625,31 +1641,28 @@ export default function PackageNew({ user }: PackageNewProps) {
                     </div>
                   ) : (
                     <div className="space-y-5">
-                      {/* Card do Morador Selecionado (Clickable to save) */}
-                      <button
-                        type="button"
-                        onClick={() => registrarEncomenda(undefined, undefined, false)}
-                        disabled={loading || isOcrLoading}
-                        className={`w-full px-4 py-5 rounded-2xl border-2 flex items-center justify-between shadow-sm transition-all active:scale-[0.97] text-left group ${
+                      {/* Card do Morador Selecionado (Informative status layout) */}
+                      <div
+                        className={`w-full px-4 py-5 rounded-2xl border-2 flex items-center justify-between shadow-sm text-left ${
                           isFemale(selectedResident.nome) 
-                            ? 'bg-violet-50 border-violet-100 text-violet-900 hover:bg-violet-100 hover:border-violet-200' 
-                            : 'bg-indigo-50 border-indigo-100 text-indigo-900 hover:bg-indigo-100 hover:border-indigo-200'
+                            ? 'bg-violet-50 border-violet-100 text-violet-900' 
+                            : 'bg-indigo-50 border-indigo-100 text-indigo-900'
                         }`}
                       >
                         <div className="flex items-center gap-3">
-                          <div className={`w-10 h-10 rounded-full flex items-center justify-center border transition-colors ${
-                            isFemale(selectedResident.nome) ? 'bg-violet-100 border-violet-200 group-hover:bg-violet-200' : 'bg-indigo-100 border-indigo-200 group-hover:bg-indigo-200'
+                          <div className={`w-10 h-10 rounded-full flex items-center justify-center border ${
+                            isFemale(selectedResident.nome) ? 'bg-violet-100 border-violet-200' : 'bg-indigo-100 border-indigo-200'
                           }`}>
                             <User className={`w-5 h-5 ${isFemale(selectedResident.nome) ? 'text-violet-500' : 'text-indigo-600'}`} />
                           </div>
                           <div>
                             <p className="font-bold text-sm leading-none mb-1">{selectedResident.nome}</p>
                             <p className="text-[10px] font-medium opacity-70 mb-0.5">{formatResidentAddress(selectedResident)}</p>
-                            <p className={`text-[9px] font-black uppercase tracking-widest ${isFemale(selectedResident.nome) ? 'text-violet-400' : 'text-indigo-400'}`}>Toque para Registrar</p>
+                            <p className={`text-[9px] font-black uppercase tracking-widest ${isFemale(selectedResident.nome) ? 'text-violet-400' : 'text-indigo-400'}`}>Morador Selecionado</p>
                           </div>
                         </div>
-                        {loading ? <Loader2 className="w-5 h-5 animate-spin text-gray-400" /> : <CheckCircle className={`w-5 h-5 ${isFemale(selectedResident.nome) ? 'text-violet-400' : 'text-indigo-400'}`} />}
-                      </button>
+                        <CheckCircle className={`w-5 h-5 ${isFemale(selectedResident.nome) ? 'text-violet-400' : 'text-indigo-400'}`} />
+                      </div>
                     </div>
                   )}
                 </div>

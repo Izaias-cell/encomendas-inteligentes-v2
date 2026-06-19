@@ -217,16 +217,27 @@ const LoginPage = ({ onLogin }: any) => {
     }
   };
 
-  // Mock login for demo if no supabase keys
+  // Mock login for demo if no supabase keys or for quick preview
   const mockLogin = (role: Role) => {
     onLogin({
       id: '00000000-0000-0000-0000-000000000001',
-      full_name: role === 'porteiro' ? 'Porteiro Silva' : role === 'sindico' ? 'Síndico Oliveira' : 'Morador João',
+      full_name: role === 'porteiro' ? 'Porteiro Silva' : role === 'sindico' ? 'Síndico Oliveira' : 'Administrador',
+      email: role === 'porteiro' ? 'porteiro@demo.com' : role === 'sindico' ? 'sindico@demo.com' : 'admin@demo.com',
       role,
       condominium_id: '00000000-0000-0000-0000-000000000000',
       unit_number: '402'
     });
+    
+    if (role === 'porteiro') {
+      navigate('/portaria');
+    } else if (role === 'sindico') {
+      navigate('/sindico');
+    } else {
+      navigate('/dashboard');
+    }
   };
+
+  const isSupabaseConfigured = !!(import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_ANON_KEY);
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-zinc-50 p-4">
@@ -242,7 +253,14 @@ const LoginPage = ({ onLogin }: any) => {
         {error && (
           <div className="mb-4 p-3 bg-red-50 border border-red-100 text-red-600 text-sm rounded-xl flex items-center gap-2 animate-in fade-in slide-in-from-top-1">
             <Bell className="w-4 h-4 shrink-0" />
-            {error}
+            <div className="flex-1">
+              <span className="font-bold block mb-0.5">{error}</span>
+              {error.includes("fetch") && (
+                <span className="text-[11px] opacity-90 block mt-1">
+                  Dica: Esse erro geralmente ocorre por falta de chaves Supabase conectadas. Use um dos botões abaixo para acessar em Modo Demo imediatamente!
+                </span>
+              )}
+            </div>
           </div>
         )}
 
@@ -296,6 +314,8 @@ const LoginPage = ({ onLogin }: any) => {
             </button>
           </div>
         </form>
+
+
       </Card>
     </div>
   );
@@ -814,7 +834,7 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
       }, 100);
     } catch (err) {
       console.error("Erro ao acessar câmera:", err);
-      toast.error("Não foi possível acessar a câmera");
+      toast.error("Não foi possível acessar a câmera. Ative as permissões ou se estiver no chat, clique para abrir o app em uma nova aba!");
     }
   };
 

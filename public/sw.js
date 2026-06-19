@@ -3,6 +3,7 @@ const ASSETS = [
   '/',
   '/index.html',
   '/manifest.json',
+  '/icon-192.png',
   '/icon-512.png'
 ];
 
@@ -32,6 +33,9 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const { request } = event;
   const url = new URL(request.url);
+
+  // Permite apenas protocolos HTTP e HTTPS para evitar erros com extensões do Chrome, etc.
+  if (!url.protocol.startsWith('http')) return;
 
   // NÃO cachear chamadas de API ou Supabase
   if (url.pathname.startsWith('/api') || url.hostname.includes('supabase.co')) {
