@@ -29,8 +29,7 @@ init();
 
 // PWA Service Worker Registration
 if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    // Registra o Service Worker do PWA para fornecer suporte offline e instalação nativa no Android
+  const registerSW = () => {
     navigator.serviceWorker.register('/sw.js')
       .then(registration => {
         console.log('[PWA] Service Worker registrado com sucesso no escopo:', registration.scope);
@@ -38,5 +37,13 @@ if ('serviceWorker' in navigator) {
       .catch(error => {
         console.error('[PWA] Falha ao registrar o Service Worker:', error);
       });
-  });
+  };
+
+  // Se o documento já estiver completamente carregado ou interativo (ex: carregado via defer),
+  // registra imediatamente para evitar perder o evento 'load'.
+  if (document.readyState === 'complete' || document.readyState === 'interactive') {
+    registerSW();
+  } else {
+    window.addEventListener('load', registerSW);
+  }
 }

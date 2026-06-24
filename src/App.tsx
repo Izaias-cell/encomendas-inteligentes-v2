@@ -37,6 +37,7 @@ import SyndicPanel from './components/SyndicPanel';
 
 
 import { normalizeRole } from './lib/authUtils';
+import { getCurrentPorter } from './lib/porterUtils';
 
 // --- Components ---
 
@@ -758,7 +759,8 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
         .update({ 
           status: 'delivered', 
           delivered_at: new Date().toISOString(),
-          ...(authUser?.id ? { delivered_by: authUser.id } : {}),
+          delivered_by: authUser?.id || user.id,
+          entregue_por: (getCurrentPorter() && getCurrentPorter() !== 'Selecione o Porteiro') ? getCurrentPorter() : user.full_name,
           pickup_qr_code: 'used',
           delivered_to_name: 'Morador (Confirmado)',
           ...(deliveryPhoto ? { delivery_photo_url: deliveryPhoto } : {})
@@ -798,7 +800,7 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
     if (!user?.condominium_id) return;
     const { data, error } = await supabase
       .from('packages')
-      .select('*, package_id:id, unit_label:unit_number')
+      .select('*, registrar:received_by(full_name), package_id:id, unit_label:unit_number')
       .eq('condominium_id', user.condominium_id)
       .order('created_at', { ascending: false });
     
@@ -986,6 +988,8 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
           whatsapp_sent: true,
           notified_at: new Date().toISOString(),
           received_by: user.id,
+          recebido_por: (getCurrentPorter() && getCurrentPorter() !== 'Selecione o Porteiro') ? getCurrentPorter() : user.full_name,
+          porter_name: (getCurrentPorter() && getCurrentPorter() !== 'Selecione o Porteiro') ? getCurrentPorter() : user.full_name,
           ...(authUser?.id ? { registered_by: authUser.id } : {}),
           notes: notes || null,
           pickup_token: qrToken,
@@ -1076,7 +1080,8 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
       .update({ 
         status: 'delivered', 
         delivered_at: new Date().toISOString(),
-        ...(authUser?.id ? { delivered_by: authUser.id } : {}),
+        delivered_by: authUser?.id || user.id,
+        entregue_por: (getCurrentPorter() && getCurrentPorter() !== 'Selecione o Porteiro') ? getCurrentPorter() : user.full_name,
         delivered_to_name: 'Morador (Manual)'
       })
       .eq('id', pkgId);
@@ -1286,7 +1291,7 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
                         </div>
                       )}
                       <p className="text-[10px] text-zinc-400 mt-1">
-                        Registrado por: {pkg.porter_name || 'Desconhecido'} • {formatSafeDateTime(pkg.created_at)}
+                        Registrado por: {pkg.recebido_por || pkg.porter_name || pkg.registrar?.full_name || 'Desconhecido'} • {formatSafeDateTime(pkg.created_at)}
                       </p>
                     </div>
                   </div>
@@ -2158,7 +2163,7 @@ export default function App() {
       <Route path="/portal/:token" element={<ResidentPortal />} />
       <Route path="/retirada" element={<Retirada />} />
       <Route path="/retirada/:token" element={<Retirada />} />
-      <Route path="/change-password" element={user ? <ChangePassword /> : <Navigate to="/" />} />
+      <Route path="/change-password" element={user ? <ChangePassword onUpdateUser={handleUpdateUser} /> : <Navigate to="/" />} />
       <Route path="/select-condominium" element={
         user ? (
           user.condominium_id ? <Navigate to="/dashboard" /> : <SelectCondominium user={user} onUpdateUser={handleUpdateUser} />
@@ -2186,6 +2191,11 @@ const AppLayout = ({ user, loading, setUser, handleLogout }: any) => {
     const allowedPaths = ['/select-condominium', '/condominiums/new', '/change-password'];
     if (!loading && user && !user.condominium_id && !allowedPaths.includes(location.pathname)) {
       navigate('/select-condominium');
+      return;
+    }
+
+    if (!loading && user && user.must_change_password && location.pathname !== '/change-password') {
+      navigate('/change-password');
       return;
     }
 

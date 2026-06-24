@@ -1,5 +1,5 @@
 import React from 'react';
-import { Package as PackageIcon, Home, Clock, CheckCircle, ArrowRight, Camera, Hash, Layers, MessageSquare, MessageCircle, AlertCircle, Send } from 'lucide-react';
+import { Package as PackageIcon, Home, Clock, CheckCircle, ArrowRight, Camera, Hash, Layers, MessageSquare, MessageCircle, AlertCircle, Send, User } from 'lucide-react';
 import { Package } from '../../types';
 import { formatSafeDateTime } from '../../lib/dateUtils';
 import { formatPackageUnit } from '../../lib/residentUtils';
@@ -130,6 +130,10 @@ const PackageItem: React.FC<PackageItemProps> = ({
             <Clock className="w-3.5 h-3.5 flex-shrink-0" />
             <p>{pkg.isGroup ? 'Última recebida em:' : 'Recebido em:'} <span className="font-medium text-zinc-700">{formatSafeDateTime(pkg.received_at)}</span></p>
           </div>
+          <div className="flex items-center gap-2 text-zinc-500 text-[11px]">
+            <User className="w-3.5 h-3.5 flex-shrink-0 text-zinc-400" />
+            <p>Registrado por: <span className="font-bold text-zinc-700">{pkg.recebido_por || pkg.porter_name || pkg.registrar?.full_name || 'Portaria'}</span></p>
+          </div>
           {pkg.delivered_at && (
             <div className="flex items-center gap-2 text-emerald-600 text-[11px]">
               <CheckCircle className="w-3.5 h-3.5 flex-shrink-0" />
@@ -140,6 +144,18 @@ const PackageItem: React.FC<PackageItemProps> = ({
             <div className="flex items-center gap-2 text-zinc-500 text-[11px]">
               <ArrowRight className="w-3.5 h-3.5 flex-shrink-0" />
               <p>Forma: <span className="font-bold uppercase">{getDeliveryMethodLabel(pkg.delivery_method)}</span></p>
+            </div>
+          )}
+          {pkg.status === 'delivered' && pkg.delivered_to_name && (
+            <div className="flex items-center gap-2 text-zinc-500 text-[11px]">
+              <User className="w-3.5 h-3.5 flex-shrink-0 text-zinc-400" />
+              <p>Retirado por: <span className="font-bold text-zinc-700">{pkg.delivered_to_name}</span></p>
+            </div>
+          )}
+          {pkg.status === 'delivered' && (
+            <div className="flex items-center gap-2 text-zinc-500 text-[11px]">
+              <User className="w-3.5 h-3.5 flex-shrink-0 text-zinc-400" />
+              <p>Baixa por: <span className="font-bold text-zinc-700">{pkg.entregue_por || pkg.deliverer?.full_name || 'Portaria'}</span></p>
             </div>
           )}
         </div>

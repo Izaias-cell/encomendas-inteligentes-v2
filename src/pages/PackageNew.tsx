@@ -19,6 +19,7 @@ import {
   Loader2, 
   CheckCircle, 
   X, 
+  Check,
   FileText,
   Sparkles,
   AlertCircle,
@@ -37,7 +38,7 @@ import { supabase } from '../lib/supabase';
 import { Profile, Morador, CondominiumSettings } from '../types';
 import toast from 'react-hot-toast';
 import { registrarAuditoria } from '../services/auditService';
-import { getCurrentPorter } from '../lib/porterUtils';
+import { getCurrentPorter, setManualPorter } from '../lib/porterUtils';
 import { extractBasicText } from '../services/geminiService';
 import { parseLabelText } from '../services/labelParser';
 import { findMatchingResidents, ScoredResident, normalizeUnit, normalizeName } from '../services/residentMatcher';
@@ -52,6 +53,9 @@ interface PackageNewProps {
 type Step = 'camera' | 'manual' | 'analyzing';
 
 const QUICK_OBSERVATIONS = [
+  'Carta Registrada',
+  'Encomenda Registrada',
+  'Carta Simples',
   'Correios',
   'Amazon',
   'Shopee',
@@ -95,6 +99,15 @@ export default function PackageNew({ user }: PackageNewProps) {
   const [notifyAfter, setNotifyAfter] = useState(() => {
     return localStorage.getItem('notify_after_registration') === 'true';
   });
+
+  const [currentPorterState, setCurrentPorterState] = useState(getCurrentPorter());
+  const [showPorterModal, setShowPorterModal] = useState(false);
+
+  useEffect(() => {
+    if (currentPorterState === 'Selecione o Porteiro') {
+      setShowPorterModal(true);
+    }
+  }, [currentPorterState]);
 
   useEffect(() => {
     localStorage.setItem('notify_after_registration', notifyAfter.toString());
@@ -969,6 +982,9 @@ export default function PackageNew({ user }: PackageNewProps) {
         notes: finalNotes,
         photo_url: finalPhotoUrl,
         received_by: user.id,
+        recebido_por: (currentPorterState && currentPorterState !== 'Selecione o Porteiro') ? currentPorterState : user.full_name,
+        porter_name: (currentPorterState && currentPorterState !== 'Selecione o Porteiro') ? currentPorterState : user.full_name,
+        registered_by: user.id,
         received_at: new Date().toISOString(),
         pickup_code: finalPickupCode,
         pickup_token: finalPickupToken,
@@ -1122,9 +1138,17 @@ export default function PackageNew({ user }: PackageNewProps) {
               </span>
               <div className="flex items-center justify-center gap-1.5 mt-0.5">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse shrink-0" />
-                <span className={`text-[9px] font-medium uppercase tracking-tight whitespace-nowrap px-3 py-1 rounded-full border ${getCurrentPorter() === 'Selecione o Porteiro' ? 'text-amber-600 bg-amber-50 border-amber-200' : 'text-emerald-600 bg-emerald-50 border-emerald-200'}`}>
-                  {getCurrentPorter() === 'Selecione o Porteiro' ? '👤 SELECIONE O PORTEIRO' : `👤 ${getCurrentPorter().toUpperCase()}`}
-                </span>
+                <button
+                  type="button"
+                  onClick={() => setShowPorterModal(true)}
+                  className={`text-[9.5px] font-bold uppercase tracking-tight whitespace-nowrap px-3 py-1 rounded-full border transition-all active:scale-95 cursor-pointer ${
+                    currentPorterState === 'Selecione o Porteiro' 
+                      ? 'text-amber-600 bg-amber-50 border-amber-200 animate-pulse' 
+                      : 'text-emerald-700 bg-emerald-50 border-emerald-200'
+                  }`}
+                >
+                  {currentPorterState === 'Selecione o Porteiro' ? '👤 SELECIONE O PORTEIRO' : `👤 ${currentPorterState.toUpperCase()}`}
+                </button>
               </div>
               <div className="mt-1 text-[8px] text-gray-400 font-medium uppercase tracking-[0.2em]">
                 Fluxo Rápido
@@ -1689,7 +1713,7 @@ export default function PackageNew({ user }: PackageNewProps) {
                       <div className="w-8 h-8 bg-emerald-50 rounded-lg flex items-center justify-center">
                         <Package className="w-5 h-5 text-emerald-600" />
                       </div>
-                      <h2 className="text-xs font-bold text-gray-400 uppercase tracking-[0.2em]">Detalhes Opcionais</h2>
+                      <h2 className="text-xs font-bold text-gray-400 uppercase tracking-[0.2em]">Tipo do Pacote 📦</h2>
                     </div>
 
                     <div className="space-y-4">
@@ -1916,6 +1940,61 @@ export default function PackageNew({ user }: PackageNewProps) {
                     </button>
                   </div>
                 </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        <AnimatePresence>
+          {showPorterModal && (
+            <div className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-zinc-900/80 backdrop-blur-sm">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="bg-white rounded-[2rem] p-8 max-w-sm w-full shadow-2xl relative border border-zinc-100"
+              >
+                <div className="flex justify-between items-center mb-6">
+                  <h3 className="text-xl font-bold text-zinc-900">Selecionar Porteiro</h3>
+                  <button 
+                    type="button" 
+                    onClick={() => setShowPorterModal(false)} 
+                    className="p-2 hover:bg-zinc-100 rounded-full transition-colors text-zinc-400 cursor-pointer"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+                
+                <div className="grid grid-cols-1 gap-3">
+                  {['Marcos', 'Izaias', 'Rodrigo', 'Marisa', 'Bruno', 'Outro'].map((porter) => (
+                    <button
+                      type="button"
+                      key={porter}
+                      onClick={() => {
+                        setCurrentPorterState(porter);
+                        setManualPorter(porter);
+                        setShowPorterModal(false);
+                        toast.success(`Porteiro alterado para ${porter}`);
+                      }}
+                      className={`w-full py-4 px-6 rounded-2xl font-bold transition-all text-left flex items-center justify-between border cursor-pointer ${
+                        currentPorterState === porter 
+                          ? 'bg-emerald-50 border-emerald-200 text-emerald-700' 
+                          : 'bg-zinc-50 border-zinc-100 text-zinc-600 hover:bg-zinc-100 hover:border-zinc-200'
+                      }`}
+                    >
+                      {porter}
+                      {currentPorterState === porter && <Check className="w-5 h-5 text-emerald-600" />}
+                    </button>
+                  ))}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setShowPorterModal(false)}
+                  className="w-full mt-6 py-4 bg-zinc-900 text-white rounded-2xl font-bold hover:bg-zinc-800 transition-all cursor-pointer"
+                >
+                  FECHAR
+                </button>
               </motion.div>
             </div>
           )}

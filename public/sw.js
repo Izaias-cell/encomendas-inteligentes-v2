@@ -45,6 +45,27 @@ self.addEventListener('fetch', (event) => {
   // Apenas métodos GET
   if (request.method !== 'GET') return;
 
+  // Tratamento especial para solicitações de navegação (HTML de páginas do React Router)
+  if (request.mode === 'navigate') {
+    event.respondWith(
+      fetch(request)
+        .then((response) => {
+          if (response && response.status === 200) {
+            const responseToCache = response.clone();
+            caches.open(CACHE_NAME).then((cache) => {
+              cache.put(request, responseToCache);
+            });
+          }
+          return response;
+        })
+        .catch(() => {
+          // Se falhar a navegação (offline), serve o index.html como fallback para o React Router
+          return caches.match('/index.html') || caches.match('/');
+        })
+    );
+    return;
+  }
+
   event.respondWith(
     fetch(request)
       .then((response) => {
