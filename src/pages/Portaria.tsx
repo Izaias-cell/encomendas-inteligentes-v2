@@ -92,7 +92,14 @@ export default function Portaria({ user }: PortariaProps) {
   const [condoName, setCondoName] = useState('');
   const [currentPorter, setCurrentPorter] = useState(getCurrentPorter());
   const [showPorterModal, setShowPorterModal] = useState(false);
+
+  useEffect(() => {
+    if (currentPorter === 'Selecione o Porteiro') {
+      setShowPorterModal(true);
+    }
+  }, [currentPorter]);
   const [showConfirmDelivery, setShowConfirmDelivery] = useState(false);
+  const [isConfirmingDelivery, setIsConfirmingDelivery] = useState(false);
   const [packageToConfirm, setPackageToConfirm] = useState<Package | null>(null);
 
   // Pulse animation state for "TIRAR FOTO" button
@@ -521,6 +528,9 @@ export default function Portaria({ user }: PortariaProps) {
   const [manualToken, setManualToken] = useState('');
   const [deliveryPhoto, setDeliveryPhoto] = useState<string | null>(null);
   const [isDeliverySuccess, setIsDeliverySuccess] = useState(false);
+  const [deliveredToType, setDeliveredToType] = useState<'resident' | 'authorized'>('resident');
+  const [authorizedName, setAuthorizedName] = useState('');
+  const [authorizedDoc, setAuthorizedDoc] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pendingPackageRef = useRef<Package | null>(null);
   const qrScannerRef = useRef<Html5Qrcode | null>(null);
@@ -949,7 +959,7 @@ export default function Portaria({ user }: PortariaProps) {
       // The QR code contains the package ID, token or 4-digit pickup code
       const { data: packagesFound, error: rpcError } = await supabase
         .from('packages')
-        .select('*, moradores(nome, unidade, unit_type, block, street), package_id:id, unit_label:unit_number')
+        .select('*, moradores(nome, unidade, unit_type, block, street), registrar:received_by(full_name), package_id:id, unit_label:unit_number')
         .eq('condominium_id', user.condominium_id)
         .or(orParts.join(','))
         .eq('status', 'received');
@@ -1256,7 +1266,7 @@ export default function Portaria({ user }: PortariaProps) {
        // Busca encomendas e moradores
        let pkgQuery = supabase
          .from('packages')
-         .select('*, moradores(nome, unidade, unit_type, block, street), package_id:id, unit_label:unit_number')
+         .select('*, moradores(nome, unidade, unit_type, block, street), registrar:received_by(full_name), package_id:id, unit_label:unit_number')
          .eq('condominium_id', user.condominium_id)
          .order('received_at', { ascending: false });
  
@@ -1403,7 +1413,7 @@ export default function Portaria({ user }: PortariaProps) {
       
       const photoToUse = photoOverride || deliveryPhoto;
       let finalPhotoUrl = null;
-      let finalMethod = method;
+      let finalMethod: any = method;
 
       if (photoToUse && photoToUse.startsWith('data:')) {
         try {
@@ -1419,20 +1429,42 @@ export default function Portaria({ user }: PortariaProps) {
         finalMethod = 'CÓDIGO';
       }
 
-      // REQUISITO CRÍTICO: Buscar TODOS os registros com o mesmo código/token para baixa coletiva
+      const pickupToken = activePackage?.pickup_token;
+      const pickupCode = activePackage?.pickup_code;
+
+      // REQUISITO CRÍTICO: Buscar/Utilizar todos os IDs do grupo ou buscar semelhantes
       let idsToUpdate: string[] = [pkgId];
-      let pickupToken = activePackage?.pickup_token;
-      let pickupCode = activePackage?.pickup_code;
+      const activePkgAny = activePackage as any;
+      if (activePkgAny?.isGroup && activePkgAny?.packages && activePkgAny.packages.length > 0) {
+        idsToUpdate = activePkgAny.packages.map((p: any) => p.id);
+      } else {
+        const { data: relatedPackages } = await supabase
+          .from('packages')
+          .select('id')
+          .eq('condominium_id', user.condominium_id)
+          .in('status', ['received', 'pending'])
+          .or(pickupToken ? `pickup_token.eq.${pickupToken}` : `pickup_code.eq.${pickupCode || 'none'},recipient_id.eq.${activePackage?.recipient_id || 'none'}`);
 
-      const { data: relatedPackages } = await supabase
-        .from('packages')
-        .select('id')
-        .eq('condominium_id', user.condominium_id)
-        .in('status', ['received', 'pending'])
-        .or(pickupToken ? `pickup_token.eq.${pickupToken}` : `pickup_code.eq.${pickupCode},recipient_id.eq.${activePackage?.recipient_id}`);
+        if (relatedPackages && relatedPackages.length > 0) {
+          idsToUpdate = relatedPackages.map(p => p.id);
+        }
+      }
 
-      if (relatedPackages && relatedPackages.length > 0) {
-        idsToUpdate = relatedPackages.map(p => p.id);
+      const porterNameToSave = (currentPorter && currentPorter !== 'Selecione o Porteiro') ? currentPorter : user.full_name;
+
+      let finalDeliveredToName = 'Morador (Confirmado)';
+      if (deliveredToType === 'authorized') {
+        finalDeliveredToName = `Pessoa Autorizada: ${authorizedName}${authorizedDoc ? ` - Doc: ${authorizedDoc}` : ''}`;
+      } else {
+        if (finalMethod === 'manual') {
+          finalDeliveredToName = 'Morador (Manual)';
+        } else if (finalMethod === 'CÓDIGO' || finalMethod === 'code') {
+          finalDeliveredToName = 'Morador (Código)';
+        } else if (finalMethod === 'foto' || finalMethod === 'photo') {
+          finalDeliveredToName = 'Morador (Foto)';
+        } else {
+          finalDeliveredToName = 'Morador (Confirmado)';
+        }
       }
 
       const { error: updateError } = await supabase
@@ -1441,10 +1473,10 @@ export default function Portaria({ user }: PortariaProps) {
           status: 'delivered',
           delivered_at: new Date().toISOString(),
           delivery_method: finalMethod,
-          ...(authUser?.id ? { delivered_by: authUser.id } : {}),
-          entregue_por: currentPorter,
+          delivered_by: authUser?.id || user.id,
+          entregue_por: porterNameToSave,
           pickup_qr_code: 'used',
-          delivered_to_name: 'Morador (Confirmado)',
+          delivered_to_name: finalDeliveredToName,
           ...(finalPhotoUrl ? { delivery_photo_url: finalPhotoUrl } : {}),
           notes: idsToUpdate.length > 1 ? 'Retirada coletiva via código' : undefined
         })
@@ -1455,14 +1487,15 @@ export default function Portaria({ user }: PortariaProps) {
       // Atualização local imediata
       const now = new Date().toISOString();
       setPackages(prev => prev.map(p => idsToUpdate.includes(p.id) ? { 
-        ...p, 
-        status: 'delivered',
-        delivered_at: now,
-        delivery_method: finalMethod,
-        entregue_por: currentPorter,
-        delivered_by: authUser?.id,
-        delivery_photo_url: finalPhotoUrl || p.delivery_photo_url
-      } : p));
+         ...p, 
+         status: 'delivered',
+         delivered_at: now,
+         delivery_method: finalMethod,
+         entregue_por: porterNameToSave,
+         delivered_by: authUser?.id,
+         delivered_to_name: finalDeliveredToName,
+         delivery_photo_url: finalPhotoUrl || p.delivery_photo_url
+       } : p));
 
       // REGISTRAR AUDITORIA PARA CADA ENCOMENDA ENTREGUE
       try {
@@ -1548,6 +1581,11 @@ export default function Portaria({ user }: PortariaProps) {
       setShowBatchModal(false);
       setNotifyQueue([]);
       setNotifyIndex(0);
+
+      // Resetar estados de quem está retirando
+      setDeliveredToType('resident');
+      setAuthorizedName('');
+      setAuthorizedDoc('');
       
       // Atualizar dados e garantir que permaneça na aba de pendentes
       setQrPackage(null);
@@ -1581,6 +1619,7 @@ export default function Portaria({ user }: PortariaProps) {
 
   const [selectedGroup, setSelectedGroup] = useState<any>(null);
   const [viewPhotoUrl, setViewPhotoUrl] = useState<string | null>(null);
+  const [viewPhotoPkg, setViewPhotoPkg] = useState<Package | null>(null);
   const [viewGroupPhotos, setViewGroupPhotos] = useState<any[] | null>(null);
   const [currentPhotoIndex, setCurrentPhotoIndex] = useState(0);
 
@@ -1866,19 +1905,26 @@ export default function Portaria({ user }: PortariaProps) {
                   getWhatsAppBadge={getWhatsAppBadge}
                   getDeliveryMethodLabel={getDeliveryMethodLabel}
                   onDeliver={(p) => {
+                    setDeliveredToType('resident');
+                    setAuthorizedName('');
+                    setAuthorizedDoc('');
                     setQrPackage(p);
                     setPackageToConfirm(p);
                     setShowConfirmDelivery(true);
                   }}
                   onDeliverWithPhoto={(p) => {
+                    setDeliveredToType('resident');
+                    setAuthorizedName('');
+                    setAuthorizedDoc('');
                     pendingPackageRef.current = p;
                     setQrPackage(p);
                     setRetrievalMethod('manual');
-                    setIsScanning(true);
-                    setQrScanStatus('validating');
                     fileInputRef.current?.click();
                   }}
                   onCodeRetrieval={(p) => {
+                    setDeliveredToType('resident');
+                    setAuthorizedName('');
+                    setAuthorizedDoc('');
                     setQrPackage(p);
                     setRetrievalMethod('manual');
                     setShowManualInput(true);
@@ -1891,7 +1937,8 @@ export default function Portaria({ user }: PortariaProps) {
                       .map((item: any) => ({
                         url: item.photo_url,
                         carrier: item.carrier,
-                        received_at: item.received_at
+                        received_at: item.received_at,
+                        package: item
                       }));
                     
                     if (photos.length > 0) {
@@ -1900,7 +1947,10 @@ export default function Portaria({ user }: PortariaProps) {
                       toast.error('Nenhuma etiqueta com foto neste grupo');
                     }
                   }}
-                  onViewLabel={(url) => setViewPhotoUrl(url)}
+                  onViewLabel={(pkg) => {
+                    setViewPhotoUrl(pkg.photo_url);
+                    setViewPhotoPkg(pkg);
+                  }}
                   onNotify={handleDirectNotify}
                   handleDeliver={handleDeliver}
                   setQrPackage={setQrPackage}
@@ -1951,32 +2001,38 @@ export default function Portaria({ user }: PortariaProps) {
 
       {/* Modal de Foto Individual */}
       {viewPhotoUrl && !viewGroupPhotos && (
-        <div className="fixed inset-0 bg-black/90 z-[70] flex items-center justify-center p-4 backdrop-blur-md animate-in fade-in duration-300">
-          <div className="relative max-w-4xl w-full max-h-[90vh] flex flex-col items-center">
+        <div className="fixed inset-0 bg-black/95 z-[70] flex items-center justify-center p-4 backdrop-blur-md animate-in fade-in duration-300">
+          <div className="relative max-w-5xl w-full h-[95vh] flex flex-col items-center justify-center">
             <button 
               type="button"
               onClick={(e) => {
                 e.preventDefault();
                 setViewPhotoUrl(null);
+                setViewPhotoPkg(null);
               }}
-              className="absolute -top-12 right-0 text-white bg-white/10 hover:bg-white/20 p-2 rounded-full transition-all"
+              className="absolute top-0 right-0 text-white bg-white/10 hover:bg-white/20 p-2 rounded-full transition-all z-10"
             >
-              <Plus className="w-6 h-6 rotate-45" />
+              <Plus className="w-8 h-8 rotate-45" />
             </button>
-            <img 
-              src={viewPhotoUrl} 
-              alt="Foto da etiqueta" 
-              className="max-w-full max-h-[80vh] object-contain rounded-2xl shadow-2xl border-4 border-white/10"
-              referrerPolicy="no-referrer"
-            />
-            <div className="mt-6 flex gap-4">
+            
+            <div className="flex-1 w-full flex items-center justify-center overflow-hidden">
+              <img 
+                src={viewPhotoUrl} 
+                alt="Foto da etiqueta" 
+                className="max-w-full max-h-full object-contain rounded-3xl shadow-2xl border-2 border-white/10"
+                referrerPolicy="no-referrer"
+              />
+            </div>
+
+            <div className="mt-8 flex gap-4 w-full max-w-md">
               <button
                 type="button"
                 onClick={(e) => {
                   e.preventDefault();
                   setViewPhotoUrl(null);
+                  setViewPhotoPkg(null);
                 }}
-                className="bg-white text-zinc-900 px-8 py-3 rounded-xl font-bold hover:bg-zinc-100 transition-all"
+                className="flex-1 bg-white/10 text-white border border-white/20 px-8 py-4 rounded-2xl font-bold hover:bg-white/20 transition-all backdrop-blur-md"
               >
                 Fechar
               </button>
@@ -1984,9 +2040,9 @@ export default function Portaria({ user }: PortariaProps) {
                 href={viewPhotoUrl} 
                 target="_blank" 
                 rel="noopener noreferrer"
-                className="bg-emerald-600 text-white px-8 py-3 rounded-xl font-bold hover:bg-emerald-700 transition-all flex items-center gap-2"
+                className="flex-1 bg-emerald-600 text-white px-8 py-4 rounded-2xl font-bold hover:bg-emerald-700 transition-all flex items-center justify-center gap-2 shadow-lg shadow-emerald-900/20"
               >
-                Abrir imagem original
+                Abrir original
               </a>
             </div>
           </div>
@@ -2006,6 +2062,7 @@ export default function Portaria({ user }: PortariaProps) {
                 onClick={() => {
                   setViewGroupPhotos(null);
                   setViewPhotoUrl(null);
+                  setViewPhotoPkg(null);
                 }}
                 className="p-2 bg-white/10 hover:bg-white/20 rounded-full text-white transition-colors"
               >
@@ -2067,7 +2124,10 @@ export default function Portaria({ user }: PortariaProps) {
                   </div>
 
                   <button 
-                    onClick={() => setViewPhotoUrl(null)}
+                    onClick={() => {
+                      setViewPhotoUrl(null);
+                      setViewPhotoPkg(null);
+                    }}
                     className="absolute top-6 right-6 w-12 h-12 bg-white/10 hover:bg-white/20 rounded-full flex items-center justify-center text-white transition-colors z-[90]"
                   >
                     <X className="w-6 h-6" />
@@ -2117,6 +2177,30 @@ export default function Portaria({ user }: PortariaProps) {
                           />
                         ))}
                       </div>
+
+                      {viewGroupPhotos[currentPhotoIndex].package?.status === 'received' && (
+                        <div className="mt-8 flex flex-col items-center gap-3 bg-white/5 backdrop-blur-xl p-6 rounded-[2rem] border border-white/10 w-full max-w-sm animate-in slide-in-from-bottom-4">
+                          <p className="text-white text-center text-sm font-medium opacity-70">
+                            Morador conferiu a encomenda. Toque para confirmar.
+                          </p>
+                          <button
+                            type="button"
+                            onClick={async (e) => {
+                              e.preventDefault();
+                              const pkg = viewGroupPhotos[currentPhotoIndex].package;
+                              if (!pkg) return;
+                              await handleDeliver(pkg.package_id || pkg.id, 'CONFIRMADO_PELO_MORADOR', undefined, pkg);
+                              setViewPhotoUrl(null);
+                              setViewGroupPhotos(null);
+                              toast.success('RECEBIMENTO CONFIRMADO');
+                            }}
+                            className="w-full bg-emerald-500 hover:bg-emerald-600 text-white py-4 rounded-xl font-black text-lg shadow-lg transition-all flex items-center justify-center gap-2"
+                          >
+                            <Check className="w-5 h-5" />
+                            ENTREGAR
+                          </button>
+                        </div>
+                      )}
                     </div>
                   </div>
                 </motion.div>
@@ -2570,8 +2654,20 @@ export default function Portaria({ user }: PortariaProps) {
               initial={{ opacity: 0, scale: 0.9, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.9, y: 20 }}
-              className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg overflow-hidden border border-white/10"
+              className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg overflow-hidden border border-white/10 relative"
             >
+              <button 
+                type="button"
+                onClick={() => {
+                  setShowConfirmDelivery(false);
+                  setPackageToConfirm(null);
+                  setIsConfirmingDelivery(false);
+                }}
+                className="absolute top-6 right-6 w-10 h-10 bg-zinc-100 hover:bg-zinc-200 rounded-full flex items-center justify-center text-zinc-500 transition-all z-10"
+              >
+                <X className="w-5 h-5" />
+              </button>
+
               <AnimatePresence mode="wait">
                 {isDeliverySuccess ? (
                   <motion.div
@@ -2596,43 +2692,199 @@ export default function Portaria({ user }: PortariaProps) {
                     key="confirm-screen"
                     initial={{ opacity: 1 }}
                     exit={{ opacity: 0, y: -20 }}
-                    className="p-12 text-center"
+                    className="p-6 sm:p-8 text-center flex flex-col items-center"
                   >
-                    <div className="w-20 h-20 bg-emerald-50 text-emerald-600 rounded-3xl flex items-center justify-center mx-auto mb-8 transform rotate-3">
-                      <CheckCircle className="w-10 h-10" />
+                    <div className="mb-4">
+                      <h2 className="text-2xl font-black text-zinc-900 uppercase tracking-tight">ENTREGA</h2>
                     </div>
-                    
-                    <h2 className="text-3xl font-black text-zinc-900 mb-4 uppercase tracking-tight">CONFIRMAR ENTREGA</h2>
-                    <p className="text-zinc-500 mb-12 text-lg font-medium leading-tight px-4">
-                      Peça ao morador para confirmar o recebimento na sua frente:
-                    </p>
 
-                    <div className="space-y-8 flex flex-col items-center">
+                    {packageToConfirm.isGroup && packageToConfirm.packages && packageToConfirm.packages.length > 0 ? (
+                      <div className="w-full max-h-[50vh] overflow-y-auto space-y-4 px-1 py-1 mb-6 custom-scrollbar text-left">
+                        <p className="text-zinc-500 text-xs font-bold uppercase tracking-wider mb-2 text-center">
+                          {packageToConfirm.packages.length} {packageToConfirm.packages.length === 1 ? 'Encomenda Pendente' : 'Encomendas Pendentes'} no Grupo
+                        </p>
+                        {packageToConfirm.packages.map((pkgItem: any, idx: number) => (
+                          <div key={pkgItem.id || idx} className="bg-zinc-50 rounded-3xl p-4 border border-zinc-100 shadow-sm space-y-3">
+                            <div className="flex justify-between items-start">
+                              <div>
+                                <span className="bg-emerald-100 text-emerald-800 text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full">
+                                  #{idx + 1} • {pkgItem.carrier}
+                                </span>
+                                {pkgItem.tracking_code && (
+                                  <p className="text-xs font-mono text-zinc-500 mt-1.5">S/N: {pkgItem.tracking_code}</p>
+                                )}
+                              </div>
+                              <p className="text-[10px] text-zinc-400 font-medium">
+                                {formatSafeDateTime(pkgItem.received_at)}
+                              </p>
+                            </div>
+
+                            {pkgItem.notes && (
+                              <p className="text-[11px] text-amber-700 italic bg-amber-50 rounded-xl px-3 py-1.5 border border-amber-100/50">
+                                {pkgItem.notes}
+                              </p>
+                            )}
+
+                            {pkgItem.photo_url && (
+                              <div className="aspect-[4/3] w-full rounded-2xl overflow-hidden border border-zinc-200">
+                                <img
+                                  src={pkgItem.photo_url}
+                                  alt={`Etiqueta ${idx + 1}`}
+                                  className="w-full h-full object-cover"
+                                  referrerPolicy="no-referrer"
+                                />
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <>
+                        {packageToConfirm.photo_url && (
+                          <div className="w-full bg-zinc-50 rounded-[2.5rem] overflow-hidden mb-6 border-2 border-zinc-100 shadow-md">
+                            <img 
+                              src={packageToConfirm.photo_url} 
+                              alt="Foto da encomenda" 
+                              className="w-full h-auto min-h-[350px] max-h-[60vh] object-cover rounded-[2.5rem]"
+                              referrerPolicy="no-referrer"
+                            />
+                          </div>
+                        )}
+                      </>
+                    )}
+
+                    <div className="mb-8">
+                      <p className="text-zinc-800 text-base font-semibold max-w-[320px] mx-auto leading-tight">
+                        {packageToConfirm.isGroup 
+                          ? "Confira todas as encomendas do morador antes de confirmar a entrega coletiva."
+                          : "Confira a encomenda antes de confirmar o recebimento."
+                        }
+                      </p>
+                    </div>
+
+                    <div className="w-full bg-zinc-50 border border-zinc-100 rounded-3xl p-5 mb-6 text-left space-y-4 shadow-sm">
+                      <p className="text-xs font-bold text-zinc-500 uppercase tracking-wider">
+                        QUEM ESTÁ RETIRANDO?
+                      </p>
+                      
+                      <div className="grid grid-cols-2 gap-3">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setDeliveredToType('resident');
+                          }}
+                          className={`py-3 px-4 rounded-xl font-bold text-sm transition-all border ${
+                            deliveredToType === 'resident'
+                              ? 'bg-emerald-50 text-emerald-700 border-emerald-300'
+                              : 'bg-white text-zinc-600 border-zinc-200 hover:bg-zinc-50'
+                          }`}
+                        >
+                          Morador
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setDeliveredToType('authorized');
+                          }}
+                          className={`py-3 px-4 rounded-xl font-bold text-sm transition-all border ${
+                            deliveredToType === 'authorized'
+                              ? 'bg-emerald-50 text-emerald-700 border-emerald-300'
+                              : 'bg-white text-zinc-600 border-zinc-200 hover:bg-zinc-50'
+                          }`}
+                        >
+                          Pessoa Autorizada
+                        </button>
+                      </div>
+
+                      {deliveredToType === 'authorized' && (
+                        <div className="space-y-3 pt-2 animate-in fade-in duration-200">
+                          <div>
+                            <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">
+                              Nome da Pessoa Autorizada *
+                            </label>
+                            <input
+                              type="text"
+                              required
+                              value={authorizedName}
+                              onChange={(e) => setAuthorizedName(e.target.value)}
+                              placeholder="Nome completo de quem retira"
+                              className="w-full px-4 py-2.5 bg-white border border-zinc-200 rounded-xl text-zinc-950 font-medium placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 text-sm"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">
+                              Documento (Opcional)
+                            </label>
+                            <input
+                              type="text"
+                              value={authorizedDoc}
+                              onChange={(e) => setAuthorizedDoc(e.target.value)}
+                              placeholder="RG, CPF ou outro documento"
+                              className="w-full px-4 py-2.5 bg-white border border-zinc-200 rounded-xl text-zinc-950 font-medium placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 text-sm"
+                            />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="space-y-6 flex flex-col items-center w-full">
                       <button
                         type="button"
+                        disabled={isConfirmingDelivery || (deliveredToType === 'authorized' && !authorizedName.trim())}
                         onClick={async () => {
-                          setIsDeliverySuccess(true);
-                          playSuccessSound();
+                          if (isConfirmingDelivery) return;
                           
+                          setIsConfirmingDelivery(true);
+                          
+                          // Feedback tátil e sonoro
+                          try {
+                            feedback.success();
+                            if (navigator.vibrate) {
+                              navigator.vibrate(50);
+                            }
+                          } catch (e) {
+                            // Ignorar falhas de feedback
+                          }
+
                           // Registra no banco
-                          await handleDeliver(
-                            packageToConfirm.package_id || packageToConfirm.id, 
-                            'CONFIRMADO_PELO_MORADOR' as any, 
-                            undefined, 
-                            packageToConfirm
-                          );
-                          
-                          // Aguarda 2 segundos e fecha
-                          setTimeout(() => {
-                            setShowConfirmDelivery(false);
-                            setIsDeliverySuccess(false);
-                            setPackageToConfirm(null);
-                          }, 2000);
+                          try {
+                            await handleDeliver(
+                              packageToConfirm.package_id || packageToConfirm.id, 
+                              'CONFIRMADO_PELO_MORADOR' as any, 
+                              undefined, 
+                              packageToConfirm
+                            );
+                            
+                            setIsConfirmingDelivery(false);
+                            setIsDeliverySuccess(true);
+                            
+                            // Aguarda 2 segundos e fecha
+                            setTimeout(() => {
+                              setShowConfirmDelivery(false);
+                              setIsDeliverySuccess(false);
+                              setPackageToConfirm(null);
+                              setDeliveredToType('resident');
+                              setAuthorizedName('');
+                              setAuthorizedDoc('');
+                            }, 2000);
+                          } catch (err) {
+                            setIsConfirmingDelivery(false);
+                            // O erro já é tratado pelo handleDeliver/toast
+                          }
                         }}
-                        className="w-full max-w-sm bg-emerald-600 text-white py-8 rounded-full font-black text-2xl hover:bg-emerald-500 transition-all shadow-xl shadow-emerald-200 flex items-center justify-center gap-4 active:scale-95 group"
+                        className="w-full bg-emerald-600 text-white py-10 px-8 rounded-[2.5rem] font-black text-xl hover:bg-emerald-500 transition-all shadow-2xl shadow-emerald-200 flex items-center justify-center gap-3 active:scale-95 group disabled:opacity-70 disabled:active:scale-100"
                       >
-                        <span className="group-hover:scale-110 transition-transform">✅</span>
-                        Confirmar recebimento
+                        {isConfirmingDelivery ? (
+                          <>
+                            <Loader2 className="w-6 h-6 animate-spin" />
+                            Confirmando...
+                          </>
+                        ) : (
+                          <>
+                            <CheckCircle className="w-6 h-6 group-hover:scale-110 transition-transform" />
+                            ✅ CONFIRMAR RECEBIMENTO
+                          </>
+                        )}
                       </button>
 
                       <button
@@ -2640,6 +2892,7 @@ export default function Portaria({ user }: PortariaProps) {
                         onClick={() => {
                           setShowConfirmDelivery(false);
                           setPackageToConfirm(null);
+                          setIsConfirmingDelivery(false);
                         }}
                         className="py-4 text-zinc-400 font-bold hover:text-red-500 transition-colors uppercase tracking-[0.3em] text-[10px]"
                       >
@@ -2672,7 +2925,7 @@ export default function Portaria({ user }: PortariaProps) {
                 </div>
                 
                 <div className="grid grid-cols-1 gap-3">
-                  {['Marcos', 'Izaias', 'Bruno', 'Marisa', 'Outro'].map((porter) => (
+                  {['Marcos', 'Izaias', 'Rodrigo', 'Marisa', 'Bruno', 'Outro'].map((porter) => (
                     <button
                       key={porter}
                       onClick={() => {
@@ -2781,13 +3034,14 @@ export default function Portaria({ user }: PortariaProps) {
 
             <button 
               onClick={() => {
+                setDeliveredToType('resident');
+                setAuthorizedName('');
+                setAuthorizedDoc('');
                 const pkg = selectedGroup;
                 setSelectedGroup(null);
                 pendingPackageRef.current = pkg;
                 setQrPackage(pkg);
                 setRetrievalMethod('manual');
-                setIsScanning(true);
-                setQrScanStatus('validating');
                 fileInputRef.current?.click();
               }}
               className="w-full bg-emerald-600 text-white py-4 rounded-2xl font-bold hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-900/20 flex items-center justify-center gap-3"
@@ -3018,6 +3272,72 @@ export default function Portaria({ user }: PortariaProps) {
                               </div>
                             </div>
 
+                            {/* QUEM ESTÁ RETIRANDO (CÂMERA/CÓDIGO SELECTOR) */}
+                            <div className="bg-white/5 border border-white/10 rounded-2xl p-4 text-left space-y-3">
+                              <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">
+                                QUEM ESTÁ RETIRANDO?
+                              </p>
+                              
+                              <div className="grid grid-cols-2 gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setDeliveredToType('resident');
+                                  }}
+                                  className={`py-2 px-3 rounded-lg font-bold text-xs transition-all border ${
+                                    deliveredToType === 'resident'
+                                      ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
+                                      : 'bg-transparent text-zinc-400 border-white/10 hover:bg-white/5'
+                                  }`}
+                                >
+                                  Morador
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setDeliveredToType('authorized');
+                                  }}
+                                  className={`py-2 px-3 rounded-lg font-bold text-xs transition-all border ${
+                                    deliveredToType === 'authorized'
+                                      ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
+                                      : 'bg-transparent text-zinc-400 border-white/10 hover:bg-white/5'
+                                  }`}
+                                >
+                                  Pessoa Autorizada
+                                </button>
+                              </div>
+
+                              {deliveredToType === 'authorized' && (
+                                <div className="space-y-3 pt-1 animate-in fade-in duration-200">
+                                  <div>
+                                    <label className="block text-[9px] font-bold text-zinc-500 uppercase tracking-widest mb-1">
+                                      Nome da Pessoa Autorizada *
+                                    </label>
+                                    <input
+                                      type="text"
+                                      required
+                                      value={authorizedName}
+                                      onChange={(e) => setAuthorizedName(e.target.value)}
+                                      placeholder="Nome completo de quem retira"
+                                      className="w-full px-3 py-2 bg-zinc-950 border border-white/10 rounded-xl text-white font-medium placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 text-xs"
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="block text-[9px] font-bold text-zinc-500 uppercase tracking-widest mb-1">
+                                      Documento (Opcional)
+                                    </label>
+                                    <input
+                                      type="text"
+                                      value={authorizedDoc}
+                                      onChange={(e) => setAuthorizedDoc(e.target.value)}
+                                      placeholder="RG, CPF ou outro documento"
+                                      className="w-full px-3 py-2 bg-zinc-950 border border-white/10 rounded-xl text-white font-medium placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 text-xs"
+                                    />
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+
                             {deliveryPhoto && (
                               <div className="space-y-2">
                                 <p className="text-[10px] uppercase tracking-widest font-bold text-zinc-500">Foto da Retirada</p>
@@ -3084,13 +3404,14 @@ export default function Portaria({ user }: PortariaProps) {
                             ) : (
                                <button 
                                 type="button"
+                                disabled={deliveredToType === 'authorized' && !authorizedName.trim()}
                                 onClick={(e) => {
                                   e.preventDefault();
                                   if (qrPackage) {
                                     handleDeliver(qrPackage.package_id || qrPackage.id, retrievalMethod, undefined, qrPackage);
                                   }
                                 }}
-                                className="w-full py-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl font-bold flex items-center justify-center gap-2 transition-all shadow-lg shadow-emerald-900/20"
+                                className="w-full py-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl font-bold flex items-center justify-center gap-2 transition-all shadow-lg shadow-emerald-900/20 disabled:opacity-50"
                               >
                                 <Check className="w-5 h-5" />
                                 Confirmar Retirada

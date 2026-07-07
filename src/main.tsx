@@ -1,5 +1,5 @@
-import {StrictMode} from 'react';
-import {createRoot} from 'react-dom/client';
+import { StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import App from './App.tsx';
 import './index.css';
@@ -14,13 +14,19 @@ createRoot(document.getElementById('root')!).render(
 
 // PWA Service Worker Registration
 if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
+  const registerSW = () => {
     navigator.serviceWorker.register('/sw.js')
-      .then(registration => {
-        console.log('SW registered: ', registration);
+      .then((registration) => {
+        console.log('[PWA] Service Worker registrado com sucesso:', registration.scope);
       })
-      .catch(registrationError => {
-        console.log('SW registration failed: ', registrationError);
+      .catch((error) => {
+        console.error('[PWA] Falha ao registrar Service Worker:', error);
       });
-  });
+  };
+
+  if (document.readyState === 'complete' || document.readyState === 'interactive') {
+    registerSW();
+  } else {
+    window.addEventListener('load', registerSW);
+  }
 }
