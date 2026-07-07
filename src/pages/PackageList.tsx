@@ -349,25 +349,9 @@ export default function PackageList({ user }: PackageListProps) {
               />
             </div>
 
-            <div className="text-left bg-zinc-50 p-4 rounded-xl mb-6 space-y-1">
+            <div className="text-left bg-zinc-50 p-4 rounded-xl mb-6">
               <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Detalhes</p>
               <p className="text-xs text-zinc-500">Recebido em {formatSafeDateTime(selectedPkg.received_at)}</p>
-              <p className="text-xs text-zinc-500">
-                Registrado por: <span className="font-semibold text-zinc-700">{selectedPkg.recebido_por || selectedPkg.porter_name || selectedPkg.registrar?.full_name || 'Portaria'}</span>
-              </p>
-              {selectedPkg.status === 'delivered' && (
-                <>
-                  <p className="text-xs text-zinc-500">
-                    Retirado em: <span className="font-semibold text-zinc-700">{formatSafeDateTime(selectedPkg.delivered_at)}</span>
-                  </p>
-                  <p className="text-xs text-zinc-500">
-                    Retirado por: <span className="font-semibold text-zinc-700">{selectedPkg.delivered_to_name || 'Morador'}</span>
-                  </p>
-                  <p className="text-xs text-zinc-500">
-                    Baixa por: <span className="font-semibold text-zinc-700">{selectedPkg.entregue_por || 'Portaria'}</span>
-                  </p>
-                </>
-              )}
             </div>
 
             <button 

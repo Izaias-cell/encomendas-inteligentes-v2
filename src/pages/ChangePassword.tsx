@@ -4,7 +4,7 @@ import { supabase } from '../lib/supabase';
 import { Shield, Key, Loader2, CheckCircle2 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 
-export default function ChangePassword({ onUpdateUser }: { onUpdateUser?: (profile: any) => void }) {
+export default function ChangePassword() {
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -33,18 +33,12 @@ export default function ChangePassword({ onUpdateUser }: { onUpdateUser?: (profi
 
       const { data: { user } } = await supabase.auth.getUser();
       if (user) {
-        const { data: updatedProfile, error: profileError } = await supabase
+        const { error: profileError } = await supabase
           .from('profiles')
           .update({ must_change_password: false })
-          .eq('id', user.id)
-          .select()
-          .single();
+          .eq('id', user.id);
 
         if (profileError) throw profileError;
-
-        if (updatedProfile && onUpdateUser) {
-          onUpdateUser(updatedProfile);
-        }
       }
 
       setSuccess(true);

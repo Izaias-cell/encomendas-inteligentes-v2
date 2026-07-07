@@ -10,8 +10,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Initialize Supabase clients
-const supabaseUrl = process.env.VITE_SUPABASE_URL || 'https://placeholder.supabase.co';
-const supabaseAnonKey = process.env.VITE_SUPABASE_ANON_KEY || 'placeholder';
+const supabaseUrl = process.env.VITE_SUPABASE_URL || '';
+const supabaseAnonKey = process.env.VITE_SUPABASE_ANON_KEY || '';
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 
 // Client for general operations
@@ -603,14 +603,6 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
       supabase: {
         serviceRole: !!process.env.SUPABASE_SERVICE_ROLE_KEY
       }
-    });
-  });
-
-  // Dynamic public config endpoint for exposing runtime Supabase keys directly from App/Container Settings
-  app.get("/api/config", (req, res) => {
-    res.json({
-      supabaseUrl: process.env.VITE_SUPABASE_URL || '',
-      supabaseAnonKey: process.env.VITE_SUPABASE_ANON_KEY || ''
     });
   });
 

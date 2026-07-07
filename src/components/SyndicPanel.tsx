@@ -28,7 +28,6 @@ import { testZApiConnection } from '../services/whatsappService';
 
 import { normalizeRole } from '../lib/authUtils';
 import { registrarAuditoria } from '../services/auditService';
-import { getCurrentPorter } from '../lib/porterUtils';
 
 import ProfileList from '../pages/ProfileList';
 import ProfileNew from '../pages/ProfileNew';
@@ -396,7 +395,7 @@ const Dashboard = ({ user, residents = [], logs = [], systemStatus }: any) => {
                       <p className="text-xs text-zinc-500">
                         {formatPackageUnit(stats.lastPackage)} • {formatSafeDateTime(stats.lastPackage.received_at)}
                       </p>
-                      <p className="text-[10px] text-zinc-400 mt-0.5">Por: {stats.lastPackage.recebido_por || stats.lastPackage.porter_name || stats.lastPackage.registrar?.full_name || 'Portaria'}</p>
+                      <p className="text-[10px] text-zinc-400 mt-0.5">Por: {stats.lastPackage.porter?.full_name || 'Portaria'}</p>
                     </div>
                   </div>
                 ) : (
@@ -503,8 +502,7 @@ const PackagesList = ({ user, counts: externalCounts }: any) => {
         .update({ 
           status: 'delivered', 
           delivered_at: new Date().toISOString(),
-          delivered_by: authUser?.id || user.id,
-          entregue_por: (getCurrentPorter() && getCurrentPorter() !== 'Selecione o Porteiro') ? getCurrentPorter() : user.full_name,
+          ...(authUser?.id ? { delivered_by: authUser.id } : {}),
           delivery_method: finalMethod,
           delivery_photo_url: finalPhotoUrl
         })
@@ -518,7 +516,6 @@ const PackagesList = ({ user, counts: externalCounts }: any) => {
         ...p, 
         status: 'delivered', 
         delivered_at: new Date().toISOString(),
-        entregue_por: user.full_name,
         delivery_method: finalMethod,
         delivery_photo_url: finalPhotoUrl
       } : p));
@@ -557,7 +554,6 @@ const PackagesList = ({ user, counts: externalCounts }: any) => {
         .select(`
           *, 
           moradores(nome, unidade, block, street),
-          registrar:received_by(full_name),
           package_id:id, 
           unit_label:unit_number
         `)
@@ -729,8 +725,8 @@ const PackagesList = ({ user, counts: externalCounts }: any) => {
       formatPackageUnit(pkg) || "",
       formatSafeDateTime(pkg.received_at) || "",
       pkg.delivered_at ? formatSafeDateTime(pkg.delivered_at) : "Pendente",
-      pkg.recebido_por || pkg.porter_name || pkg.registrar?.full_name || "-",
-      pkg.delivered_at ? (pkg.entregue_por || pkg.deliverer?.full_name || "-") : "-",
+      pkg.registrar?.full_name || pkg.recebido_por || pkg.porter_name || "-",
+      pkg.delivered_at ? (pkg.deliverer?.full_name || pkg.entregue_por || "-") : "-",
       pkg.delivered_at ? getDeliveryMethodLabel(pkg.delivery_method) : "-"
     ]);
 
@@ -976,7 +972,7 @@ const PackagesList = ({ user, counts: externalCounts }: any) => {
               </div>
               <div>
                 <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest block mb-1">Registrado por</label>
-                <p className="text-sm text-zinc-900">{selectedPackage.recebido_por || selectedPackage.porter_name || selectedPackage.registrar?.full_name || 'Portaria'}</p>
+                <p className="text-sm text-zinc-900">{selectedPackage.registered_by_name || selectedPackage.recebido_por || selectedPackage.porter_name || 'Portaria'}</p>
                 <p className="text-[10px] text-zinc-500 mt-0.5">Em {formatSafeDateTime(selectedPackage.received_at)}</p>
               </div>
               <div>
@@ -989,14 +985,11 @@ const PackagesList = ({ user, counts: externalCounts }: any) => {
                     <p className="text-xs text-zinc-500">
                       Forma: {getDeliveryMethodLabel(selectedPackage.delivery_method)}
                     </p>
-                    {selectedPackage.delivered_to_name && (
-                      <p className="text-xs text-zinc-650 font-medium">
-                        Retirado por: <span className="font-bold text-zinc-800">{selectedPackage.delivered_to_name}</span>
+                    {selectedPackage.delivered_by_name || selectedPackage.entregue_por && (
+                      <p className="text-xs text-zinc-400 italic">
+                        Baixa por: {selectedPackage.delivered_by_name || selectedPackage.entregue_por}
                       </p>
                     )}
-                    <p className="text-xs text-zinc-500">
-                      Baixa por: <span className="font-semibold text-zinc-700">{selectedPackage.entregue_por || selectedPackage.delivered_by_name || 'Portaria'}</span>
-                    </p>
                   </div>
                 ) : (
                   <p className="text-xs text-amber-600 font-bold">Aguardando retirada</p>
@@ -1273,7 +1266,6 @@ const HistoryTab = ({ user }: any) => {
         .select(`
           *, 
           moradores(nome, unidade, block, street),
-          registrar:received_by(full_name),
           package_id:id,
           unit_label:unit_number
         `)
@@ -1385,8 +1377,8 @@ const HistoryTab = ({ user }: any) => {
       formatPackageUnit(pkg) || "",
       formatSafeDateTime(pkg.received_at) || "",
       pkg.delivered_at ? formatSafeDateTime(pkg.delivered_at) : "Pendente",
-      pkg.recebido_por || pkg.porter_name || pkg.registrar?.full_name || "-",
-      pkg.delivered_at ? (pkg.entregue_por || pkg.deliverer?.full_name || "-") : "-",
+      pkg.registrar?.full_name || pkg.recebido_por || pkg.porter_name || "-",
+      pkg.delivered_at ? (pkg.deliverer?.full_name || pkg.entregue_por || "-") : "-",
       pkg.delivered_at ? getDeliveryMethodLabel(pkg.delivery_method) : "-"
     ]);
 
@@ -1451,23 +1443,20 @@ const HistoryTab = ({ user }: any) => {
                 <th className="px-6 py-4 text-left text-xs font-bold text-zinc-400 uppercase tracking-widest">Unidade</th>
                 <th className="px-6 py-4 text-left text-xs font-bold text-zinc-400 uppercase tracking-widest">Status</th>
                 <th className="px-6 py-4 text-left text-xs font-bold text-zinc-400 uppercase tracking-widest">Recebimento</th>
-                <th className="px-6 py-4 text-left text-xs font-bold text-zinc-400 uppercase tracking-widest">Registrado por</th>
                 <th className="px-6 py-4 text-left text-xs font-bold text-zinc-400 uppercase tracking-widest">Retirada</th>
-                <th className="px-6 py-4 text-left text-xs font-bold text-zinc-400 uppercase tracking-widest">Retirado por</th>
-                <th className="px-6 py-4 text-left text-xs font-bold text-zinc-400 uppercase tracking-widest">Baixa por</th>
                 <th className="px-6 py-4 text-left text-xs font-bold text-zinc-400 uppercase tracking-widest">Método</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-50">
               {loading ? (
                 <tr>
-                  <td colSpan={9} className="px-6 py-12 text-center">
+                  <td colSpan={6} className="px-6 py-12 text-center">
                     <RefreshCw className="w-8 h-8 animate-spin text-emerald-600 mx-auto" />
                   </td>
                 </tr>
               ) : filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="px-6 py-12 text-center text-zinc-500 italic">
+                  <td colSpan={6} className="px-6 py-12 text-center text-zinc-500 italic">
                     Nenhuma encomenda encontrada no histórico
                   </td>
                 </tr>
@@ -1489,18 +1478,7 @@ const HistoryTab = ({ user }: any) => {
                       <p className="text-sm text-zinc-600">{formatSafeDateTime(pkg.received_at)}</p>
                     </td>
                     <td className="px-6 py-4">
-                      <p className="text-sm text-zinc-600 font-medium">{pkg.recebido_por || pkg.porter_name || pkg.registrar?.full_name || '-'}</p>
-                    </td>
-                    <td className="px-6 py-4">
                       <p className="text-sm text-zinc-600">{pkg.delivered_at ? formatSafeDateTime(pkg.delivered_at) : '-'}</p>
-                    </td>
-                    <td className="px-6 py-4">
-                      <p className="text-sm text-zinc-600 font-medium">{pkg.delivered_at ? (pkg.delivered_to_name || 'Morador') : '-'}</p>
-                    </td>
-                    <td className="px-6 py-4">
-                      <p className="text-sm text-zinc-600 font-medium">
-                        {pkg.delivered_at ? (pkg.entregue_por || pkg.deliverer?.full_name || '-') : '-'}
-                      </p>
                     </td>
                     <td className="px-6 py-4">
                       <p className="text-xs font-medium text-zinc-500">{getDeliveryMethodLabel(pkg.delivery_method)}</p>

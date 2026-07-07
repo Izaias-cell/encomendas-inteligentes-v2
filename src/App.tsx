@@ -37,7 +37,6 @@ import SyndicPanel from './components/SyndicPanel';
 
 
 import { normalizeRole } from './lib/authUtils';
-import { getCurrentPorter } from './lib/porterUtils';
 
 // --- Components ---
 
@@ -218,27 +217,16 @@ const LoginPage = ({ onLogin }: any) => {
     }
   };
 
-  // Mock login for demo if no supabase keys or for quick preview
+  // Mock login for demo if no supabase keys
   const mockLogin = (role: Role) => {
     onLogin({
       id: '00000000-0000-0000-0000-000000000001',
-      full_name: role === 'porteiro' ? 'Porteiro Silva' : role === 'sindico' ? 'Síndico Oliveira' : 'Administrador',
-      email: role === 'porteiro' ? 'porteiro@demo.com' : role === 'sindico' ? 'sindico@demo.com' : 'admin@demo.com',
+      full_name: role === 'porteiro' ? 'Porteiro Silva' : role === 'sindico' ? 'Síndico Oliveira' : 'Morador João',
       role,
       condominium_id: '00000000-0000-0000-0000-000000000000',
       unit_number: '402'
     });
-    
-    if (role === 'porteiro') {
-      navigate('/portaria');
-    } else if (role === 'sindico') {
-      navigate('/sindico');
-    } else {
-      navigate('/dashboard');
-    }
   };
-
-  const isSupabaseConfigured = !!(import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_ANON_KEY);
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-zinc-50 p-4">
@@ -254,14 +242,7 @@ const LoginPage = ({ onLogin }: any) => {
         {error && (
           <div className="mb-4 p-3 bg-red-50 border border-red-100 text-red-600 text-sm rounded-xl flex items-center gap-2 animate-in fade-in slide-in-from-top-1">
             <Bell className="w-4 h-4 shrink-0" />
-            <div className="flex-1">
-              <span className="font-bold block mb-0.5">{error}</span>
-              {error.includes("fetch") && (
-                <span className="text-[11px] opacity-90 block mt-1">
-                  Dica: Esse erro geralmente ocorre por falta de chaves Supabase conectadas. Use um dos botões abaixo para acessar em Modo Demo imediatamente!
-                </span>
-              )}
-            </div>
+            {error}
           </div>
         )}
 
@@ -315,8 +296,6 @@ const LoginPage = ({ onLogin }: any) => {
             </button>
           </div>
         </form>
-
-
       </Card>
     </div>
   );
@@ -759,8 +738,7 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
         .update({ 
           status: 'delivered', 
           delivered_at: new Date().toISOString(),
-          delivered_by: authUser?.id || user.id,
-          entregue_por: (getCurrentPorter() && getCurrentPorter() !== 'Selecione o Porteiro') ? getCurrentPorter() : user.full_name,
+          ...(authUser?.id ? { delivered_by: authUser.id } : {}),
           pickup_qr_code: 'used',
           delivered_to_name: 'Morador (Confirmado)',
           ...(deliveryPhoto ? { delivery_photo_url: deliveryPhoto } : {})
@@ -800,7 +778,7 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
     if (!user?.condominium_id) return;
     const { data, error } = await supabase
       .from('packages')
-      .select('*, registrar:received_by(full_name), package_id:id, unit_label:unit_number')
+      .select('*, package_id:id, unit_label:unit_number')
       .eq('condominium_id', user.condominium_id)
       .order('created_at', { ascending: false });
     
@@ -836,7 +814,7 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
       }, 100);
     } catch (err) {
       console.error("Erro ao acessar câmera:", err);
-      toast.error("Não foi possível acessar a câmera. Ative as permissões ou se estiver no chat, clique para abrir o app em uma nova aba!");
+      toast.error("Não foi possível acessar a câmera");
     }
   };
 
@@ -988,8 +966,6 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
           whatsapp_sent: true,
           notified_at: new Date().toISOString(),
           received_by: user.id,
-          recebido_por: (getCurrentPorter() && getCurrentPorter() !== 'Selecione o Porteiro') ? getCurrentPorter() : user.full_name,
-          porter_name: (getCurrentPorter() && getCurrentPorter() !== 'Selecione o Porteiro') ? getCurrentPorter() : user.full_name,
           ...(authUser?.id ? { registered_by: authUser.id } : {}),
           notes: notes || null,
           pickup_token: qrToken,
@@ -1080,8 +1056,7 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
       .update({ 
         status: 'delivered', 
         delivered_at: new Date().toISOString(),
-        delivered_by: authUser?.id || user.id,
-        entregue_por: (getCurrentPorter() && getCurrentPorter() !== 'Selecione o Porteiro') ? getCurrentPorter() : user.full_name,
+        ...(authUser?.id ? { delivered_by: authUser.id } : {}),
         delivered_to_name: 'Morador (Manual)'
       })
       .eq('id', pkgId);
@@ -1291,7 +1266,7 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
                         </div>
                       )}
                       <p className="text-[10px] text-zinc-400 mt-1">
-                        Registrado por: {pkg.recebido_por || pkg.porter_name || pkg.registrar?.full_name || 'Desconhecido'} • {formatSafeDateTime(pkg.created_at)}
+                        Registrado por: {pkg.porter_name || 'Desconhecido'} • {formatSafeDateTime(pkg.created_at)}
                       </p>
                     </div>
                   </div>
@@ -2163,7 +2138,7 @@ export default function App() {
       <Route path="/portal/:token" element={<ResidentPortal />} />
       <Route path="/retirada" element={<Retirada />} />
       <Route path="/retirada/:token" element={<Retirada />} />
-      <Route path="/change-password" element={user ? <ChangePassword onUpdateUser={handleUpdateUser} /> : <Navigate to="/" />} />
+      <Route path="/change-password" element={user ? <ChangePassword /> : <Navigate to="/" />} />
       <Route path="/select-condominium" element={
         user ? (
           user.condominium_id ? <Navigate to="/dashboard" /> : <SelectCondominium user={user} onUpdateUser={handleUpdateUser} />
@@ -2191,11 +2166,6 @@ const AppLayout = ({ user, loading, setUser, handleLogout }: any) => {
     const allowedPaths = ['/select-condominium', '/condominiums/new', '/change-password'];
     if (!loading && user && !user.condominium_id && !allowedPaths.includes(location.pathname)) {
       navigate('/select-condominium');
-      return;
-    }
-
-    if (!loading && user && user.must_change_password && location.pathname !== '/change-password') {
-      navigate('/change-password');
       return;
     }
 

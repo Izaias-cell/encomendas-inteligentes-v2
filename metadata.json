@@ -3,8 +3,5 @@
   "description": "SaaS para gestão de encomendas em condomínios com leitura de etiquetas por IA e notificações via WhatsApp.",
   "requestFramePermissions": [
     "camera"
-  ],
-  "majorCapabilities": [
-    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
   ]
 }
