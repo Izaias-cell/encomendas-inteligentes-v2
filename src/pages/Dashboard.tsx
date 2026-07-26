@@ -498,10 +498,10 @@ export default function Dashboard({ user }: DashboardProps) {
                 color="bg-zinc-100 text-zinc-600"
               />
               <ActionCard 
-                title="ADICIONAR NOVO CONDOMÍNIO" 
-                description="Cadastre um novo condomínio com síndico e porteiros." 
+                title="GESTÃO DE CONDOMÍNIOS" 
+                description="Gerencie todos os condomínios cadastrados, usuários e estatísticas da plataforma." 
                 icon={Building2} 
-                onClick={() => setShowCondoModal(true)}
+                onClick={() => navigate('/condominiums')}
                 color="bg-indigo-100 text-indigo-600"
               />
               <ActionCard 

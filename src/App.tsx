@@ -2309,16 +2309,28 @@ const AppLayout = ({ user, loading, setUser, handleLogout }: any) => {
                     Moradores
                   </button>
                   {role === 'admin' && (
-                    <button 
-                      onClick={() => navigate('/users')}
-                      className={`px-4 py-2 rounded-xl text-sm font-bold transition-all ${
-                        location.pathname === '/users'
-                          ? 'bg-emerald-50 text-emerald-600' 
-                          : 'text-zinc-500 hover:bg-zinc-50'
-                      }`}
-                    >
-                      Usuários
-                    </button>
+                    <>
+                      <button 
+                        onClick={() => navigate('/users')}
+                        className={`px-4 py-2 rounded-xl text-sm font-bold transition-all ${
+                          location.pathname === '/users'
+                            ? 'bg-emerald-50 text-emerald-600' 
+                            : 'text-zinc-500 hover:bg-zinc-50'
+                        }`}
+                      >
+                        Usuários
+                      </button>
+                      <button 
+                        onClick={() => navigate('/condominiums')}
+                        className={`px-4 py-2 rounded-xl text-sm font-bold transition-all ${
+                          location.pathname === '/condominiums'
+                            ? 'bg-emerald-50 text-emerald-600' 
+                            : 'text-zinc-500 hover:bg-zinc-50'
+                        }`}
+                      >
+                        Gestão de Condomínios
+                      </button>
+                    </>
                   )}
                 </div>
               );

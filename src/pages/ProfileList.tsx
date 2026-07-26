@@ -279,11 +279,14 @@ export default function ProfileList({ user }: ProfileListProps) {
     }
   };
 
-  const filteredProfiles = profiles.filter(p => 
-    p.full_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    p.phone.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    p.unidade?.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  const filteredProfiles = (profiles || []).filter(p => {
+    if (!p) return false;
+    const term = (searchTerm || '').toLowerCase().trim();
+    const nameStr = (p.full_name || '').toLowerCase();
+    const phoneStr = (p.phone || '').toLowerCase();
+    const unitStr = (p.unidade || '').toLowerCase();
+    return !term || nameStr.includes(term) || phoneStr.includes(term) || unitStr.includes(term);
+  });
 
   const getRoleBadge = (role: string) => {
     const variants: any = {

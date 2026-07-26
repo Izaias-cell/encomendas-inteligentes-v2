@@ -68,14 +68,23 @@ export interface Condominium {
   id: string;
   name: string;
   address: string;
+  city?: string;
+  state?: string;
   city_state?: string;
+  cnpj?: string;
+  zip_code?: string;
+  phone?: string;
+  email?: string;
   manager_name?: string;
   manager_phone?: string;
   manager_email?: string;
   rules?: string;
   internal_notes?: string;
-  active: boolean;
+  active?: boolean;
   created_at: string;
+  user_count?: number;
+  unit_count?: number;
+  package_count?: number;
 }
 
 export interface Package {

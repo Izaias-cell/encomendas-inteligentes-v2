@@ -82,10 +82,13 @@ export default function SelectCondominium({ user, onUpdateUser }: SelectCondomin
     }
   };
 
-  const filteredCondos = condos.filter(c => 
-    c.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    c.address.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  const filteredCondos = (condos || []).filter(c => {
+    if (!c) return false;
+    const term = (searchTerm || '').toLowerCase().trim();
+    const nameStr = (c.name || '').toLowerCase();
+    const addressStr = (c.address || '').toLowerCase();
+    return !term || nameStr.includes(term) || addressStr.includes(term);
+  });
 
   return (
     <div className="max-w-4xl mx-auto p-6">

@@ -4,7 +4,8 @@ import { supabase } from '../lib/supabase';
 import { Profile, Role, Condominium } from '../types';
 import { 
   Shield, Plus, Loader2, Search, User, Phone, 
-  Building2, Power, Key, Edit2, Filter, X, Trash2, MoreVertical
+  Building2, Power, Key, Edit2, Filter, X, Trash2, MoreVertical,
+  Check, Copy, AlertTriangle
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { registrarAuditoria } from '../services/auditService';
@@ -23,6 +24,13 @@ export default function UserManagement({ user }: UserManagementProps) {
   const [editingUser, setEditingUser] = useState<Profile | null>(null);
   const [modalLoading, setModalLoading] = useState(false);
   const [activeMenu, setActiveMenu] = useState<string | null>(null);
+
+  // Modals state for admin actions
+  const [resetConfirmUser, setResetConfirmUser] = useState<Profile | null>(null);
+  const [resetSuccessData, setResetSuccessData] = useState<{ user: Profile; tempPassword: string } | null>(null);
+  const [deleteConfirmUser, setDeleteConfirmUser] = useState<Profile | null>(null);
+  const [resetLoading, setResetLoading] = useState(false);
+  const [copiedPassword, setCopiedPassword] = useState(false);
 
   // Form state
   const [formData, setFormData] = useState({
@@ -295,54 +303,126 @@ export default function UserManagement({ user }: UserManagementProps) {
     }
   };
 
-  const handleResetPassword = async (u: Profile) => {
-    if (!confirm(`Deseja realmente resetar a senha de ${u.full_name}? Uma nova senha temporária será gerada.`)) return;
+  const executeResetPassword = async () => {
+    if (!resetConfirmUser) return;
+    const target = resetConfirmUser;
+    setResetLoading(true);
 
-    const toastId = toast.loading('Resetando senha...');
     try {
-      const newPassword = Math.random().toString(36).slice(-8);
       const session = await getValidSession();
-      
-      if (!session) {
-        throw new Error('Sessão não encontrada');
-      }
+      if (!session) throw new Error('Sessão não encontrada. Recarregue a página.');
 
-      const response = await fetch(`/api/admin/users/${u.id}/reset-password`, {
+      const newTempPassword = Math.random().toString(36).slice(-8) + Math.random().toString(36).slice(-4);
+
+      const response = await fetch(`/api/admin/users/${target.id}/reset-password`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${session.access_token}`
         },
-        body: JSON.stringify({ newPassword })
+        body: JSON.stringify({ newPassword: newTempPassword })
       });
 
+      const resData = await response.json();
       if (!response.ok) {
-        const err = await response.json();
-        throw new Error(err.error || 'Erro ao resetar senha');
+        throw new Error(resData.error || 'Erro ao resetar senha');
       }
 
+      const finalPassword = resData.tempPassword || newTempPassword;
+
+      // Update UI state automatically
+      setUsers(prev => prev.map(u => u.id === target.id ? { ...u, must_change_password: true } : u));
+
+      // Record audit log
       registrarAuditoria({
-        condominio_id: user.condominium_id || '',
+        condominio_id: user.condominium_id || target.condominium_id || '',
         usuario_id: user.id,
         usuario_nome: user.full_name,
         usuario_perfil: user.role,
         tipo_evento: 'SENHA_RESETADA',
         acao: 'UPDATE',
         tabela_afetada: 'profiles',
-        registro_id: u.id,
-        descricao: `Senha resetada para o usuário: ${u.full_name}`,
+        registro_id: target.id,
+        descricao: `Senha redefinida para o usuário ${target.full_name} (${target.phone || 'sem tel'})`,
         metodo: 'MANUAL'
       }).catch(() => {});
 
-      toast.success(`Senha resetada com sucesso! Nova senha temporária: ${newPassword}`, {
-        id: toastId,
-        duration: 10000,
-        icon: '🔑'
-      });
+      setResetConfirmUser(null);
+      setCopiedPassword(false);
+      setResetSuccessData({ user: target, tempPassword: finalPassword });
+      toast.success('Senha redefinida com sucesso!');
     } catch (error: any) {
       console.error("Erro ao resetar senha:", error);
-      toast.error('Erro ao resetar: ' + error.message, { id: toastId });
+      toast.error('Erro ao resetar: ' + error.message);
+    } finally {
+      setResetLoading(false);
     }
+  };
+
+  const executeDeleteUser = async () => {
+    if (!deleteConfirmUser) return;
+    const target = deleteConfirmUser;
+
+    if (target.id === user.id) {
+      toast.error('Você não pode excluir seu próprio usuário.');
+      setDeleteConfirmUser(null);
+      return;
+    }
+
+    setDeletingId(target.id);
+    const cachedUsers = users;
+
+    try {
+      // Optimistic UI update
+      setUsers(prev => prev.filter(item => item.id !== target.id));
+
+      const session = await getValidSession();
+      if (!session) throw new Error('Sessão não encontrada');
+
+      const response = await fetch(`/api/admin/users/${target.id}`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${session.access_token}`
+        }
+      });
+
+      const resData = await response.json();
+
+      if (!response.ok) {
+        // Revert UI on error
+        setUsers(cachedUsers);
+        throw new Error(resData.error || 'Erro ao excluir usuário');
+      }
+
+      registrarAuditoria({
+        condominio_id: user.condominium_id || target.condominium_id || '',
+        usuario_id: user.id,
+        usuario_nome: user.full_name,
+        usuario_perfil: user.role,
+        tipo_evento: 'USUARIO_EXCLUIDO',
+        acao: 'DELETE',
+        tabela_afetada: 'profiles',
+        registro_id: target.id,
+        descricao: `Usuário ${target.full_name} (${target.role}) foi excluído permanentemente do sistema.`,
+        metodo: 'MANUAL'
+      }).catch(() => {});
+
+      toast.success(`Usuário ${target.full_name} excluído com sucesso ✅`);
+      setDeleteConfirmUser(null);
+    } catch (error: any) {
+      console.error("Erro ao excluir usuário:", error);
+      toast.error('Erro ao excluir: ' + error.message);
+      setUsers(cachedUsers);
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  const handleCopyPassword = (pwd: string) => {
+    navigator.clipboard.writeText(pwd);
+    setCopiedPassword(true);
+    toast.success('Senha temporária copiada para a área de transferência!');
+    setTimeout(() => setCopiedPassword(false), 3000);
   };
 
   const toggleStatus = async (u: Profile) => {
@@ -391,68 +471,15 @@ export default function UserManagement({ user }: UserManagementProps) {
     }
   };
 
-  const handleDeleteUser = async (u: Profile) => {
-    if (u.id === user.id) {
-      toast.error('Você não pode excluir seu próprio usuário.');
-      return;
-    }
+  const filteredUsers = (users || []).filter(u => {
+    if (!u) return false;
+    const term = (searchTerm || '').toLowerCase().trim();
+    const nameStr = (u.full_name || '').toLowerCase();
+    const phoneStr = (u.phone || '').toLowerCase();
+    const condoNameStr = (condos.find(c => c.id === u.condominium_id)?.name || '').toLowerCase();
 
-    if (!confirm(`ATENÇÃO: Deseja excluir o usuário ${u.full_name} permanentemente? Esta ação não pode ser desfeita.`)) {
-      return;
-    }
-
-    setDeletingId(u.id);
-    const cachedUsers = users;
-    
-    try {
-      // Optimistic UI update
-      setUsers(prev => prev.filter(item => item.id !== u.id));
-
-      const session = await getValidSession();
-      if (!session) throw new Error('Sessão não encontrada');
-
-      const response = await fetch(`/api/admin/users/${u.id}`, {
-        method: 'DELETE',
-        headers: {
-          'Authorization': `Bearer ${session.access_token}`
-        }
-      });
-
-      if (!response.ok) {
-        // Revert UI on error
-        setUsers(cachedUsers);
-        const err = await response.json();
-        throw new Error(err.error || 'Erro ao excluir usuário');
-      }
-
-      registrarAuditoria({
-        condominio_id: user.condominium_id || '',
-        usuario_id: user.id,
-        usuario_nome: user.full_name,
-        usuario_perfil: user.role,
-        tipo_evento: 'USUARIO_EXCLUIDO',
-        acao: 'DELETE',
-        tabela_afetada: 'profiles',
-        registro_id: u.id,
-        descricao: `Usuário excluído permanentemente: ${u.full_name}`,
-        metodo: 'MANUAL'
-      }).catch(() => {});
-
-      toast.success('Usuário excluído com sucesso ✅');
-    } catch (error: any) {
-      console.error("Erro ao excluir usuário:", error);
-      toast.error('Erro ao excluir: ' + error.message);
-      setUsers(cachedUsers);
-    } finally {
-      setDeletingId(null);
-    }
-  };
-
-  const filteredUsers = users.filter(u => 
-    u.full_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    (u.phone || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-    (condos.find(c => c.id === u.condominium_id)?.name || '').toLowerCase().includes(searchTerm.toLowerCase())
-  );
+    return !term || nameStr.includes(term) || phoneStr.includes(term) || condoNameStr.includes(term);
+  });
 
   const getRoleLabel = (role: string) => {
     const labels: any = {
@@ -545,7 +572,7 @@ export default function UserManagement({ user }: UserManagementProps) {
                   </td>
                   <td className="px-6 py-4 text-right relative">
                     <div className="flex items-center justify-end">
-                      {user.role === 'admin' ? (
+                      {user.role === 'admin' || user.role === 'sindico' ? (
                         <div className="relative">
                           <button 
                             onClick={(e) => {
@@ -597,7 +624,7 @@ export default function UserManagement({ user }: UserManagementProps) {
                                   onClick={(e) => {
                                     e.preventDefault();
                                     e.stopPropagation();
-                                    handleResetPassword(u);
+                                    setResetConfirmUser(u);
                                     setActiveMenu(null);
                                   }}
                                   className="w-full px-4 py-2.5 text-left text-sm font-bold text-zinc-700 hover:bg-zinc-50 flex items-center gap-3 transition-colors"
@@ -613,7 +640,7 @@ export default function UserManagement({ user }: UserManagementProps) {
                                   onClick={(e) => {
                                     e.preventDefault();
                                     e.stopPropagation();
-                                    handleDeleteUser(u);
+                                    setDeleteConfirmUser(u);
                                     setActiveMenu(null);
                                   }}
                                   disabled={deletingId === u.id || u.id === user.id}
@@ -799,6 +826,191 @@ export default function UserManagement({ user }: UserManagementProps) {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Confirmação de Reset de Senha */}
+      {resetConfirmUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+          <div className="bg-white rounded-3xl w-full max-w-md shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200 p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-12 h-12 bg-blue-100 rounded-2xl flex items-center justify-center text-blue-600">
+                <Key className="w-6 h-6" />
+              </div>
+              <div>
+                <h2 className="text-xl font-bold text-zinc-900">Resetar Senha</h2>
+                <p className="text-xs text-zinc-500">Confirmação de ação administrativa</p>
+              </div>
+            </div>
+
+            <div className="bg-zinc-50 p-4 rounded-2xl border border-zinc-100 mb-4 space-y-2">
+              <div className="flex justify-between text-sm">
+                <span className="text-zinc-500 font-medium">Usuário:</span>
+                <span className="font-bold text-zinc-900">{resetConfirmUser.full_name}</span>
+              </div>
+              {resetConfirmUser.email && (
+                <div className="flex justify-between text-sm">
+                  <span className="text-zinc-500 font-medium">E-mail:</span>
+                  <span className="font-bold text-zinc-900">{resetConfirmUser.email}</span>
+                </div>
+              )}
+              {resetConfirmUser.phone && (
+                <div className="flex justify-between text-sm">
+                  <span className="text-zinc-500 font-medium">Telefone:</span>
+                  <span className="font-bold text-zinc-900">{resetConfirmUser.phone}</span>
+                </div>
+              )}
+              <div className="flex justify-between text-sm">
+                <span className="text-zinc-500 font-medium">Perfil:</span>
+                <span className="font-bold text-blue-600 uppercase text-xs tracking-wider">{getRoleLabel(resetConfirmUser.role)}</span>
+              </div>
+            </div>
+
+            <div className="p-4 bg-amber-50 rounded-2xl border border-amber-100 mb-6">
+              <p className="text-xs text-amber-800 leading-relaxed flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0 text-amber-600" />
+                <span>
+                  Uma nova <strong>senha temporária</strong> será gerada e todas as sessões ativas deste usuário serão invalidadas imediatamente.
+                </span>
+              </p>
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={() => setResetConfirmUser(null)}
+                disabled={resetLoading}
+                className="flex-1 px-5 py-3 rounded-xl font-bold text-zinc-600 hover:bg-zinc-100 transition-all text-sm"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={resetLoading}
+                onClick={executeResetPassword}
+                className="flex-1 bg-blue-600 text-white px-5 py-3 rounded-xl font-bold hover:bg-blue-700 transition-all text-sm flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                {resetLoading && <Loader2 className="w-4 h-4 animate-spin" />}
+                Confirmar Reset
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Resultado de Reset de Senha (Exibe e Copia Senha) */}
+      {resetSuccessData && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+          <div className="bg-white rounded-3xl w-full max-w-md shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200 p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-12 h-12 bg-emerald-100 rounded-2xl flex items-center justify-center text-emerald-600">
+                <Check className="w-6 h-6" />
+              </div>
+              <div>
+                <h2 className="text-xl font-bold text-zinc-900">Senha Redefinida!</h2>
+                <p className="text-xs text-zinc-500">Operação concluída com sucesso</p>
+              </div>
+            </div>
+
+            <p className="text-sm text-zinc-600 mb-4">
+              A senha do usuário <strong>{resetSuccessData.user.full_name}</strong> foi redefinida. Informe a nova senha temporária abaixo ao usuário:
+            </p>
+
+            <div className="bg-zinc-900 text-emerald-400 p-4 rounded-2xl font-mono text-center text-xl font-bold tracking-wider mb-4 relative flex items-center justify-between border border-zinc-800">
+              <span>{resetSuccessData.tempPassword}</span>
+              <button
+                type="button"
+                onClick={() => handleCopyPassword(resetSuccessData.tempPassword)}
+                className="p-2 bg-zinc-800 hover:bg-zinc-700 text-white rounded-xl transition-all text-xs font-sans font-bold flex items-center gap-1.5"
+                title="Copiar Senha"
+              >
+                {copiedPassword ? (
+                  <>
+                    <Check className="w-4 h-4 text-emerald-400" />
+                    <span className="text-emerald-400">Copiado!</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-4 h-4" />
+                    <span>Copiar</span>
+                  </>
+                )}
+              </button>
+            </div>
+
+            <div className="p-4 bg-blue-50 rounded-2xl border border-blue-100 mb-6 text-xs text-blue-800 leading-relaxed">
+              O usuário precisará utilizar essa senha no próximo login e será solicitado a definir uma nova senha pessoal.
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setResetSuccessData(null)}
+              className="w-full bg-emerald-600 text-white py-3 rounded-xl font-bold hover:bg-emerald-700 transition-all text-sm"
+            >
+              Concluir
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Confirmação de Exclusão de Usuário */}
+      {deleteConfirmUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+          <div className="bg-white rounded-3xl w-full max-w-md shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200 p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-12 h-12 bg-red-100 rounded-2xl flex items-center justify-center text-red-600">
+                <Trash2 className="w-6 h-6" />
+              </div>
+              <div>
+                <h2 className="text-xl font-bold text-zinc-900">Excluir Usuário</h2>
+                <p className="text-xs text-red-600 font-bold uppercase tracking-wider">Ação Irreversível</p>
+              </div>
+            </div>
+
+            <div className="p-4 bg-red-50 border border-red-100 rounded-2xl mb-4">
+              <p className="text-xs text-red-800 leading-relaxed font-medium flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0 text-red-600" />
+                <span>
+                  Você está prestes a excluir permanentemente o usuário <strong>{deleteConfirmUser.full_name}</strong>. Esta ação removerá os acessos e permissões do sistema.
+                </span>
+              </p>
+            </div>
+
+            <div className="bg-zinc-50 p-4 rounded-2xl border border-zinc-100 mb-6 space-y-2">
+              <div className="flex justify-between text-sm">
+                <span className="text-zinc-500 font-medium">Nome:</span>
+                <span className="font-bold text-zinc-900">{deleteConfirmUser.full_name}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-zinc-500 font-medium">Perfil:</span>
+                <span className="font-bold text-zinc-900 uppercase text-xs">{getRoleLabel(deleteConfirmUser.role)}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-zinc-500 font-medium">Condomínio:</span>
+                <span className="font-bold text-zinc-900">{condos.find(c => c.id === deleteConfirmUser.condominium_id)?.name || 'N/A'}</span>
+              </div>
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={() => setDeleteConfirmUser(null)}
+                disabled={deletingId === deleteConfirmUser.id}
+                className="flex-1 px-5 py-3 rounded-xl font-bold text-zinc-600 hover:bg-zinc-100 transition-all text-sm"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={deletingId === deleteConfirmUser.id}
+                onClick={executeDeleteUser}
+                className="flex-1 bg-red-600 text-white px-5 py-3 rounded-xl font-bold hover:bg-red-700 transition-all text-sm flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                {deletingId === deleteConfirmUser.id && <Loader2 className="w-4 h-4 animate-spin" />}
+                Excluir Definitivamente
+              </button>
+            </div>
           </div>
         </div>
       )}
