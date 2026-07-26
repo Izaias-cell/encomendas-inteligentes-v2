@@ -1841,7 +1841,7 @@ export default function Portaria({ user }: PortariaProps) {
         <button 
           type="button"
           onClick={(e) => { e.preventDefault(); setActiveTab('residents'); }}
-          className={`px-6 py-3 rounded-xl font-bold transition-all flex items-center gap-2 whitespace-nowrap ${activeTab === 'residents' ? 'bg-white text-blue-600 shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
+          className={`px-6 py-3 rounded-xl font-bold transition-all flex items-center gap-2 whitespace-nowrap ${activeTab === 'residents' ? 'bg-white text-emerald-600 shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
         >
           <Users className="w-5 h-5" />
           MORADORES ({residents.length})
@@ -1849,15 +1849,15 @@ export default function Portaria({ user }: PortariaProps) {
       </div>
 
       {activeTab === 'residents' && (
-        <div className="bg-blue-50 border border-blue-100 rounded-2xl p-4 mb-8 flex flex-wrap gap-8">
+        <div className="bg-[#0f2b38]/5 border border-[#0f2b38]/15 rounded-2xl p-4 mb-8 flex flex-wrap gap-8">
           <div>
-            <p className="text-[10px] font-bold text-blue-600 uppercase tracking-widest mb-1">Total de Moradores</p>
-            <p className="text-2xl font-bold text-blue-900">{residents.length}</p>
+            <p className="text-[10px] font-bold text-[#1e495a] uppercase tracking-widest mb-1">Total de Moradores</p>
+            <p className="text-2xl font-bold text-[#0a1e28]">{residents.length}</p>
           </div>
-          <div className="w-px h-10 bg-blue-200 hidden sm:block" />
+          <div className="w-px h-10 bg-[#0f2b38]/15 hidden sm:block" />
           <div>
-            <p className="text-[10px] font-bold text-blue-600 uppercase tracking-widest mb-1">Total de Casas</p>
-            <p className="text-2xl font-bold text-blue-900">
+            <p className="text-[10px] font-bold text-[#1e495a] uppercase tracking-widest mb-1">Total de Casas</p>
+            <p className="text-2xl font-bold text-[#0a1e28]">
               {new Set(residents.filter(r => r.unidade).map(r => `${r.unidade}-${r.block || ''}-${r.street || ''}`)).size}
             </p>
           </div>
@@ -1883,7 +1883,7 @@ export default function Portaria({ user }: PortariaProps) {
               e.preventDefault();
               navigate('/profiles/new');
             }}
-            className="flex items-center gap-2 px-6 py-3 bg-blue-600 text-white rounded-2xl font-bold hover:bg-blue-700 transition-all shadow-lg shadow-blue-200"
+            className="flex items-center gap-2 px-6 py-3 bg-emerald-600 text-white rounded-2xl font-bold hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-200"
           >
             <UserPlus className="w-5 h-5" />
             Adicionar Morador

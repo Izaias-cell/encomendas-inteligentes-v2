@@ -185,7 +185,7 @@ const Retirada = () => {
 
         {/* Footer Branding */}
         <div className="p-4 bg-zinc-50 border-t border-zinc-100 text-center">
-          <p className="text-[10px] text-zinc-400 font-bold uppercase tracking-widest">Portaria Inteligente</p>
+          <p className="text-[10px] text-zinc-400 font-bold uppercase tracking-widest">Encomendas Inteligentes</p>
         </div>
       </motion.div>
     </div>

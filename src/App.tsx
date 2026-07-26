@@ -247,8 +247,8 @@ const LoginPage = ({ onLogin }: any) => {
           <div className="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
             <Package className="w-8 h-8" />
           </div>
-          <h1 className="text-2xl font-bold text-zinc-900">Encomendas Inteligentes</h1>
-          <p className="text-zinc-500">Gestão inteligente de encomendas para condomínios</p>
+          <h1 className="text-2xl font-extrabold text-zinc-900 tracking-tight">ENCOMENDAS INTELIGENTES</h1>
+          <p className="text-sm text-zinc-400 font-medium mt-1">Gestão Inteligente de Encomendas para Condomínios</p>
         </div>
 
         {error && (
@@ -2249,16 +2249,23 @@ const AppLayout = ({ user, loading, setUser, handleLogout }: any) => {
                 <span className="text-xs font-bold uppercase hidden sm:inline">Admin</span>
               </button>
             )}
-            <div className="flex items-center gap-2 cursor-pointer" onClick={() => {
+            <div className="flex items-center gap-3 cursor-pointer group" onClick={() => {
               const role = normalizeRole(user.role);
               if (role === 'porteiro') navigate('/portaria');
               else if (role === 'sindico') navigate('/sindico');
               else navigate('/dashboard');
             }}>
-              <div className="w-8 h-8 bg-emerald-600 text-white rounded-lg flex items-center justify-center">
-                <Package className="w-5 h-5" />
+              <div className="w-10 h-10 bg-emerald-600 text-white rounded-xl shadow-sm flex items-center justify-center shrink-0 group-hover:bg-emerald-700 transition-colors">
+                <Package className="w-5 sm:w-6 h-5 sm:h-6" />
               </div>
-              <span className="font-bold text-lg hidden sm:inline">Portaria Inteligente</span>
+              <div className="flex flex-col">
+                <span className="font-extrabold text-sm sm:text-lg text-zinc-900 tracking-tight leading-none group-hover:text-emerald-700 transition-colors">
+                  ENCOMENDAS INTELIGENTES
+                </span>
+                <span className="text-[10px] sm:text-xs text-zinc-400 font-medium tracking-normal leading-tight mt-0.5">
+                  Gestão Inteligente de Encomendas para Condomínios
+                </span>
+              </div>
             </div>
             
             {/* Desktop Nav Links */}
