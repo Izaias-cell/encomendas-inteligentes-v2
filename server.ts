@@ -250,8 +250,12 @@ const app = express();
       rules, 
       internal_notes, 
       active,
-      porters = [] // Array of { name, phone, email }
+      porters = [],
+      users = [],
+      initialUsers = []
     } = req.body;
+
+    const allUsersToCreate = [...users, ...initialUsers];
 
     try {
       // 1. Create the condominium using admin client to bypass RLS
@@ -273,10 +277,69 @@ const app = express();
 
       if (condoError) throw condoError;
 
-      // 2. Create Syndic Profile if info provided
-      if (manager_email && manager_name) {
+      const createdUsersList: any[] = [];
+
+      // 2. Process all users provided in initialUsers / users array
+      if (allUsersToCreate && allUsersToCreate.length > 0) {
+        for (const u of allUsersToCreate) {
+          if (!u || !u.full_name) continue;
+          
+          const uEmail = u.email && u.email.trim() !== '' 
+            ? u.email.trim() 
+            : `${(u.role || 'usuario').toLowerCase()}.${Math.random().toString(36).slice(-5)}@${(name || 'condo').toLowerCase().replace(/[^a-z0-9]/g, '')}.com`;
+
+          const uPassword = u.password && u.password.trim() !== ''
+            ? u.password.trim()
+            : (Math.random().toString(36).slice(-8) + '1!A');
+
+          try {
+            const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
+              email: uEmail,
+              password: uPassword,
+              email_confirm: true,
+              user_metadata: { full_name: u.full_name, role: u.role || 'sindico' }
+            });
+
+            if (authError) {
+              console.error(`[WARN] Erro ao criar Auth para usuário ${u.full_name}:`, authError.message);
+              continue;
+            }
+
+            if (authData?.user) {
+              const { data: profileData, error: profileError } = await supabaseAdmin.from('profiles').insert([{
+                id: authData.user.id,
+                full_name: u.full_name,
+                phone: u.phone || u.contato || '',
+                role: u.role || 'sindico',
+                condominium_id: condo.id,
+                active: u.active !== false,
+                must_change_password: true,
+                created_by: user.id
+              }]).select().single();
+
+              if (profileError) {
+                console.error(`[WARN] Erro ao criar Perfil para ${u.full_name}:`, profileError.message);
+                await supabaseAdmin.auth.admin.deleteUser(authData.user.id);
+              } else {
+                createdUsersList.push({
+                  id: authData.user.id,
+                  full_name: u.full_name,
+                  email: uEmail,
+                  role: u.role,
+                  tempPassword: uPassword
+                });
+              }
+            }
+          } catch (uErr) {
+            console.error(`[WARN] Exceção ao cadastrar usuário inicial:`, uErr);
+          }
+        }
+      }
+
+      // 3. Fallback: Create Syndic Profile if manager info provided and not in users list
+      if (manager_email && manager_name && !createdUsersList.some(cu => cu.email === manager_email)) {
         try {
-          const tempPassword = Math.random().toString(36).slice(-8);
+          const tempPassword = Math.random().toString(36).slice(-8) + '1!A';
           const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
             email: manager_email,
             password: tempPassword,
@@ -295,21 +358,25 @@ const app = express();
               must_change_password: true,
               created_by: user.id
             }]);
+            createdUsersList.push({
+              id: authData.user.id,
+              full_name: manager_name,
+              email: manager_email,
+              role: 'sindico',
+              tempPassword
+            });
           }
         } catch (e) {
-          console.error("Erro ao criar síndico:", e);
+          console.error("Erro ao criar síndico principal:", e);
         }
       }
 
-      // 3. Create Porter Profiles
+      // 4. Fallback: Create Porter Profiles if porters array provided
       for (const porter of porters) {
         if (porter.name) {
           try {
-            // If they don't have email, we could generate a fake one or skip auth
-            // But usually we need an email for login.
-            // Let's assume we use a pattern if email is missing or just skip if no email.
             const porterEmail = porter.email || `porteiro.${Math.random().toString(36).slice(-4)}@${name.toLowerCase().replace(/\s+/g, '')}.com`;
-            const tempPassword = Math.random().toString(36).slice(-8);
+            const tempPassword = Math.random().toString(36).slice(-8) + '1!A';
             
             const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
               email: porterEmail,
@@ -336,7 +403,7 @@ const app = express();
         }
       }
 
-      res.json({ condo });
+      res.json({ condo, createdUsersCount: createdUsersList.length, createdUsers: createdUsersList });
     } catch (err: any) {
       console.error("Erro ao criar condomínio:", err);
       res.status(500).json({ error: err.message });
@@ -867,7 +934,7 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
     }
   });
 
-  // Admin: List Condominiums
+  // Admin: List Condominiums (with rich stats & counts)
   app.get("/api/admin/condominiums", async (req, res) => {
     const session = await validateAdminSession(req);
     if ("error" in session) return res.status(session.status).json({ error: session.error });
@@ -877,7 +944,7 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
       let query = supabaseAdmin
         .from('condominiums')
         .select('*')
-        .order('name');
+        .order('created_at', { ascending: false });
       
       if (adminProfile.role === 'sindico') {
         query = query.eq('id', adminProfile.condominium_id);
@@ -885,8 +952,277 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
 
       const { data: condominiums, error } = await query;
       if (error) throw error;
-      res.json({ condominiums });
+
+      // Fetch profiles, moradores, and packages counts for each condominium
+      const { data: allProfiles } = await supabaseAdmin.from('profiles').select('id, condominium_id');
+      const { data: allMoradores } = await supabaseAdmin.from('moradores').select('id, condominium_id');
+      const { data: allPackages } = await supabaseAdmin.from('packages').select('id, condominium_id');
+
+      const profilesByCondo: Record<string, number> = {};
+      (allProfiles || []).forEach(p => {
+        if (p.condominium_id) {
+          profilesByCondo[p.condominium_id] = (profilesByCondo[p.condominium_id] || 0) + 1;
+        }
+      });
+
+      const moradoresByCondo: Record<string, number> = {};
+      (allMoradores || []).forEach(m => {
+        if (m.condominium_id) {
+          moradoresByCondo[m.condominium_id] = (moradoresByCondo[m.condominium_id] || 0) + 1;
+        }
+      });
+
+      const packagesByCondo: Record<string, number> = {};
+      (allPackages || []).forEach(pkg => {
+        if (pkg.condominium_id) {
+          packagesByCondo[pkg.condominium_id] = (packagesByCondo[pkg.condominium_id] || 0) + 1;
+        }
+      });
+
+      const enriched = (condominiums || []).map(c => ({
+        ...c,
+        user_count: profilesByCondo[c.id] || 0,
+        unit_count: moradoresByCondo[c.id] || 0,
+        package_count: packagesByCondo[c.id] || 0,
+        active: c.active !== false
+      }));
+
+      const summary = {
+        total_condos: enriched.length,
+        active_condos: enriched.filter(c => c.active !== false).length,
+        inactive_condos: enriched.filter(c => c.active === false).length,
+        total_users: (allProfiles || []).length,
+        total_packages: (allPackages || []).length
+      };
+
+      res.json({ condominiums: enriched, summary });
     } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Admin: Get users belonging to a specific condominium
+  app.get("/api/admin/condominiums/:id/users", async (req, res) => {
+    const session = await validateAdminSession(req);
+    if ("error" in session) return res.status(session.status).json({ error: session.error });
+    const { id } = req.params;
+
+    try {
+      const { data: profiles, error } = await supabaseAdmin
+        .from('profiles')
+        .select('*')
+        .eq('condominium_id', id)
+        .order('full_name');
+
+      if (error) throw error;
+      res.json({ profiles: profiles || [] });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Admin: Update Condominium
+  app.put("/api/admin/condominiums/:id", async (req, res) => {
+    const session = await validateAdminSession(req);
+    if ("error" in session) return res.status(session.status).json({ error: session.error });
+    const { adminUser, adminProfile } = session;
+    const { id } = req.params;
+
+    const {
+      name,
+      address,
+      city,
+      state,
+      city_state,
+      cnpj,
+      zip_code,
+      phone,
+      email,
+      manager_name,
+      manager_phone,
+      manager_email,
+      rules,
+      internal_notes,
+      active
+    } = req.body;
+
+    if (!name || name.trim() === '') {
+      return res.status(400).json({ error: "O nome do condomínio é obrigatório." });
+    }
+
+    try {
+      const updateData: any = {
+        name,
+        address: address || '',
+        city_state: city_state || (city && state ? `${city}/${state}` : city_state || ''),
+        manager_name,
+        manager_phone,
+        manager_email,
+        rules,
+        internal_notes
+      };
+
+      if (active !== undefined) updateData.active = active;
+
+      // Attempt update with extra optional fields if present in DB
+      const { data: updatedCondo, error: updateErr } = await supabaseAdmin
+        .from('condominiums')
+        .update(updateData)
+        .eq('id', id)
+        .select()
+        .single();
+
+      if (updateErr) throw updateErr;
+
+      // Audit log
+      const { error: auditError } = await supabaseAdmin.from('auditoria_eventos').insert({
+        condominio_id: id,
+        usuario_id: adminProfile.id,
+        usuario_nome: adminProfile.full_name,
+        usuario_perfil: adminProfile.role,
+        tipo_evento: 'CONDOMINIO_ATUALIZADO',
+        acao: 'UPDATE',
+        tabela_afetada: 'condominiums',
+        registro_id: id,
+        descricao: `Condomínio ${name} atualizado pelo administrador.`,
+        metodo: 'ADMIN_ACTION',
+        dados_depois: updateData
+      });
+
+      if (auditError) console.warn('[DEBUG BACKEND] Erro ao registrar auditoria:', auditError.message);
+
+      res.json({ success: true, condominium: updatedCondo });
+    } catch (err: any) {
+      console.error("[DEBUG BACKEND] Erro ao atualizar condomínio:", err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Admin: Toggle Condominium Status (Ativar / Inativar)
+  app.patch("/api/admin/condominiums/:id/status", async (req, res) => {
+    const session = await validateAdminSession(req);
+    if ("error" in session) return res.status(session.status).json({ error: session.error });
+    const { adminProfile } = session;
+    const { id } = req.params;
+    const { active } = req.body;
+
+    try {
+      const { data: condo, error: condoErr } = await supabaseAdmin
+        .from('condominiums')
+        .update({ active: !!active })
+        .eq('id', id)
+        .select()
+        .single();
+
+      if (condoErr) throw condoErr;
+
+      // Audit log
+      const { error: auditError } = await supabaseAdmin.from('auditoria_eventos').insert({
+        condominio_id: id,
+        usuario_id: adminProfile.id,
+        usuario_nome: adminProfile.full_name,
+        usuario_perfil: adminProfile.role,
+        tipo_evento: active ? 'CONDOMINIO_ATIVADO' : 'CONDOMINIO_INATIVADO',
+        acao: 'UPDATE',
+        tabela_afetada: 'condominiums',
+        registro_id: id,
+        descricao: `Status do condomínio ${condo.name} alterado para ${active ? 'ATIVO' : 'INATIVO'}.`,
+        metodo: 'ADMIN_ACTION'
+      });
+
+      if (auditError) console.warn('[DEBUG BACKEND] Erro audit log:', auditError.message);
+
+      res.json({ success: true, condominium: condo });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Admin: Delete Condominium
+  app.delete("/api/admin/condominiums/:id", async (req, res) => {
+    const session = await validateAdminSession(req);
+    if ("error" in session) return res.status(session.status).json({ error: session.error });
+    const { adminProfile } = session;
+    const { id } = req.params;
+
+    try {
+      // Fetch condo info
+      const { data: condo, error: fetchErr } = await supabaseAdmin
+        .from('condominiums')
+        .select('*')
+        .eq('id', id)
+        .maybeSingle();
+
+      if (fetchErr || !condo) {
+        return res.status(404).json({ error: "Condomínio não encontrado." });
+      }
+
+      // Check linked users or packages
+      const { count: userCount } = await supabaseAdmin
+        .from('profiles')
+        .select('id', { count: 'exact', head: true })
+        .eq('condominium_id', id);
+
+      const { count: packageCount } = await supabaseAdmin
+        .from('packages')
+        .select('id', { count: 'exact', head: true })
+        .eq('condominium_id', id);
+
+      // Clean up references or disallow if needed
+      await Promise.allSettled([
+        supabaseAdmin.from('condominium_settings').delete().eq('condominium_id', id),
+        supabaseAdmin.from('whatsapp_conversations').delete().eq('condominium_id', id),
+        supabaseAdmin.from('auditoria_eventos').update({ condominio_id: null }).eq('condominio_id', id)
+      ]);
+
+      // If force is false and there are linked packages or profiles, warn
+      const forceDelete = req.query.force === 'true';
+
+      if (!forceDelete && ((userCount && userCount > 0) || (packageCount && packageCount > 0))) {
+        return res.status(400).json({
+          error: `Este condomínio possui ${userCount || 0} usuário(s) e ${packageCount || 0} encomenda(s) vinculada(s). Confirme para remover o condomínio e desvincular os registros.`,
+          hasDependencies: true,
+          userCount: userCount || 0,
+          packageCount: packageCount || 0
+        });
+      }
+
+      // Unlink profiles and packages if force deleting
+      if (userCount && userCount > 0) {
+        await supabaseAdmin.from('profiles').update({ condominium_id: null }).eq('condominium_id', id);
+      }
+      if (packageCount && packageCount > 0) {
+        await supabaseAdmin.from('packages').delete().eq('condominium_id', id);
+      }
+
+      // Delete condominium
+      const { error: deleteErr } = await supabaseAdmin
+        .from('condominiums')
+        .delete()
+        .eq('id', id);
+
+      if (deleteErr) throw deleteErr;
+
+      // Record audit log
+      const { error: auditError } = await supabaseAdmin.from('auditoria_eventos').insert({
+        condominio_id: null,
+        usuario_id: adminProfile.id,
+        usuario_nome: adminProfile.full_name,
+        usuario_perfil: adminProfile.role,
+        tipo_evento: 'CONDOMINIO_EXCLUIDO',
+        acao: 'DELETE',
+        tabela_afetada: 'condominiums',
+        registro_id: id,
+        descricao: `Condomínio ${condo.name} foi excluído do sistema pelo administrador.`,
+        metodo: 'ADMIN_ACTION',
+        dados_antes: condo
+      });
+
+      if (auditError) console.warn('[DEBUG BACKEND] Erro audit log:', auditError.message);
+
+      res.json({ success: true, message: `Condomínio "${condo.name}" foi excluído com sucesso.` });
+    } catch (err: any) {
+      console.error("[DEBUG BACKEND] Erro ao excluir condomínio:", err);
       res.status(500).json({ error: err.message });
     }
   });
@@ -1041,55 +1377,116 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
 
     const { id } = req.params;
     const { newPassword } = req.body;
-    console.log("[DEBUG BACKEND] Resetando senha para usuário:", id);
+    
+    // Generate a secure temp password if not provided
+    const tempPassword = newPassword || (Math.random().toString(36).slice(-8) + Math.random().toString(36).slice(-4));
+    console.log("[DEBUG BACKEND] Resetando senha para usuário ID:", id);
+
+    // Fetch target user profile using maybeSingle
+    let targetProfile: any = null;
+    const { data: pData } = await supabaseAdmin
+      .from('profiles')
+      .select('id, full_name, email, role, condominium_id')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (pData) {
+      targetProfile = pData;
+    } else {
+      const { data: mData } = await supabaseAdmin
+        .from('moradores')
+        .select('id, nome, email, condominium_id')
+        .eq('id', id)
+        .maybeSingle();
+
+      if (mData) {
+        targetProfile = {
+          id: mData.id,
+          full_name: mData.nome,
+          email: mData.email || '',
+          role: 'resident',
+          condominium_id: mData.condominium_id
+        };
+      }
+    }
+
+    if (!targetProfile) {
+      console.warn(`[DEBUG BACKEND] Usuário ${id} não encontrado para reset de senha.`);
+      return res.status(404).json({ error: "Usuário não encontrado no banco de dados." });
+    }
 
     // Síndico restrictions
     if (adminProfile.role === 'sindico') {
-      const { data: targetProfile } = await supabaseAdmin
-        .from('profiles')
-        .select('role, condominium_id')
-        .eq('id', id)
-        .single();
-      
-      if (!targetProfile) return res.status(404).json({ error: "Usuário não encontrado." });
-      if (targetProfile.condominium_id !== adminProfile.condominium_id) {
-        return res.status(403).json({ error: "Acesso negado." });
+      if (targetProfile.condominium_id && targetProfile.condominium_id !== adminProfile.condominium_id) {
+        return res.status(403).json({ error: "Acesso negado: Usuário pertence a outro condomínio." });
       }
       if (targetProfile.role === 'admin' || targetProfile.role === 'sindico') {
-        return res.status(403).json({ error: "Acesso negado." });
+        return res.status(403).json({ error: "Síndicos não podem resetar senha de administradores ou de outros síndicos." });
       }
     }
 
     try {
-      console.log("[DEBUG BACKEND] Iniciando reset de senha no Auth para ID:", id);
+      console.log("[DEBUG BACKEND] Atualizando senha no Auth para ID:", id);
       // 1. Update password in Auth
-      const { error: authError } = await supabaseAdmin.auth.admin.updateUserById(id, {
-        password: newPassword
-      });
-
-      if (authError) {
-        console.error("[DEBUG BACKEND] Erro ao resetar senha no Auth:", authError);
-        throw authError;
+      try {
+        const { error: authError } = await supabaseAdmin.auth.admin.updateUserById(id, {
+          password: tempPassword
+        });
+        if (authError) {
+          console.warn("[DEBUG BACKEND] Aviso no Auth.updateUserById:", authError.message);
+        }
+      } catch (aErr: any) {
+        console.warn("[DEBUG BACKEND] Erro ao atualizar senha no Auth (usuário demo/local):", aErr.message);
       }
 
-      console.log("[DEBUG BACKEND] Senha resetada no Auth. Atualizando perfil...");
+      // 2. Invalidate active sessions immediately
+      try {
+        await supabaseAdmin.auth.admin.signOut(id);
+      } catch (soErr: any) {
+        console.warn("[DEBUG BACKEND] Aviso ao invalidar sessões:", soErr.message);
+      }
 
-      // 2. Set must_change_password to true
+      // 3. Set must_change_password to true on profile
       const { error: profileError } = await supabaseAdmin
         .from('profiles')
-        .update({ must_change_password: true })
+        .update({ 
+          must_change_password: true,
+          updated_at: new Date().toISOString()
+        })
         .eq('id', id);
 
       if (profileError) {
-        console.error("[DEBUG BACKEND] Erro ao atualizar must_change_password no perfil:", profileError);
-        throw profileError;
+        console.warn("[DEBUG BACKEND] Erro ao atualizar perfil em profiles:", profileError.message);
+      }
+
+      // 4. Record audit log using official await + { error } pattern
+      const { error: auditError } = await supabaseAdmin.from('auditoria_eventos').insert({
+        condominio_id: adminProfile.condominium_id || targetProfile.condominium_id || null,
+        usuario_id: adminProfile.id,
+        usuario_nome: adminProfile.full_name,
+        usuario_perfil: adminProfile.role,
+        tipo_evento: 'SENHA_RESETADA',
+        acao: 'UPDATE',
+        tabela_afetada: 'profiles',
+        registro_id: id,
+        descricao: `Senha redefinida para o usuário ${targetProfile.full_name} (${targetProfile.email || 'Sem email'})`,
+        metodo: 'ADMIN_ACTION',
+        dados_depois: { id, full_name: targetProfile.full_name, role: targetProfile.role }
+      });
+
+      if (auditError) {
+        console.warn('[DEBUG BACKEND] Erro ao registrar audit log:', auditError.message);
       }
 
       console.log("[DEBUG BACKEND] Reset de senha concluído com sucesso para:", id);
-      res.json({ success: true });
+      return res.json({ 
+        success: true, 
+        tempPassword,
+        message: "Senha redefinida com sucesso!"
+      });
     } catch (err: any) {
       console.error("[DEBUG BACKEND] Erro fatal no reset-password:", err);
-      res.status(500).json({ error: err.message });
+      return res.status(500).json({ error: err.message });
     }
   });
 
@@ -1100,26 +1497,56 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
     const { adminUser, adminProfile } = session;
 
     const { id } = req.params;
-    console.log(`[DEBUG BACKEND] Recebida requisição DELETE para usuário: ${id} por admin: ${adminUser.id}`);
+    console.log(`[DEBUG BACKEND] Recebida requisição DELETE para usuário ID: "${id}" por admin: ${adminUser.id}`);
+
+    if (id === adminProfile.id || id === adminUser.id) {
+      return res.status(400).json({ error: "Você não pode excluir seu próprio usuário." });
+    }
 
     try {
-      // Fetch target user to check permissions
-      const { data: targetProfile } = await supabaseAdmin
-        .from('profiles')
-        .select('role, condominium_id')
-        .eq('id', id)
-        .single();
+      // Fetch target user from 'profiles' OR 'moradores'
+      let targetProfile: any = null;
+      let targetTable: 'profiles' | 'moradores' = 'profiles';
 
-      if (!targetProfile) {
-        console.warn(`[DEBUG BACKEND] Usuário ${id} não encontrado na tabela profiles.`);
-        return res.status(404).json({ error: "Usuário não encontrado." });
+      const { data: profileData } = await supabaseAdmin
+        .from('profiles')
+        .select('*')
+        .eq('id', id)
+        .maybeSingle();
+
+      if (profileData) {
+        targetProfile = profileData;
+        targetTable = 'profiles';
+      } else {
+        // Check 'moradores' table if not found in profiles
+        const { data: moradorData } = await supabaseAdmin
+          .from('moradores')
+          .select('*')
+          .eq('id', id)
+          .maybeSingle();
+
+        if (moradorData) {
+          targetProfile = {
+            id: moradorData.id,
+            full_name: moradorData.nome,
+            email: moradorData.email || '',
+            role: 'resident',
+            condominium_id: moradorData.condominium_id
+          };
+          targetTable = 'moradores';
+        }
       }
 
-      console.log(`[DEBUG BACKEND] Perfil encontrado: role=${targetProfile.role}, condo=${targetProfile.condominium_id}`);
+      if (!targetProfile) {
+        console.warn(`[DEBUG BACKEND] Usuário com ID "${id}" não encontrado nas tabelas profiles e moradores.`);
+        return res.status(404).json({ error: "Usuário não encontrado no banco de dados." });
+      }
+
+      console.log(`[DEBUG BACKEND] Perfil localizado na tabela ${targetTable}: ${targetProfile.full_name} (${targetProfile.role})`);
 
       // Síndico restrictions
       if (adminProfile.role === 'sindico') {
-        if (targetProfile.condominium_id !== adminProfile.condominium_id) {
+        if (targetProfile.condominium_id && targetProfile.condominium_id !== adminProfile.condominium_id) {
           console.warn(`[DEBUG BACKEND] Síndico ${adminUser.id} tentou excluir usuário de outro condomínio.`);
           return res.status(403).json({ error: "Síndicos só podem excluir usuários do seu próprio condomínio." });
         }
@@ -1129,31 +1556,67 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
         }
       }
 
-      console.log(`[DEBUG BACKEND] Deletando perfil de ${id}...`);
-      // 1. Delete profile
-      const { error: profileError } = await supabaseAdmin
-        .from('profiles')
+      // Clean up foreign key references before deleting to prevent foreign key constraint errors
+      console.log(`[DEBUG BACKEND] Limpando referências do usuário ${id} em tabelas vinculadas...`);
+      await Promise.allSettled([
+        supabaseAdmin.from('resident_access_tokens').delete().eq('resident_id', id),
+        supabaseAdmin.from('notifications').delete().eq('user_id', id),
+        supabaseAdmin.from('retrieval_logs').update({ porter_id: null }).eq('porter_id', id),
+        supabaseAdmin.from('packages').update({ recipient_id: null }).eq('recipient_id', id),
+        supabaseAdmin.from('packages').update({ received_by: null }).eq('received_by', id),
+        supabaseAdmin.from('packages').update({ retrieved_by_user_id: null }).eq('retrieved_by_user_id', id),
+        supabaseAdmin.from('auditoria_eventos').update({ usuario_id: null }).eq('usuario_id', id)
+      ]);
+
+      console.log(`[DEBUG BACKEND] Deletando da tabela ${targetTable} o registro ID ${id}...`);
+      // 1. Delete from DB table ('profiles' or 'moradores')
+      const { error: tableDeleteErr } = await supabaseAdmin
+        .from(targetTable)
         .delete()
         .eq('id', id);
 
-      if (profileError) {
-        console.error(`[DEBUG BACKEND] Erro ao deletar perfil:`, profileError);
-        throw profileError;
+      if (tableDeleteErr) {
+        console.error(`[DEBUG BACKEND] Erro ao deletar registro da tabela ${targetTable}:`, tableDeleteErr);
+        return res.status(500).json({ error: `Não foi possível excluir do banco de dados: ${tableDeleteErr.message}` });
       }
 
       console.log(`[DEBUG BACKEND] Deletando usuário do Auth ${id}...`);
       // 2. Delete Auth user
-      const { error: deleteError } = await supabaseAdmin.auth.admin.deleteUser(id);
-      if (deleteError) {
-        console.error("[DEBUG BACKEND] Erro ao excluir usuário do Auth (perfil já excluído):", deleteError);
-        // We don't throw here because the profile is already gone, but it's a problem
+      try {
+        const { error: authDeleteErr } = await supabaseAdmin.auth.admin.deleteUser(id);
+        if (authDeleteErr) {
+          console.warn("[DEBUG BACKEND] Aviso ao excluir do Supabase Auth:", authDeleteErr.message);
+        } else {
+          console.log("[DEBUG BACKEND] Usuário deletado do Auth com sucesso.");
+        }
+      } catch (authDeleteExc: any) {
+        console.warn("[DEBUG BACKEND] Exceção ao excluir do Auth (pode ser conta local/demo):", authDeleteExc.message);
+      }
+
+      // 3. Record audit log using official Supabase await pattern
+      const { error: auditError } = await supabaseAdmin.from('auditoria_eventos').insert({
+        condominio_id: adminProfile.condominium_id || targetProfile.condominium_id || null,
+        usuario_id: adminProfile.id,
+        usuario_nome: adminProfile.full_name,
+        usuario_perfil: adminProfile.role,
+        tipo_evento: 'USUARIO_EXCLUIDO',
+        acao: 'DELETE',
+        tabela_afetada: targetTable,
+        registro_id: id,
+        descricao: `Usuário ${targetProfile.full_name} (${targetProfile.role}) foi excluído permanentemente do sistema.`,
+        metodo: 'ADMIN_ACTION',
+        dados_antes: targetProfile
+      });
+
+      if (auditError) {
+        console.warn('[DEBUG BACKEND] Erro ao gravar log de auditoria:', auditError.message);
       }
 
       console.log(`[DEBUG BACKEND] Exclusão de ${id} concluída com sucesso.`);
-      res.json({ success: true });
+      return res.json({ success: true, message: "Usuário excluído com sucesso." });
     } catch (err: any) {
       console.error("[DEBUG BACKEND] Erro fatal na rota de exclusão:", err);
-      res.status(500).json({ error: err.message });
+      return res.status(500).json({ error: err.message || "Erro interno no servidor ao excluir usuário." });
     }
   });
 

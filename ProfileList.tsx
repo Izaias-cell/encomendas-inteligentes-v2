@@ -1,134 +1,119 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
-import { Shield, Key, Loader2, CheckCircle2 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
+import { Building, ArrowLeft, Loader2 } from 'lucide-react';
+import { Profile } from '../types';
 
-export default function ChangePassword({ onUpdateUser }: { onUpdateUser?: (profile: any) => void }) {
-  const [password, setPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
+interface CondominiumNewProps {
+  user: Profile;
+  onUpdateUser: (user: Profile) => void;
+}
+
+export default function CondominiumNew({ user, onUpdateUser }: CondominiumNewProps) {
+  const [name, setName] = useState('');
+  const [address, setAddress] = useState('');
   const [loading, setLoading] = useState(false);
-  const [success, setSuccess] = useState(false);
   const navigate = useNavigate();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (password !== confirmPassword) {
-      toast.error('As senhas não coincidem');
-      return;
-    }
-
-    if (password.length < 6) {
-      toast.error('A senha deve ter pelo menos 6 caracteres');
-      return;
-    }
-
     setLoading(true);
+
     try {
-      const { error: authError } = await supabase.auth.updateUser({
-        password: password
-      });
-
-      if (authError) throw authError;
-
-      const { data: { user } } = await supabase.auth.getUser();
-      if (user) {
-        const { data: updatedProfile, error: profileError } = await supabase
-          .from('profiles')
-          .update({ must_change_password: false })
-          .eq('id', user.id)
-          .select()
-          .single();
-
-        if (profileError) throw profileError;
-
-        if (updatedProfile && onUpdateUser) {
-          onUpdateUser(updatedProfile);
-        }
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+      
+      if (sessionError || !session) {
+        toast.error('Sessão não encontrada. Por favor, faça login novamente.');
+        setLoading(false);
+        return;
       }
 
-      setSuccess(true);
-      toast.success('Senha alterada com sucesso!');
-      setTimeout(() => {
-        navigate('/dashboard');
-      }, 2000);
+      // 2. Call the backend API to create the condominium and update profile
+      // This bypasses RLS using the service role key on the server
+      const response = await fetch('/api/condominiums/create', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session.access_token}`
+        },
+        body: JSON.stringify({ name, address })
+      });
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(result.error || 'Erro ao cadastrar condomínio');
+      }
+
+      toast.success('Condomínio cadastrado e vinculado com sucesso!');
+      onUpdateUser(result.profile);
+      navigate('/dashboard');
     } catch (error: any) {
-      toast.error('Erro ao alterar senha: ' + error.message);
+      console.error('Erro ao cadastrar condomínio:', error);
+      toast.error('Erro ao cadastrar condomínio: ' + (error.message || 'Verifique as permissões de RLS no Supabase.'));
     } finally {
       setLoading(false);
     }
   };
 
-  if (success) {
-    return (
-      <div className="min-h-screen bg-zinc-50 flex items-center justify-center p-6">
-        <div className="bg-white p-12 rounded-[40px] shadow-2xl shadow-zinc-200/50 max-w-md w-full text-center">
-          <div className="w-20 h-20 bg-emerald-100 rounded-3xl flex items-center justify-center mx-auto mb-6">
-            <CheckCircle2 className="w-10 h-10 text-emerald-600" />
-          </div>
-          <h1 className="text-3xl font-bold text-zinc-900 mb-4">Senha Alterada!</h1>
-          <p className="text-zinc-500 mb-8">Sua senha foi atualizada com sucesso. Redirecionando para o painel...</p>
-          <Loader2 className="w-8 h-8 animate-spin text-emerald-600 mx-auto" />
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="min-h-screen bg-zinc-50 flex items-center justify-center p-6">
-      <div className="bg-white p-12 rounded-[40px] shadow-2xl shadow-zinc-200/50 max-w-md w-full">
+    <div className="max-w-2xl mx-auto p-6">
+      <button 
+        onClick={() => navigate(-1)} 
+        className="flex items-center gap-2 text-zinc-500 hover:text-zinc-900 mb-6 transition-colors"
+      >
+        <ArrowLeft className="w-5 h-5" />
+        Voltar
+      </button>
+
+      <div className="bg-white rounded-3xl border border-zinc-100 shadow-sm p-8">
         <div className="flex items-center gap-3 mb-8">
-          <div className="w-12 h-12 bg-emerald-600 rounded-2xl flex items-center justify-center shadow-lg shadow-emerald-200">
-            <Shield className="w-6 h-6 text-white" />
+          <div className="w-12 h-12 bg-emerald-100 text-emerald-600 rounded-2xl flex items-center justify-center">
+            <Building className="w-6 h-6" />
           </div>
           <div>
-            <h1 className="text-2xl font-bold text-zinc-900">Nova Senha</h1>
-            <p className="text-sm text-zinc-500">Altere sua senha para continuar</p>
+            <h1 className="text-2xl font-bold text-zinc-900">Novo Condomínio</h1>
+            <p className="text-zinc-500">Cadastre um novo condomínio no sistema</p>
           </div>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-6">
-          <div className="p-4 bg-amber-50 rounded-2xl border border-amber-100 mb-6">
-            <p className="text-sm text-amber-700 flex items-start gap-2">
-              <Key className="w-4 h-4 mt-0.5" />
-              Por segurança, você deve alterar sua senha temporária no primeiro acesso.
-            </p>
-          </div>
-
           <div>
-            <label className="block text-sm font-medium text-zinc-700 mb-2">Nova Senha</label>
+            <label className="block text-sm font-medium text-zinc-700 mb-2">
+              Nome do Condomínio
+            </label>
             <input
-              type="password"
+              type="text"
               required
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="w-full px-5 py-4 rounded-2xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 transition-all"
-              placeholder="••••••••"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="w-full px-4 py-3 rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 transition-all"
+              placeholder="Ex: Edifício Solar"
             />
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-zinc-700 mb-2">Confirmar Nova Senha</label>
+            <label className="block text-sm font-medium text-zinc-700 mb-2">
+              Endereço
+            </label>
             <input
-              type="password"
+              type="text"
               required
-              value={confirmPassword}
-              onChange={(e) => setConfirmPassword(e.target.value)}
-              className="w-full px-5 py-4 rounded-2xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 transition-all"
-              placeholder="••••••••"
+              value={address}
+              onChange={(e) => setAddress(e.target.value)}
+              className="w-full px-4 py-3 rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 transition-all"
+              placeholder="Rua, Número, Bairro, Cidade"
             />
           </div>
 
           <button
             type="submit"
             disabled={loading}
-            className="w-full bg-emerald-600 text-white py-5 rounded-2xl font-bold text-lg hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-200 flex items-center justify-center gap-3 disabled:opacity-50"
+            className="w-full bg-emerald-600 text-white py-4 rounded-xl font-bold hover:bg-emerald-700 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
           >
-            {loading ? (
-              <Loader2 className="w-6 h-6 animate-spin" />
-            ) : (
-              'Alterar Senha'
-            )}
+            {loading && <Loader2 className="w-5 h-5 animate-spin" />}
+            Cadastrar Condomínio
           </button>
         </form>
       </div>

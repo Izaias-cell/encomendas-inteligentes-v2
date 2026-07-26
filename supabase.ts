@@ -1,37 +1,36 @@
-const PORTEIRO_MANUAL_KEY = 'porteiro_manual';
-
 /**
- * Retorna o porteiro selecionado manualmente no localStorage.
+ * Comprime uma imagem em base64 para reduzir seu tamanho antes do upload.
+ * @param base64 String base64 da imagem original
+ * @param maxWidth Largura máxima da imagem
+ * @param quality Qualidade da compressão (0 a 1)
+ * @returns Promise com a string base64 da imagem comprimida
  */
-export const getCurrentPorter = (): string => {
-  // 1. Verificamos se existe uma seleção manual no localStorage
-  const manualPorter = localStorage.getItem(PORTEIRO_MANUAL_KEY);
-  if (manualPorter) {
-    return manualPorter;
-  }
+export const compressImage = (base64: string, maxWidth = 800, quality = 0.6): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.src = base64;
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      let width = img.width;
+      let height = img.height;
 
-  // 2. Fallback caso não haja seleção ainda
-  return 'Selecione o Porteiro';
-};
+      if (width > maxWidth) {
+        height = (maxWidth / width) * height;
+        width = maxWidth;
+      }
 
-/**
- * Salva a seleção manual do porteiro.
- */
-export const setManualPorter = (name: string): void => {
-  localStorage.setItem(PORTEIRO_MANUAL_KEY, name);
-};
+      canvas.width = width;
+      canvas.height = height;
 
-/**
- * Limpa a seleção manual do porteiro, voltando para o automático.
- */
-export const clearManualPorter = (): void => {
-  localStorage.removeItem(PORTEIRO_MANUAL_KEY);
-};
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        reject(new Error('Não foi possível obter o contexto do canvas'));
+        return;
+      }
 
-/**
- * Retorna o rótulo do turno atual.
- */
-export const getCurrentShiftLabel = (): string => {
-  const hour = new Date().getHours();
-  return hour >= 7 && hour < 19 ? 'Diurno' : 'Noturno';
+      ctx.drawImage(img, 0, 0, width, height);
+      resolve(canvas.toDataURL('image/jpeg', quality));
+    };
+    img.onerror = (err) => reject(err);
+  });
 };
