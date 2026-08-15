@@ -1,5 +1,5 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { Camera, Package, User, LayoutDashboard, LogOut, Bell, CheckCircle, Search, Loader2, Plus, Phone, Home, History, QrCode, X, RefreshCw, AlertTriangle, Check, ArrowLeft, Keyboard, XCircle, Users, UserPlus, Edit2, Shield } from 'lucide-react';
+import React, { useState, useRef, useEffect, useCallback, memo } from 'react';
+import { Camera, Package, User, LayoutDashboard, LogOut, Bell, CheckCircle, Search, Loader2, Plus, Phone, Home, History, QrCode, X, RefreshCw, AlertTriangle, Check, ArrowLeft, Keyboard, XCircle, Users, UserPlus, Edit2, Shield, Building2, FileSpreadsheet } from 'lucide-react';
 import { Toaster, toast } from 'react-hot-toast';
 import { supabase } from './lib/supabase';
 import { ptBR } from 'date-fns/locale';
@@ -11,6 +11,7 @@ import { QRCodeSVG } from 'qrcode.react';
 import { Html5Qrcode } from 'html5-qrcode';
 
 import { Routes, Route, useNavigate, Navigate, useLocation } from 'react-router-dom';
+import { api } from './lib/apiClient';
 import ResidentPortal from './components/ResidentPortal';
 import Retirada from './pages/Retirada';
 import { analyzePackageLabel } from './services/geminiService';
@@ -33,11 +34,13 @@ import ChangePassword from './pages/ChangePassword';
 // --- Types ---
 import { Role, Profile, Package as PackageType, ScoredResident } from './types';
 import SyndicPanel from './components/SyndicPanel';
+import ResidentImporterModal from './components/ResidentImporterModal';
 
 
 
 import { normalizeRole } from './lib/authUtils';
-import { getCurrentPorter } from './lib/porterUtils';
+import { getCurrentPorter, clearManualPorter } from './lib/porterUtils';
+import { clearActivePlantao } from './lib/plantaoUtils';
 
 // --- Components ---
 
@@ -104,32 +107,309 @@ const Modal = ({ isOpen, onClose, title, children }: any) => {
 
 // --- Pages ---
 
-const LoginPage = ({ onLogin }: any) => {
+// --- Subcomponents for Login (Optimized for instant, zero-jank typing) ---
+
+const LoginSelectionScreen = memo(({
+  onSelectAdmin,
+  onSelectPortaria
+}: {
+  onSelectAdmin: () => void;
+  onSelectPortaria: () => void;
+}) => (
+  <div className="space-y-4">
+    <button
+      type="button"
+      onClick={onSelectAdmin}
+      className="w-full p-4 bg-white hover:bg-emerald-50/50 border-2 border-zinc-200 hover:border-emerald-500 rounded-2xl text-left transition-colors duration-150 group flex items-center gap-4 shadow-sm hover:shadow-md"
+    >
+      <div className="w-12 h-12 bg-zinc-100 group-hover:bg-emerald-500 text-zinc-600 group-hover:text-white rounded-xl flex items-center justify-center transition-colors shrink-0">
+        <Shield className="w-6 h-6" />
+      </div>
+      <div className="flex-1">
+        <span className="text-base font-extrabold text-zinc-900 group-hover:text-emerald-950 block">
+          Administrador / Síndico
+        </span>
+        <span className="text-xs text-zinc-500 font-medium block mt-0.5">
+          Acesso com e-mail e senha para gestão do sistema
+        </span>
+      </div>
+    </button>
+
+    <button
+      type="button"
+      onClick={onSelectPortaria}
+      className="w-full p-4 bg-white hover:bg-emerald-50/50 border-2 border-zinc-200 hover:border-emerald-500 rounded-2xl text-left transition-colors duration-150 group flex items-center gap-4 shadow-sm hover:shadow-md"
+    >
+      <div className="w-12 h-12 bg-zinc-100 group-hover:bg-emerald-500 text-zinc-600 group-hover:text-white rounded-xl flex items-center justify-center transition-colors shrink-0">
+        <Building2 className="w-6 h-6" />
+      </div>
+      <div className="flex-1">
+        <span className="text-base font-extrabold text-zinc-900 group-hover:text-emerald-950 block">
+          Acesso da Portaria
+        </span>
+        <span className="text-xs text-zinc-500 font-medium block mt-0.5">
+          Acesso operacional por Código da Portaria
+        </span>
+      </div>
+    </button>
+  </div>
+));
+
+const AdminLoginForm = memo(({
+  onBack,
+  onAuth,
+  loading
+}: {
+  onBack: () => void;
+  onAuth: (email: string, pass: string, name: string, isSignup: boolean) => Promise<void>;
+  loading: boolean;
+}) => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [fullName, setFullName] = useState('');
   const [isSignup, setIsSignup] = useState(false);
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    onAuth(email, password, fullName, isSignup);
+  };
+
+  return (
+    <div className="space-y-4">
+      <button
+        type="button"
+        onClick={onBack}
+        className="inline-flex items-center gap-1.5 text-xs font-bold text-zinc-500 hover:text-zinc-900 transition-colors mb-1"
+      >
+        <ArrowLeft className="w-4 h-4" />
+        <span>Voltar ao início</span>
+      </button>
+
+      <form onSubmit={handleSubmit} className="space-y-4">
+        {isSignup && (
+          <div>
+            <label className="block text-xs font-bold text-zinc-700 uppercase tracking-wider mb-1">Nome Completo</label>
+            <input 
+              type="text" 
+              value={fullName}
+              onChange={(e) => setFullName(e.target.value)}
+              className="w-full px-4 py-2.5 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-emerald-500 outline-none text-sm transition-colors" 
+              placeholder="Seu nome completo" 
+              required={isSignup}
+            />
+          </div>
+        )}
+        <div>
+          <label className="block text-xs font-bold text-zinc-700 uppercase tracking-wider mb-1">E-mail</label>
+          <input 
+            type="email" 
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            className="w-full px-4 py-2.5 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-emerald-500 outline-none text-sm transition-colors" 
+            placeholder="seu@email.com" 
+            required
+          />
+        </div>
+        <div>
+          <label className="block text-xs font-bold text-zinc-700 uppercase tracking-wider mb-1">Senha</label>
+          <input 
+            type="password" 
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            className="w-full px-4 py-2.5 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-emerald-500 outline-none text-sm transition-colors" 
+            placeholder="••••••••" 
+            required
+          />
+        </div>
+        <Button type="submit" className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold rounded-xl shadow-md text-sm" loading={loading}>
+          {loading ? (isSignup ? 'Criando conta...' : 'Entrando...') : (isSignup ? 'Criar Conta' : 'Entrar')}
+        </Button>
+        
+        <div className="text-center pt-1">
+          <button 
+            type="button"
+            onClick={() => setIsSignup(!isSignup)}
+            className="text-xs text-emerald-600 hover:text-emerald-700 font-bold"
+          >
+            {isSignup ? 'Já tem uma conta? Entre aqui' : 'Não tem uma conta? Cadastre-se'}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+});
+
+const PortariaActivationForm = memo(({
+  onBack,
+  onActivate,
+  loading
+}: {
+  onBack: () => void;
+  onActivate: (code: string) => Promise<void>;
+  loading: boolean;
+}) => {
+  const [portariaCodeInput, setPortariaCodeInput] = useState('');
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    onActivate(portariaCodeInput);
+  };
+
+  return (
+    <div className="space-y-5">
+      <button
+        type="button"
+        onClick={onBack}
+        className="inline-flex items-center gap-1.5 text-xs font-bold text-zinc-500 hover:text-zinc-900 transition-colors mb-1"
+      >
+        <ArrowLeft className="w-4 h-4" />
+        <span>Voltar ao início</span>
+      </button>
+
+      <div className="bg-emerald-50 border border-emerald-200 p-4 rounded-2xl text-xs text-emerald-900 space-y-1">
+        <strong className="block text-emerald-950 font-extrabold text-sm uppercase tracking-wide">
+          ATIVAÇÃO DA PORTARIA
+        </strong>
+        <p className="leading-relaxed font-medium">
+          Informe o código exclusivo do condomínio fornecido pela administração para conectar este dispositivo à guarita.
+        </p>
+      </div>
+
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <div>
+          <label className="block text-xs font-bold text-zinc-700 uppercase tracking-wider mb-1.5">
+            Código da Portaria
+          </label>
+          <input
+            type="text"
+            value={portariaCodeInput}
+            onChange={(e) => setPortariaCodeInput(e.target.value.toUpperCase())}
+            placeholder="EX: CONDO-1234"
+            className="w-full px-4 py-3.5 rounded-2xl border-2 border-zinc-200 focus:border-emerald-500 focus:ring-0 outline-none font-mono font-black text-center tracking-widest text-lg uppercase bg-zinc-50 focus:bg-white transition-colors"
+            required
+          />
+        </div>
+
+        <Button type="submit" className="w-full py-3.5 bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold rounded-2xl shadow-md text-sm transition-colors" loading={loading}>
+          {loading ? 'Validando Código...' : 'ATIVAR'}
+        </Button>
+      </form>
+    </div>
+  );
+});
+
+const LoginPage = ({ onLogin }: any) => {
+  const [loginMode, setLoginMode] = useState<'select' | 'admin' | 'portaria'>('select');
+  const [activatingPortaria, setActivatingPortaria] = useState(false);
+  const [pendingPortariaActivation, setPendingPortariaActivation] = useState<{
+    condominium: any;
+    access_code: string;
+  } | null>(null);
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
 
-  const handleAuth = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSelectAdmin = useCallback(() => {
+    setLoginMode('admin');
+    setError(null);
+  }, []);
+
+  const handleSelectPortaria = useCallback(() => {
+    setLoginMode('portaria');
+    setError(null);
+  }, []);
+
+  const handleBackToSelect = useCallback(() => {
+    setLoginMode('select');
+    setError(null);
+  }, []);
+
+  const handleActivatePortaria = useCallback(async (code: string) => {
+    if (!code.trim()) {
+      toast.error("Informe o código de acesso da portaria.");
+      return;
+    }
+
+    setActivatingPortaria(true);
+    setError(null);
+    try {
+      const res = await api.post('/api/portaria/activate', { access_code: code.trim() });
+      if (res && res.data && res.data.success && res.data.condominium) {
+        setPendingPortariaActivation({
+          condominium: res.data.condominium,
+          access_code: code.trim().toUpperCase()
+        });
+      } else {
+        const errMsg = res?.data?.error || res?.error || "Código de acesso da portaria não encontrado.";
+        setError(errMsg);
+        toast.error(errMsg);
+      }
+    } catch (err: any) {
+      setError(err.message || "Erro ao conectar à portaria.");
+      toast.error(err.message || "Erro ao conectar à portaria.");
+    } finally {
+      setActivatingPortaria(false);
+    }
+  }, []);
+
+  const handleConfirmPortariaSession = useCallback(async (permanent: boolean) => {
+    if (!pendingPortariaActivation) return;
+    const { condominium, access_code } = pendingPortariaActivation;
+
+    setActivatingPortaria(true);
+    try {
+      const res = await api.post('/api/portaria/confirm-link', { access_code });
+      if (res && res.data && res.data.success && res.data.portaria_token) {
+        if (permanent) {
+          localStorage.setItem('encomendas_portaria_token', res.data.portaria_token);
+        } else {
+          localStorage.removeItem('encomendas_portaria_token');
+        }
+
+        const portariaProfile: Profile = {
+          id: `portaria-${condominium.id}`,
+          full_name: `Portaria ${condominium.portaria_name || condominium.name}`,
+          email: `portaria@${condominium.id}.local`,
+          phone: '',
+          role: 'porteiro',
+          condominium_id: condominium.id,
+          active: true,
+          created_at: new Date().toISOString()
+        };
+
+        clearActivePlantao();
+        clearManualPorter();
+        onLogin(portariaProfile);
+        toast.success(`Portaria ativada: ${condominium.name}`);
+        navigate('/portaria');
+      } else {
+        toast.error(res?.data?.error || "Erro ao vincular portaria.");
+      }
+    } catch (err: any) {
+      toast.error(err.message || "Erro ao conectar portaria.");
+    } finally {
+      setActivatingPortaria(false);
+      setPendingPortariaActivation(null);
+    }
+  }, [pendingPortariaActivation, navigate, onLogin]);
+
+  const handleAuth = useCallback(async (email: string, pass: string, name: string, isSignup: boolean) => {
     setLoading(true);
     setError(null);
     
     try {
-      if (!email || !password || (isSignup && !fullName)) {
+      if (!email || !pass || (isSignup && !name)) {
         throw new Error("Preencha todos os campos");
       }
 
       if (isSignup) {
         const { data: signupData, error: signupError } = await supabase.auth.signUp({ 
           email, 
-          password,
+          password: pass,
           options: {
             data: {
-              full_name: fullName
+              full_name: name
             }
           }
         });
@@ -147,7 +427,7 @@ const LoginPage = ({ onLogin }: any) => {
             'Authorization': `Bearer ${session.access_token}`
           },
           body: JSON.stringify({
-            fullName,
+            fullName: name,
             role: 'admin' // First user is admin by default in this flow
           })
         });
@@ -163,7 +443,7 @@ const LoginPage = ({ onLogin }: any) => {
         onLogin(profileResult.profile);
         toast.success("Conta criada com sucesso!");
       } else {
-        const { data, error: authError } = await supabase.auth.signInWithPassword({ email, password });
+        const { data, error: authError } = await supabase.auth.signInWithPassword({ email, password: pass });
         
         if (authError) {
           if (authError.message === 'Invalid login credentials') {
@@ -183,9 +463,6 @@ const LoginPage = ({ onLogin }: any) => {
         if (profileError) throw profileError;
 
         if (!profile) {
-          // If user exists in Auth but not in Profiles, allow them to create a profile
-          // For now, we'll just throw an error as per original logic, 
-          // but in a real app we'd redirect to profile creation.
           throw new Error("Sua conta não possui um perfil vinculado.");
         }
 
@@ -216,108 +493,99 @@ const LoginPage = ({ onLogin }: any) => {
     } finally {
       setLoading(false);
     }
-  };
-
-  // Mock login for demo if no supabase keys or for quick preview
-  const mockLogin = (role: Role) => {
-    onLogin({
-      id: '00000000-0000-0000-0000-000000000001',
-      full_name: role === 'porteiro' ? 'Porteiro Silva' : role === 'sindico' ? 'Síndico Oliveira' : 'Administrador',
-      email: role === 'porteiro' ? 'porteiro@demo.com' : role === 'sindico' ? 'sindico@demo.com' : 'admin@demo.com',
-      role,
-      condominium_id: '00000000-0000-0000-0000-000000000000',
-      unit_number: '402'
-    });
-    
-    if (role === 'porteiro') {
-      navigate('/portaria');
-    } else if (role === 'sindico') {
-      navigate('/sindico');
-    } else {
-      navigate('/dashboard');
-    }
-  };
-
-  const isSupabaseConfigured = !!(import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_ANON_KEY);
+  }, [navigate, onLogin]);
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-zinc-50 p-4">
-      <Card className="w-full max-w-md">
+      <Card className="w-full max-w-md shadow-2xl border border-zinc-200 rounded-3xl overflow-hidden p-6 md:p-8">
         <div className="text-center mb-8">
-          <div className="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
+          <div className="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-sm">
             <Package className="w-8 h-8" />
           </div>
-          <h1 className="text-2xl font-extrabold text-zinc-900 tracking-tight">ENCOMENDAS INTELIGENTES</h1>
-          <p className="text-sm text-zinc-400 font-medium mt-1">Gestão Inteligente de Encomendas para Condomínios</p>
+          <h1 className="text-2xl font-black text-zinc-900 tracking-tight">ENCOMENDAS INTELIGENTES</h1>
+          <p className="text-xs font-bold uppercase text-zinc-400 tracking-widest mt-1">
+            {loginMode === 'select' ? 'Como deseja acessar?' : loginMode === 'admin' ? 'Acesso Administrativo' : 'Ativação da Portaria'}
+          </p>
         </div>
 
         {error && (
-          <div className="mb-4 p-3 bg-red-50 border border-red-100 text-red-600 text-sm rounded-xl flex items-center gap-2 animate-in fade-in slide-in-from-top-1">
-            <Bell className="w-4 h-4 shrink-0" />
-            <div className="flex-1">
-              <span className="font-bold block mb-0.5">{error}</span>
-              {error.includes("fetch") && (
-                <span className="text-[11px] opacity-90 block mt-1">
-                  Dica: Esse erro geralmente ocorre por falta de chaves Supabase conectadas. Use um dos botões abaixo para acessar em Modo Demo imediatamente!
-                </span>
-              )}
-            </div>
+          <div className="mb-6 p-3.5 bg-red-50 border border-red-200 text-red-700 text-xs rounded-2xl flex items-center gap-2.5">
+            <AlertTriangle className="w-4 h-4 shrink-0 text-red-500" />
+            <span className="font-bold">{error}</span>
           </div>
         )}
 
-        <form onSubmit={handleAuth} className="space-y-4">
-          {isSignup && (
-            <div>
-              <label className="block text-sm font-medium text-zinc-700 mb-1">Nome Completo</label>
-              <input 
-                type="text" 
-                value={fullName}
-                onChange={(e) => setFullName(e.target.value)}
-                className="w-full px-4 py-2 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-emerald-500 outline-none transition-all" 
-                placeholder="Seu nome completo" 
-                required={isSignup}
-              />
-            </div>
-          )}
-          <div>
-            <label className="block text-sm font-medium text-zinc-700 mb-1">E-mail</label>
-            <input 
-              type="email" 
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="w-full px-4 py-2 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-emerald-500 outline-none transition-all" 
-              placeholder="seu@email.com" 
-              required
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-zinc-700 mb-1">Senha</label>
-            <input 
-              type="password" 
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="w-full px-4 py-2 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-emerald-500 outline-none transition-all" 
-              placeholder="••••••••" 
-              required
-            />
-          </div>
-          <Button type="submit" className="w-full py-3" loading={loading}>
-            {loading ? (isSignup ? 'Criando conta...' : 'Entrando...') : (isSignup ? 'Criar Conta' : 'Entrar')}
-          </Button>
-          
-          <div className="text-center">
-            <button 
-              type="button"
-              onClick={() => setIsSignup(!isSignup)}
-              className="text-sm text-emerald-600 hover:text-emerald-700 font-medium"
-            >
-              {isSignup ? 'Já tem uma conta? Entre aqui' : 'Não tem uma conta? Cadastre-se'}
-            </button>
-          </div>
-        </form>
+        {/* 1. SELECTION SCREEN */}
+        {loginMode === 'select' && (
+          <LoginSelectionScreen
+            onSelectAdmin={handleSelectAdmin}
+            onSelectPortaria={handleSelectPortaria}
+          />
+        )}
 
+        {/* 2. PORTARIA ACTIVATION MODE */}
+        {loginMode === 'portaria' && (
+          <PortariaActivationForm
+            onBack={handleBackToSelect}
+            onActivate={handleActivatePortaria}
+            loading={activatingPortaria}
+          />
+        )}
 
+        {/* 3. ADMIN / SÍNDICO LOGIN MODE */}
+        {loginMode === 'admin' && (
+          <AdminLoginForm
+            onBack={handleBackToSelect}
+            onAuth={handleAuth}
+            loading={loading}
+          />
+        )}
       </Card>
+
+      {/* PERMANENT SESSION LINK CONFIRMATION MODAL */}
+      {pendingPortariaActivation && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl p-6 max-w-md w-full shadow-2xl space-y-4 border border-zinc-100 text-center">
+            <div className="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-2xl flex items-center justify-center mx-auto shadow-sm">
+              <Building2 className="w-8 h-8" />
+            </div>
+
+            <div>
+              <span className="text-xs font-extrabold uppercase tracking-widest text-emerald-600 block">
+                Portaria: {pendingPortariaActivation.condominium.portaria_name || pendingPortariaActivation.condominium.name}
+              </span>
+              <h3 className="text-xl font-black text-zinc-900 mt-1">Ativação da Portaria</h3>
+              <p className="text-xs text-zinc-600 mt-2 leading-relaxed">
+                Este dispositivo será vinculado permanentemente à Portaria do Condomínio <strong className="text-zinc-900">{pendingPortariaActivation.condominium.name}</strong>.
+              </p>
+              <p className="text-xs font-extrabold text-emerald-950 bg-emerald-50 p-3 rounded-2xl border border-emerald-200 mt-3">
+                Deseja manter este dispositivo conectado?
+              </p>
+            </div>
+
+            <div className="space-y-2 pt-2">
+              <button
+                type="button"
+                onClick={() => handleConfirmPortariaSession(true)}
+                disabled={activatingPortaria}
+                className="w-full py-3.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl text-xs font-extrabold transition-colors shadow-md flex items-center justify-center gap-2"
+              >
+                {activatingPortaria ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
+                <span>✓ SIM (Manter Conectado)</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleConfirmPortariaSession(false)}
+                disabled={activatingPortaria}
+                className="w-full py-3 bg-zinc-100 hover:bg-zinc-200 text-zinc-700 rounded-2xl text-xs font-bold transition-colors"
+              >
+                ✓ NÃO (Apenas nesta Sessão)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -343,6 +611,7 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
   const [matchingResidents, setMatchingResidents] = useState<ScoredResident[]>([]);
   const [selectedResidentId, setSelectedResidentId] = useState<string | null>(null);
   const [isResidentModalOpen, setIsResidentModalOpen] = useState(false);
+  const [isImporterOpen, setIsImporterOpen] = useState(false);
   const [deliveryPhoto, setDeliveryPhoto] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [residentFormData, setResidentFormData] = useState({
@@ -754,13 +1023,17 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
       // Obter o usuário logado para capturar o ID se disponível (opcional)
       const { data: { user: authUser } } = await supabase.auth.getUser();
 
+      const validDeliveredBy = (authUser?.id && isValidUuid(authUser.id)) 
+        ? authUser.id 
+        : (user?.id && isValidUuid(user.id) ? user.id : null);
+
       const { error } = await supabase
         .from('packages')
         .update({ 
           status: 'delivered', 
           delivered_at: new Date().toISOString(),
-          delivered_by: authUser?.id || user.id,
-          entregue_por: (getCurrentPorter() && getCurrentPorter() !== 'Selecione o Porteiro') ? getCurrentPorter() : user.full_name,
+          delivered_by: validDeliveredBy,
+          entregue_por: (getCurrentPorter(user?.condominium_id) && getCurrentPorter(user?.condominium_id) !== 'Selecione o Porteiro') ? getCurrentPorter(user?.condominium_id) : user.full_name,
           pickup_qr_code: 'used',
           delivered_to_name: 'Morador (Confirmado)',
           ...(deliveryPhoto ? { delivery_photo_url: deliveryPhoto } : {})
@@ -770,14 +1043,18 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
       if (error) throw error;
 
       // Log retrieval
-      await supabase.from('retrieval_logs').insert([{
-        package_id: qrPackage.id,
-        porter_id: user.id,
-        condominium_id: user.condominium_id,
-        delivery_method: 'qr_code',
-        token_used: qrPackage.pickup_token,
-        status: 'success'
-      }]);
+      try {
+        await supabase.from('retrieval_logs').insert([{
+          package_id: qrPackage.id,
+          porter_id: validDeliveredBy,
+          condominium_id: user.condominium_id,
+          delivery_method: 'qr_code',
+          token_used: qrPackage.pickup_token,
+          status: 'success'
+        }]);
+      } catch (logErr) {
+        console.warn('Erro ao salvar retrieval_log:', logErr);
+      }
 
       toast.success("Retirada confirmada com sucesso!");
       setQrScanStatus('success');
@@ -971,34 +1248,54 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
       // Obter o usuário logado para capturar o ID se disponível (opcional)
       const { data: { user: authUser } } = await supabase.auth.getUser();
 
-      const { data: pkg, error } = await supabase
+      const basePackageData: any = {
+        condominium_id: user.condominium_id,
+        unit_number: analyzedData?.unitNumber || '',
+        unit_type: analyzedData?.unitDetails?.type || null,
+        block: analyzedData?.unitDetails?.block || null,
+        tower: analyzedData?.unitDetails?.tower || null,
+        complement: analyzedData?.unitDetails?.complement || null,
+        carrier: analyzedData?.carrier || '',
+        tracking_code: analyzedData?.trackingNumber || '',
+        photo_url: photoUrl,
+        status: 'received',
+        whatsapp_notified: true,
+        whatsapp_sent: true,
+        notified_at: new Date().toISOString(),
+        recebido_por: (getCurrentPorter(user?.condominium_id) && getCurrentPorter(user?.condominium_id) !== 'Selecione o Porteiro') ? getCurrentPorter(user?.condominium_id) : user.full_name,
+        porter_name: (getCurrentPorter(user?.condominium_id) && getCurrentPorter(user?.condominium_id) !== 'Selecione o Porteiro') ? getCurrentPorter(user?.condominium_id) : user.full_name,
+        notes: notes || null,
+        pickup_token: qrToken,
+        pickup_qr_code: 'active',
+        qr_code_generated_at: new Date().toISOString(),
+        whatsapp_status: 'pending'
+      };
+
+      if (user?.id) {
+        basePackageData.received_by = user.id;
+      }
+      if (authUser?.id) {
+        basePackageData.registered_by = authUser.id;
+      }
+
+      let insertPkgRes = await supabase
         .from('packages')
-        .insert([{
-          condominium_id: user.condominium_id,
-          unit_number: analyzedData?.unitNumber || '',
-          unit_type: analyzedData?.unitDetails?.type || null,
-          block: analyzedData?.unitDetails?.block || null,
-          tower: analyzedData?.unitDetails?.tower || null,
-          complement: analyzedData?.unitDetails?.complement || null,
-          carrier: analyzedData?.carrier || '',
-          tracking_code: analyzedData?.trackingNumber || '',
-          photo_url: photoUrl,
-          status: 'received',
-          whatsapp_notified: true,
-          whatsapp_sent: true,
-          notified_at: new Date().toISOString(),
-          received_by: user.id,
-          recebido_por: (getCurrentPorter() && getCurrentPorter() !== 'Selecione o Porteiro') ? getCurrentPorter() : user.full_name,
-          porter_name: (getCurrentPorter() && getCurrentPorter() !== 'Selecione o Porteiro') ? getCurrentPorter() : user.full_name,
-          ...(authUser?.id ? { registered_by: authUser.id } : {}),
-          notes: notes || null,
-          pickup_token: qrToken,
-          pickup_qr_code: 'active',
-          qr_code_generated_at: new Date().toISOString(),
-          whatsapp_status: 'pending'
-        }])
+        .insert([basePackageData])
         .select()
         .single();
+
+      if (insertPkgRes.error && (insertPkgRes.error.code === '23503' || insertPkgRes.error.message?.includes('foreign key constraint'))) {
+        const fallbackData = { ...basePackageData };
+        delete fallbackData.received_by;
+        delete fallbackData.registered_by;
+        insertPkgRes = await supabase
+          .from('packages')
+          .insert([fallbackData])
+          .select()
+          .single();
+      }
+
+      const { data: pkg, error } = insertPkgRes;
 
       if (error) throw error;
 
@@ -1074,30 +1371,40 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
 
     // Obter o usuário logado para capturar o ID se disponível (opcional)
     const { data: { user: authUser } } = await supabase.auth.getUser();
+    const validDeliveredBy = (authUser?.id && isValidUuid(authUser.id)) 
+      ? authUser.id 
+      : (user?.id && isValidUuid(user.id) ? user.id : null);
 
     const { error } = await supabase
       .from('packages')
       .update({ 
         status: 'delivered', 
         delivered_at: new Date().toISOString(),
-        delivered_by: authUser?.id || user.id,
-        entregue_por: (getCurrentPorter() && getCurrentPorter() !== 'Selecione o Porteiro') ? getCurrentPorter() : user.full_name,
+        delivered_by: validDeliveredBy,
+        entregue_por: (getCurrentPorter(user?.condominium_id) && getCurrentPorter(user?.condominium_id) !== 'Selecione o Porteiro') ? getCurrentPorter(user?.condominium_id) : user.full_name,
         delivered_to_name: 'Morador (Manual)'
       })
       .eq('id', pkgId);
     
     if (!error) {
       // Log retrieval
-      await supabase.from('retrieval_logs').insert([{
-        package_id: pkgId,
-        porter_id: user.id,
-        condominium_id: user.condominium_id,
-        delivery_method: 'manual',
-        status: 'success'
-      }]);
+      try {
+        await supabase.from('retrieval_logs').insert([{
+          package_id: pkgId,
+          porter_id: validDeliveredBy,
+          condominium_id: user.condominium_id,
+          delivery_method: 'manual',
+          status: 'success'
+        }]);
+      } catch (logErr) {
+        console.warn('Erro ao salvar retrieval_log:', logErr);
+      }
 
       toast.success("Entrega confirmada!");
       fetchPackages();
+    } else {
+      console.error("Erro ao confirmar entrega:", error);
+      toast.error(`Erro ao confirmar entrega: ${error.message}`);
     }
   };
 
@@ -1323,24 +1630,34 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
               <ArrowLeft className="w-5 h-5" />
               Voltar ao Painel
             </button>
-            <Button onClick={() => { 
-              setEditingResidentId(null); 
-              setResidentFormData({ 
-                full_name: '', 
-                unit_number: '', 
-                unit_type: '',
-                block: '',
-                tower: '',
-                complement: '',
-                phone: '', 
-                role: 'resident',
-                active: true
-              }); 
-              setIsResidentModalOpen(true); 
-            }}>
-              <UserPlus className="w-4 h-4" />
-              Novo Morador
-            </Button>
+            <div className="flex flex-col gap-2 w-full sm:w-auto items-stretch sm:items-end">
+              <Button onClick={() => { 
+                setEditingResidentId(null); 
+                setResidentFormData({ 
+                  full_name: '', 
+                  unit_number: '', 
+                  unit_type: '',
+                  block: '',
+                  tower: '',
+                  complement: '',
+                  phone: '', 
+                  role: 'resident',
+                  active: true
+                }); 
+                setIsResidentModalOpen(true); 
+              }}>
+                <UserPlus className="w-4 h-4" />
+                Novo Morador
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => setIsImporterOpen(true)}
+                className="flex items-center justify-center gap-2 border-zinc-200 hover:bg-zinc-50 text-zinc-700"
+              >
+                <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+                Importar Planilha
+              </Button>
+            </div>
           </div>
 
           <div className="relative">
@@ -2018,6 +2335,13 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
           </Button>
         </form>
       </Modal>
+
+      <ResidentImporterModal
+        isOpen={isImporterOpen}
+        onClose={() => setIsImporterOpen(false)}
+        user={user}
+        onImportComplete={fetchResidents}
+      />
     </div>
   );
 };
@@ -2112,6 +2436,11 @@ const SindicoDashboard = ({ user, onLogout, onUpdateUser }: { user: Profile, onL
 
 // --- Main App ---
 
+const isValidUuid = (id?: string | null): boolean => {
+  if (!id) return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+};
+
 export default function App() {
   const [user, setUser] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
@@ -2150,6 +2479,8 @@ export default function App() {
   }, []);
 
   const handleLogout = async () => {
+    clearActivePlantao();
+    clearManualPorter();
     await supabase.auth.signOut();
     setUser(null);
   };
@@ -2169,15 +2500,7 @@ export default function App() {
           user.condominium_id ? <Navigate to="/dashboard" /> : <SelectCondominium user={user} onUpdateUser={handleUpdateUser} />
         ) : <Navigate to="/" />
       } />
-      <Route path="*" element={
-        (() => {
-          const role = normalizeRole(user?.role);
-          // Only use SindicoDashboard as a wrapper if it's NOT a specific route handled by AppLayout routes
-          // Actually, let's simplify: AppLayout should always handle the main structure, 
-          // and the Routes inside AppLayout should decide which component to show.
-          return <AppLayout user={user} loading={loading} setUser={setUser} handleLogout={handleLogout} />;
-        })()
-      } />
+      <Route path="*" element={<AppLayout user={user} loading={loading} setUser={setUser} handleLogout={handleLogout} />} />
     </Routes>
   );
 }
@@ -2185,6 +2508,38 @@ export default function App() {
 const AppLayout = ({ user, loading, setUser, handleLogout }: any) => {
   const navigate = useNavigate();
   const location = useLocation();
+
+  useEffect(() => {
+    // Check permanent portaria token on startup if user is null
+    const token = localStorage.getItem('encomendas_portaria_token');
+    if (token && !user && !loading) {
+      api.get(`/api/portaria/validate-token/${token}`)
+        .then(res => {
+          if (res && res.data && res.data.success && res.data.condominium) {
+            const condo = res.data.condominium;
+            const portariaProfile: Profile = {
+              id: `portaria-${condo.id}`,
+              full_name: `Portaria ${condo.portaria_name || condo.name}`,
+              email: `portaria@${condo.id}.local`,
+              phone: '',
+              role: 'porteiro',
+              condominium_id: condo.id,
+              active: true,
+              created_at: new Date().toISOString()
+            };
+            setUser(portariaProfile);
+          } else {
+            localStorage.removeItem('encomendas_portaria_token');
+            if (res && res.data && res.data.code === 'PORTARIA_DEACTIVATED') {
+              toast.error("Sessão da portaria desativada pelo administrador. Por favor, informe o novo código.");
+            }
+          }
+        })
+        .catch(() => {
+          // Fallback to standard login
+        });
+    }
+  }, [user, loading, setUser]);
 
   useEffect(() => {
     // Role-based initial redirection
@@ -2218,11 +2573,6 @@ const AppLayout = ({ user, loading, setUser, handleLogout }: any) => {
       if (role === 'porteiro' && (location.pathname === '/sindico' || location.pathname === '/dashboard')) {
         navigate('/portaria');
       }
-      
-      // Impedir que síndico acesse /portaria
-      if (role === 'sindico' && location.pathname === '/portaria') {
-        navigate('/sindico');
-      }
     }
   }, [user, loading, navigate, location.pathname]);
 
@@ -2233,6 +2583,14 @@ const AppLayout = ({ user, loading, setUser, handleLogout }: any) => {
   );
 
   if (!user) return <LoginPage onLogin={setUser} />;
+
+  if (user.must_change_password) {
+    return (
+      <ChangePassword 
+        onUpdateUser={(updated) => setUser(prev => prev ? ({ ...prev, ...updated, must_change_password: false }) : null)} 
+      />
+    );
+  }
 
   return (
     <div className="min-h-screen bg-zinc-50">
@@ -2379,10 +2737,10 @@ const AppLayout = ({ user, loading, setUser, handleLogout }: any) => {
           <Route path="/portaria" element={
             (() => {
               const role = normalizeRole(user.role);
-              return role === 'porteiro' || role === 'admin' ? <Portaria user={user} /> : <Navigate to="/dashboard" />
+              return (role === 'porteiro' || role === 'sindico' || role === 'admin') ? <Portaria user={user} /> : <Navigate to="/dashboard" />
             })()
           } />
-          <Route path="/condominiums" element={<CondominiumList />} />
+          <Route path="/condominiums" element={<CondominiumList user={user} />} />
           <Route path="/condominiums/new" element={<CondominiumNew user={user} onUpdateUser={setUser} />} />
           <Route path="/profiles" element={<ProfileList user={user} />} />
           <Route path="/profiles/new" element={<ProfileNew user={user} />} />

@@ -15,17 +15,38 @@ export interface AuditParams {
   dados_depois?: any;
 }
 
+export const isValidUuid = (id?: string | null): boolean => {
+  if (!id) return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+};
+
+export const sanitizeUuid = (id?: string | null): string | null => {
+  if (!id) return null;
+  if (isValidUuid(id)) return id;
+  // Handle synthetic prefix like "portaria-64710b73-88f7-49a7-aeb7-3f513bec125c"
+  const clean = id.replace(/^portaria-/, '');
+  if (isValidUuid(clean)) return clean;
+  // Match any embedded 36-char hex UUID string
+  const match = id.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+  if (match) return match[0];
+  return null;
+};
+
 export const registrarAuditoria = async (params: AuditParams) => {
   try {
+    const condominioId = sanitizeUuid(params.condominio_id);
+    const usuarioId = sanitizeUuid(params.usuario_id);
+    const registroId = sanitizeUuid(params.registro_id);
+
     const { error } = await supabase.rpc('registrar_auditoria', {
-      p_condominio_id: params.condominio_id,
-      p_usuario_id: params.usuario_id,
-      p_usuario_nome: params.usuario_nome,
-      p_usuario_perfil: params.usuario_perfil,
+      p_condominio_id: condominioId,
+      p_usuario_id: usuarioId,
+      p_usuario_nome: params.usuario_nome || 'Usuário',
+      p_usuario_perfil: params.usuario_perfil || 'porteiro',
       p_tipo_evento: params.tipo_evento,
       p_acao: params.acao,
       p_tabela_afetada: params.tabela_afetada,
-      p_registro_id: params.registro_id,
+      p_registro_id: registroId,
       p_descricao: params.descricao,
       p_metodo: params.metodo,
       p_dados_antes: params.dados_antes,
@@ -33,17 +54,17 @@ export const registrarAuditoria = async (params: AuditParams) => {
     });
 
     if (error) {
-      console.error('Erro no RPC registrar_auditoria:', error);
-      // Fallback para inserção direta se a função não existir ou falhar
+      console.warn('Aviso no RPC registrar_auditoria (tentando fallback):', error.message || error);
+      // Fallback para inserção direta se a função RPC falhar
       await supabase.from('auditoria_eventos').insert({
-        condominio_id: params.condominio_id,
-        usuario_id: params.usuario_id,
-        usuario_nome: params.usuario_nome,
-        usuario_perfil: params.usuario_perfil,
+        condominio_id: condominioId,
+        usuario_id: usuarioId,
+        usuario_nome: params.usuario_nome || 'Usuário',
+        usuario_perfil: params.usuario_perfil || 'porteiro',
         tipo_evento: params.tipo_evento,
         acao: params.acao,
         tabela_afetada: params.tabela_afetada,
-        registro_id: params.registro_id,
+        registro_id: registroId,
         descricao: params.descricao,
         metodo: params.metodo,
         dados_antes: params.dados_antes,
@@ -51,7 +72,7 @@ export const registrarAuditoria = async (params: AuditParams) => {
       });
     }
   } catch (err) {
-    console.error('Falha crítica na auditoria:', err);
+    console.warn('Aviso na auditoria (ignorado com segurança):', err);
   }
 };
 

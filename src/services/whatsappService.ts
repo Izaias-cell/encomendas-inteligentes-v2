@@ -192,6 +192,8 @@ export async function sendWhatsAppMessage(
     instance_id?: string;
     whatsapp_provider?: string;
     photo_url?: string;
+    isTestMode?: boolean;
+    is_teste?: boolean;
   }
 ) {
   if (!message || message.trim() === "") {
@@ -210,6 +212,37 @@ export async function sendWhatsAppMessage(
   if (normalizedPhone.length < 12) { // 55 + DDD + 8 or 9 digits
     console.warn('[WhatsApp Service] Telefone inválido:', normalizedPhone);
     return { error: 'Telefone inválido', httpStatus: 400 };
+  }
+
+  // =========================================================================
+  // BLOQUEIO CRÍTICO DE SEGURANÇA: MODO TESTE (NUNCA ENVIAR MENSAGEM REAL)
+  // =========================================================================
+  if (config?.isTestMode || config?.is_teste) {
+    console.log(`[WhatsApp Service] [🧪 SIMULAÇÃO MODO TESTE ATIVA] Bloqueio de envio real para: ${normalizedPhone}`);
+    
+    // Registra log da simulação sem fazer chamada externa HTTP
+    try {
+      await supabase.from('message_logs').insert([{
+        condominium_id: condominiumId,
+        telefone: normalizedPhone,
+        status_envio: 'simulado_teste',
+        tipo: 'whatsapp_teste',
+        conteudo: message,
+        data_envio: new Date().toISOString(),
+        detalhes: { modo: 'teste', simulacao: true }
+      }]);
+    } catch (e) {
+      console.warn('[WhatsApp Service] Log de simulação local:', e);
+    }
+
+    return {
+      status_envio: 'sucesso',
+      is_teste: true,
+      is_simulated: true,
+      message: 'Notificação simulada (MODO TESTE). Nenhuma mensagem foi enviada ao WhatsApp.',
+      httpStatus: 200,
+      data: { simulated: true }
+    };
   }
 
   console.log("Enviando mensagem para:", normalizedPhone);

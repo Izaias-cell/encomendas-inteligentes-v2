@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
+import { api } from '../lib/apiClient';
 import { Condominium, Profile, Role } from '../types';
 import { 
   Building, Building2, Plus, Loader2, Search, MapPin, 
@@ -11,6 +12,9 @@ import {
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { registrarAuditoria } from '../services/auditService';
+import { SHIFT_PRESETS } from '../lib/plantaoUtils';
+import { normalizeRole } from '../lib/authUtils';
+import UserFormModal from '../components/UserFormModal';
 
 export interface NewCondoInitialUser {
   tempId: string;
@@ -21,6 +25,8 @@ export interface NewCondoInitialUser {
   cpf?: string;
   password?: string;
   active: boolean;
+  horario_inicio?: string;
+  horario_fim?: string;
 }
 
 interface SummaryData {
@@ -31,7 +37,11 @@ interface SummaryData {
   total_packages: number;
 }
 
-export default function CondominiumList() {
+interface CondominiumListProps {
+  user?: Profile;
+}
+
+export default function CondominiumList({ user }: CondominiumListProps) {
   const [condos, setCondos] = useState<Condominium[]>([]);
   const [summary, setSummary] = useState<SummaryData>({
     total_condos: 0,
@@ -69,6 +79,32 @@ export default function CondominiumList() {
   const [resetSuccessData, setResetSuccessData] = useState<{ user: Profile; tempPassword: string } | null>(null);
   const [copiedPassword, setCopiedPassword] = useState(false);
   const [showAddUserModal, setShowAddUserModal] = useState(false);
+
+  // Portaria Access Code Regeneration State
+  const [regenerateConfirmCondo, setRegenerateConfirmCondo] = useState<Condominium | null>(null);
+  const [regeneratingLoading, setRegeneratingLoading] = useState(false);
+
+  const handleRegeneratePortariaCode = async (condo: Condominium) => {
+    setRegeneratingLoading(true);
+    try {
+      const res = await api.post(`/api/admin/condominiums/${condo.id}/regenerate-portaria-code`);
+      if (res && res.data && res.data.success) {
+        toast.success(`Novo Código Gerado: ${res.data.portaria_access_code}`);
+        const updated = condos.map(c => c.id === condo.id ? { ...c, portaria_access_code: res.data.portaria_access_code, portaria_name: res.data.portaria_name } : c);
+        setCondos(updated);
+        if (selectedCondo && selectedCondo.id === condo.id) {
+          setSelectedCondo({ ...selectedCondo, portaria_access_code: res.data.portaria_access_code, portaria_name: res.data.portaria_name });
+        }
+      } else {
+        toast.error(res?.data?.error || res?.error || 'Erro ao regenerar código.');
+      }
+    } catch (err: any) {
+      toast.error(err.message || 'Erro ao regenerar código da portaria.');
+    } finally {
+      setRegeneratingLoading(false);
+      setRegenerateConfirmCondo(null);
+    }
+  };
 
   // Form states
   const [condoForm, setCondoForm] = useState({
@@ -109,7 +145,9 @@ export default function CondominiumList() {
     phone: '',
     cpf: '',
     password: '',
-    active: true
+    active: true,
+    horario_inicio: '',
+    horario_fim: ''
   });
 
   const navigate = useNavigate();
@@ -138,27 +176,17 @@ export default function CondominiumList() {
   const fetchCondominiums = async () => {
     setLoading(true);
     try {
-      const session = await getValidSession();
-
-      const res = await fetch('/api/admin/condominiums', {
-        headers: {
-          'Authorization': `Bearer ${session?.access_token || 'MOCK_TOKEN'}`
-        }
-      });
-
+      const res = await api.get('/api/admin/condominiums');
       if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || `Erro ${res.status} ao carregar condomínios`);
+        throw new Error(res.error || 'Erro ao carregar condomínios');
       }
-
-      const data = await res.json();
-      setCondos(data.condominiums || []);
-      if (data.summary) {
-        setSummary(data.summary);
+      setCondos(res.data?.condominiums || []);
+      if (res.data?.summary) {
+        setSummary(res.data.summary);
       }
     } catch (error: any) {
       console.error('Erro ao buscar condomínios:', error);
-      toast.error('Erro ao carregar condomínios: ' + (error.message || 'Erro desconhecido'));
+      toast.error(error.message || 'Erro ao carregar condomínios');
     } finally {
       setLoading(false);
     }
@@ -167,24 +195,14 @@ export default function CondominiumList() {
   const fetchCondoUsers = async (condoId: string) => {
     setUsersLoading(true);
     try {
-      const session = await getValidSession();
-      if (!session) return;
-
-      const res = await fetch(`/api/admin/condominiums/${condoId}/users`, {
-        headers: {
-          'Authorization': `Bearer ${session.access_token}`
-        }
-      });
-
+      const res = await api.get(`/api/admin/condominiums/${condoId}/users`);
       if (!res.ok) {
-        throw new Error('Erro ao carregar usuários do condomínio');
+        throw new Error(res.error || 'Erro ao carregar usuários do condomínio');
       }
-
-      const data = await res.json();
-      setCondoUsers(data.profiles || []);
+      setCondoUsers(res.data?.profiles || []);
     } catch (error: any) {
       console.error("Erro ao buscar usuários do condomínio:", error);
-      toast.error('Erro ao carregar usuários: ' + error.message);
+      toast.error(error.message || 'Erro ao carregar usuários');
     } finally {
       setUsersLoading(false);
     }
@@ -205,28 +223,21 @@ export default function CondominiumList() {
 
     setActionLoading(true);
     try {
-      const session = await getValidSession();
-      if (!session) throw new Error('Sessão expirada. Recarregue a página.');
+      const payload = {
+        ...condoForm,
+        city_state: condoForm.city && condoForm.state ? `${condoForm.city}/${condoForm.state}` : condoForm.city,
+        initialUsers: initialUsers
+      };
 
-      const response = await fetch('/api/condominiums/create', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session.access_token}`
-        },
-        body: JSON.stringify({
-          ...condoForm,
-          city_state: condoForm.city && condoForm.state ? `${condoForm.city}/${condoForm.state}` : condoForm.city,
-          initialUsers: initialUsers
-        })
-      });
+      const res = await api.post('/api/condominiums/create', payload);
+      if (!res.ok) {
+        throw new Error(res.error || 'Erro ao cadastrar condomínio');
+      }
 
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error || 'Erro ao cadastrar condomínio');
-
-      const userMsg = result.createdUsersCount > 0 
-        ? `Condomínio "${result.condo.name}" e ${result.createdUsersCount} usuário(s) vinculados cadastrados com sucesso!`
-        : `Condomínio "${result.condo.name}" criado com sucesso!`;
+      const result = res.data;
+      const userMsg = result?.createdUsersCount > 0 
+        ? `Condomínio "${result.condo?.name}" e ${result.createdUsersCount} usuário(s) vinculados cadastrados com sucesso!`
+        : `Condomínio "${result?.condo?.name || condoForm.name}" criado com sucesso!`;
 
       toast.success(userMsg);
       setShowCreateModal(false);
@@ -267,28 +278,20 @@ export default function CondominiumList() {
 
     setActionLoading(true);
     try {
-      const session = await getValidSession();
-      if (!session) throw new Error('Sessão não encontrada');
+      const payload = {
+        ...condoForm,
+        city_state: condoForm.city && condoForm.state ? `${condoForm.city}/${condoForm.state}` : condoForm.city
+      };
 
-      const response = await fetch(`/api/admin/condominiums/${editingCondo.id}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session.access_token}`
-        },
-        body: JSON.stringify({
-          ...condoForm,
-          city_state: condoForm.city && condoForm.state ? `${condoForm.city}/${condoForm.state}` : condoForm.city
-        })
-      });
-
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error || 'Erro ao atualizar condomínio');
+      const res = await api.put(`/api/admin/condominiums/${editingCondo.id}`, payload);
+      if (!res.ok) {
+        throw new Error(res.error || 'Erro ao atualizar condomínio');
+      }
 
       toast.success('Condomínio atualizado com sucesso!');
       setEditingCondo(null);
-      if (selectedCondo?.id === editingCondo.id) {
-        setSelectedCondo(result.condominium);
+      if (selectedCondo?.id === editingCondo.id && res.data?.condominium) {
+        setSelectedCondo(res.data.condominium);
       }
       fetchCondominiums();
     } catch (error: any) {
@@ -302,19 +305,10 @@ export default function CondominiumList() {
   const handleToggleStatus = async (condo: Condominium) => {
     const newStatus = !condo.active;
     try {
-      const session = await getValidSession();
-      if (!session) return;
-
-      const response = await fetch(`/api/admin/condominiums/${condo.id}/status`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session.access_token}`
-        },
-        body: JSON.stringify({ active: newStatus })
-      });
-
-      if (!response.ok) throw new Error('Erro ao alterar status');
+      const res = await api.patch(`/api/admin/condominiums/${condo.id}/status`, { active: newStatus });
+      if (!res.ok) {
+        throw new Error(res.error || 'Erro ao alterar status');
+      }
 
       toast.success(`Condomínio ${condo.name} agora está ${newStatus ? 'ATIVO' : 'INATIVO'}`);
       setCondos(prev => prev.map(c => c.id === condo.id ? { ...c, active: newStatus } : c));
@@ -333,23 +327,14 @@ export default function CondominiumList() {
     setDeleteLoading(true);
 
     try {
-      const session = await getValidSession();
-      if (!session) throw new Error('Sessão expirada');
+      const res = await api.delete(`/api/admin/condominiums/${target.id}?force=${force ? 'true' : 'false'}`);
 
-      const response = await fetch(`/api/admin/condominiums/${target.id}?force=${force ? 'true' : 'false'}`, {
-        method: 'DELETE',
-        headers: {
-          'Authorization': `Bearer ${session.access_token}`
-        }
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        if (data.hasDependencies) {
+      if (!res.ok) {
+        if (res.hasDependencies || res.data?.hasDependencies) {
+          const errMsg = res.error || res.data?.error || 'Existem dependências vinculadas a este condomínio.';
           toast((t) => (
             <div className="space-y-2">
-              <p className="font-bold text-sm text-zinc-900">{data.error}</p>
+              <p className="font-bold text-sm text-zinc-900">{errMsg}</p>
               <p className="text-xs text-zinc-500">Deseja forçar a exclusão desvinculando os registros?</p>
               <div className="flex gap-2 pt-1">
                 <button
@@ -357,13 +342,13 @@ export default function CondominiumList() {
                     toast.dismiss(t.id);
                     handleDeleteCondominium(true);
                   }}
-                  className="px-3 py-1.5 bg-red-600 text-white font-bold rounded-lg text-xs"
+                  className="px-3 py-1.5 bg-red-600 text-white font-bold rounded-lg text-xs hover:bg-red-700 transition-colors"
                 >
                   Sim, Excluir Definitivamente
                 </button>
                 <button
                   onClick={() => toast.dismiss(t.id)}
-                  className="px-3 py-1.5 bg-zinc-200 text-zinc-700 font-bold rounded-lg text-xs"
+                  className="px-3 py-1.5 bg-zinc-200 text-zinc-700 font-bold rounded-lg text-xs hover:bg-zinc-300 transition-colors"
                 >
                   Cancelar
                 </button>
@@ -373,10 +358,10 @@ export default function CondominiumList() {
           setDeleteLoading(false);
           return;
         }
-        throw new Error(data.error || 'Erro ao excluir condomínio');
+        throw new Error(res.error || 'Erro ao excluir condomínio');
       }
 
-      toast.success(data.message || 'Condomínio excluído com sucesso!');
+      toast.success(res.data?.message || 'Condomínio excluído com sucesso!');
       setDeleteCondoConfirm(null);
       if (selectedCondo?.id === target.id) {
         setSelectedCondo(null);
@@ -394,19 +379,8 @@ export default function CondominiumList() {
   const handleToggleUserStatus = async (targetUser: Profile) => {
     const newStatus = !targetUser.active;
     try {
-      const session = await getValidSession();
-      if (!session) return;
-
-      const response = await fetch(`/api/admin/users/${targetUser.id}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session.access_token}`
-        },
-        body: JSON.stringify({ active: newStatus })
-      });
-
-      if (!response.ok) throw new Error('Erro ao atualizar usuário');
+      const res = await api.put(`/api/admin/users/${targetUser.id}`, { active: newStatus });
+      if (!res.ok) throw new Error(res.error || 'Erro ao atualizar usuário');
 
       toast.success(`Usuário ${targetUser.full_name} agora está ${newStatus ? 'Ativo' : 'Inativo'}`);
       setCondoUsers(prev => prev.map(u => u.id === targetUser.id ? { ...u, active: newStatus } : u));
@@ -421,24 +395,12 @@ export default function CondominiumList() {
     setActionLoading(true);
 
     try {
-      const session = await getValidSession();
-      if (!session) throw new Error('Sessão expirada');
-
       const tempPassword = Math.random().toString(36).slice(-8) + Math.random().toString(36).slice(-4);
+      const res = await api.post(`/api/admin/users/${target.id}/reset-password`, { newPassword: tempPassword });
 
-      const response = await fetch(`/api/admin/users/${target.id}/reset-password`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session.access_token}`
-        },
-        body: JSON.stringify({ newPassword: tempPassword })
-      });
+      if (!res.ok) throw new Error(res.error || 'Erro ao resetar senha');
 
-      const resData = await response.json();
-      if (!response.ok) throw new Error(resData.error || 'Erro ao resetar senha');
-
-      const finalPassword = resData.tempPassword || tempPassword;
+      const finalPassword = res.data?.tempPassword || tempPassword;
       setUserToReset(null);
       setResetSuccessData({ user: target, tempPassword: finalPassword });
       toast.success('Senha redefinida com sucesso!');
@@ -455,18 +417,8 @@ export default function CondominiumList() {
     setActionLoading(true);
 
     try {
-      const session = await getValidSession();
-      if (!session) throw new Error('Sessão expirada');
-
-      const response = await fetch(`/api/admin/users/${target.id}`, {
-        method: 'DELETE',
-        headers: {
-          'Authorization': `Bearer ${session.access_token}`
-        }
-      });
-
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Erro ao excluir usuário');
+      const res = await api.delete(`/api/admin/users/${target.id}`);
+      if (!res.ok) throw new Error(res.error || 'Erro ao excluir usuário');
 
       toast.success(`Usuário ${target.full_name} excluído com sucesso!`);
       setCondoUsers(prev => prev.filter(u => u.id !== target.id));
@@ -482,32 +434,29 @@ export default function CondominiumList() {
   const handleCreateUserInCondo = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedCondo) return;
-    if (!userForm.full_name || !userForm.email) {
-      toast.error('Nome e E-mail são obrigatórios.');
+    if (!userForm.full_name) {
+      toast.error('O nome completo é obrigatório.');
+      return;
+    }
+    if (normalizeRole(userForm.role) !== 'porteiro' && !userForm.email) {
+      toast.error('O e-mail é obrigatório para este perfil.');
       return;
     }
 
     setActionLoading(true);
     try {
-      const session = await getValidSession();
-      if (!session) throw new Error('Sessão expirada');
-
-      const response = await fetch('/api/admin/users', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session.access_token}`
-        },
-        body: JSON.stringify({
-          ...userForm,
-          condominium_id: selectedCondo.id
-        })
+      const res = await api.post('/api/admin/users', {
+        ...userForm,
+        condominium_id: selectedCondo.id
       });
 
-      const resData = await response.json();
-      if (!response.ok) throw new Error(resData.error || 'Erro ao criar usuário');
+      if (!res.ok) throw new Error(res.error || 'Erro ao criar usuário');
 
-      toast.success(`Usuário ${userForm.full_name} cadastrado com sucesso!`);
+      if (normalizeRole(userForm.role) === 'porteiro') {
+        toast.success("Porteiro cadastrado com sucesso. Este porteiro será identificado automaticamente pela seleção do plantão no início do turno, não sendo necessário login ou senha individuais.", { duration: 6000 });
+      } else {
+        toast.success(`Usuário ${userForm.full_name} cadastrado com sucesso!`);
+      }
       setShowAddUserModal(false);
       resetUserForm();
       fetchCondoUsers(selectedCondo.id);
@@ -525,27 +474,16 @@ export default function CondominiumList() {
 
     setActionLoading(true);
     try {
-      const session = await getValidSession();
-      if (!session) throw new Error('Sessão expirada');
-
-      const response = await fetch(`/api/admin/users/${userToEdit.id}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session.access_token}`
-        },
-        body: JSON.stringify({
-          full_name: userForm.full_name,
-          phone: userForm.phone,
-          role: userForm.role,
-          active: userForm.active,
-          horario_inicio: userForm.horario_inicio,
-          horario_fim: userForm.horario_fim
-        })
+      const res = await api.put(`/api/admin/users/${userToEdit.id}`, {
+        full_name: userForm.full_name,
+        phone: userForm.phone,
+        role: userForm.role,
+        active: userForm.active,
+        horario_inicio: userForm.horario_inicio,
+        horario_fim: userForm.horario_fim
       });
 
-      const resData = await response.json();
-      if (!response.ok) throw new Error(resData.error || 'Erro ao editar usuário');
+      if (!res.ok) throw new Error(res.error || 'Erro ao editar usuário');
 
       toast.success('Usuário atualizado com sucesso!');
       setUserToEdit(null);
@@ -559,11 +497,12 @@ export default function CondominiumList() {
 
   const openUserEditModal = (u: Profile) => {
     setUserToEdit(u);
+    const normRole = (normalizeRole(u.role) as Role) || 'porteiro';
     setUserForm({
       full_name: u.full_name || '',
       phone: u.phone || '',
       email: u.email || '',
-      role: u.role || 'porteiro',
+      role: normRole,
       active: u.active !== false,
       horario_inicio: u.horario_inicio || '',
       horario_fim: u.horario_fim || ''
@@ -579,7 +518,9 @@ export default function CondominiumList() {
       phone: '',
       cpf: '',
       password: '',
-      active: true
+      active: true,
+      horario_inicio: '',
+      horario_fim: ''
     });
     setShowAddInitialUserModal(true);
   };
@@ -588,14 +529,17 @@ export default function CondominiumList() {
     const u = initialUsers[index];
     if (!u) return;
     setEditingInitialUserIndex(index);
+    const normRole = (normalizeRole(u.role) as Role) || 'sindico';
     setInitialUserForm({
       full_name: u.full_name || '',
-      role: u.role || 'sindico',
+      role: normRole,
       email: u.email || '',
       phone: u.phone || '',
       cpf: u.cpf || '',
       password: u.password || '',
-      active: u.active !== false
+      active: u.active !== false,
+      horario_inicio: u.horario_inicio || '',
+      horario_fim: u.horario_fim || ''
     });
     setShowAddInitialUserModal(true);
   };
@@ -606,8 +550,8 @@ export default function CondominiumList() {
       toast.error('O nome completo é obrigatório.');
       return;
     }
-    if (!initialUserForm.email.trim()) {
-      toast.error('O e-mail é obrigatório.');
+    if (normalizeRole(initialUserForm.role) !== 'porteiro' && !initialUserForm.email.trim()) {
+      toast.error('O e-mail é obrigatório para este perfil.');
       return;
     }
 
@@ -621,7 +565,9 @@ export default function CondominiumList() {
       phone: initialUserForm.phone.trim(),
       cpf: initialUserForm.cpf.trim(),
       password: initialUserForm.password.trim(),
-      active: initialUserForm.active
+      active: initialUserForm.active,
+      horario_inicio: initialUserForm.horario_inicio || '',
+      horario_fim: initialUserForm.horario_fim || ''
     };
 
     if (editingInitialUserIndex !== null) {
@@ -1075,6 +1021,51 @@ export default function CondominiumList() {
             <div className="p-6 overflow-y-auto flex-1 space-y-6">
               {condoTab === 'details' ? (
                 <div className="space-y-6">
+                  {/* Acesso Operacional da Portaria */}
+                  <div className="bg-emerald-50 border border-emerald-200 p-4 rounded-2xl space-y-3">
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                      <div>
+                        <span className="text-xs font-extrabold uppercase tracking-wider text-emerald-800 block">
+                          Acesso Operacional da Portaria
+                        </span>
+                        <span className="text-sm font-bold text-emerald-950">
+                          Portaria: {selectedCondo.portaria_name || selectedCondo.name}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setRegenerateConfirmCondo(selectedCondo)}
+                        className="px-3.5 py-2 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl text-xs font-extrabold transition-all flex items-center gap-1.5 shadow-sm"
+                      >
+                        <Key className="w-4 h-4" />
+                        <span>Gerar Novo Código</span>
+                      </button>
+                    </div>
+
+                    <div className="flex items-center gap-3 bg-white p-3 rounded-xl border border-emerald-200">
+                      <div className="flex-1">
+                        <span className="text-[10px] font-bold uppercase text-emerald-600 block">Código de Acesso da Portaria</span>
+                        <span className="text-base font-black text-zinc-900 tracking-wider font-mono">
+                          {selectedCondo.portaria_access_code || 'Não gerado'}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (selectedCondo.portaria_access_code) {
+                            navigator.clipboard.writeText(selectedCondo.portaria_access_code);
+                            toast.success("Código da portaria copiado!");
+                          }
+                        }}
+                        className="p-2 hover:bg-emerald-50 text-emerald-700 rounded-lg transition-colors flex items-center gap-1 text-xs font-bold"
+                        title="Copiar código"
+                      >
+                        <Copy className="w-4 h-4" />
+                        <span>Copiar</span>
+                      </button>
+                    </div>
+                  </div>
+
                   {/* Informações Principais */}
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="bg-zinc-50 p-4 rounded-2xl border border-zinc-100 space-y-3">
@@ -1210,7 +1201,7 @@ export default function CondominiumList() {
                             <tr key={u.id} className="hover:bg-zinc-50/50 transition-colors">
                               <td className="px-4 py-3 font-bold text-zinc-900">
                                 <div>{u.full_name}</div>
-                                {u.email && <div className="text-[11px] text-zinc-400 font-normal">{u.email}</div>}
+                                {u.email && normalizeRole(u.role) !== 'porteiro' && <div className="text-[11px] text-zinc-400 font-normal">{u.email}</div>}
                               </td>
 
                               <td className="px-4 py-3">
@@ -1249,13 +1240,15 @@ export default function CondominiumList() {
                                     <Power className="w-3.5 h-3.5" />
                                   </button>
 
-                                  <button
-                                    onClick={() => setUserToReset(u)}
-                                    className="p-1.5 hover:bg-blue-50 rounded-lg text-blue-600"
-                                    title="Resetar Senha"
-                                  >
-                                    <Key className="w-3.5 h-3.5" />
-                                  </button>
+                                  {normalizeRole(u.role) !== 'porteiro' && (
+                                    <button
+                                      onClick={() => setUserToReset(u)}
+                                      className="p-1.5 hover:bg-blue-50 rounded-lg text-blue-600"
+                                      title="Resetar Senha"
+                                    >
+                                      <Key className="w-3.5 h-3.5" />
+                                    </button>
+                                  )}
 
                                   <button
                                     onClick={() => setUserToDelete(u)}
@@ -1504,8 +1497,8 @@ export default function CondominiumList() {
                                     </span>
                                   </div>
                                   <div className="flex items-center gap-2 text-xs text-zinc-500 mt-0.5 flex-wrap">
-                                    <span>{u.email}</span>
-                                    {u.phone && <span>• {u.phone}</span>}
+                                    {u.email && normalizeRole(u.role) !== 'porteiro' && <span>{u.email}</span>}
+                                    {u.phone && <span>{u.email && normalizeRole(u.role) !== 'porteiro' ? '• ' : ''}{u.phone}</span>}
                                     {u.cpf && <span>• CPF: {u.cpf}</span>}
                                   </div>
                                 </div>
@@ -1571,109 +1564,24 @@ export default function CondominiumList() {
         </div>
       )}
 
-      {/* MODAL ADICIONAR / EDITAR USUÁRIO DENTRO DO CONDOMÍNIO */}
-      {(showAddUserModal || userToEdit) && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in zoom-in-95 duration-200">
-          <div className="bg-white rounded-3xl w-full max-w-md shadow-2xl p-6 space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b border-zinc-100">
-              <h3 className="text-lg font-bold text-zinc-900">
-                {userToEdit ? 'Editar Usuário' : 'Novo Usuário do Condomínio'}
-              </h3>
-              <button
-                onClick={() => {
-                  setShowAddUserModal(false);
-                  setUserToEdit(null);
-                }}
-                className="p-1.5 text-zinc-400 hover:text-zinc-600 rounded-lg"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <form onSubmit={userToEdit ? handleUpdateUser : handleCreateUserInCondo} className="space-y-4">
-              <div>
-                <label className="block text-xs font-bold text-zinc-700 uppercase tracking-wider mb-1">
-                  Nome Completo *
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={userForm.full_name}
-                  onChange={(e) => setUserForm({ ...userForm, full_name: e.target.value })}
-                  className="w-full px-4 py-2.5 rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 text-sm font-medium"
-                  placeholder="Nome do usuário"
-                />
-              </div>
-
-              {!userToEdit && (
-                <div>
-                  <label className="block text-xs font-bold text-zinc-700 uppercase tracking-wider mb-1">
-                    E-mail *
-                  </label>
-                  <input
-                    type="email"
-                    required
-                    value={userForm.email}
-                    onChange={(e) => setUserForm({ ...userForm, email: e.target.value })}
-                    className="w-full px-4 py-2.5 rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 text-sm font-medium"
-                    placeholder="email@exemplo.com"
-                  />
-                </div>
-              )}
-
-              <div>
-                <label className="block text-xs font-bold text-zinc-700 uppercase tracking-wider mb-1">
-                  Telefone / WhatsApp
-                </label>
-                <input
-                  type="text"
-                  value={userForm.phone}
-                  onChange={(e) => setUserForm({ ...userForm, phone: e.target.value })}
-                  className="w-full px-4 py-2.5 rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 text-sm font-medium"
-                  placeholder="(11) 99999-9999"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-zinc-700 uppercase tracking-wider mb-1">
-                  Perfil de Acesso *
-                </label>
-                <select
-                  value={userForm.role}
-                  onChange={(e) => setUserForm({ ...userForm, role: e.target.value as Role })}
-                  className="w-full px-4 py-2.5 rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 text-sm font-medium bg-white"
-                >
-                  <option value="sindico">Síndico</option>
-                  <option value="porteiro">Porteiro</option>
-                  <option value="admin">Administrador</option>
-                </select>
-              </div>
-
-              <div className="flex gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowAddUserModal(false);
-                    setUserToEdit(null);
-                  }}
-                  className="flex-1 py-2.5 px-4 rounded-xl font-bold text-zinc-600 hover:bg-zinc-100 transition-all text-xs"
-                >
-                  Cancelar
-                </button>
-
-                <button
-                  type="submit"
-                  disabled={actionLoading}
-                  className="flex-1 py-2.5 px-4 bg-emerald-600 text-white rounded-xl font-bold hover:bg-emerald-700 transition-all text-xs flex items-center justify-center gap-2"
-                >
-                  {actionLoading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                  <span>{userToEdit ? 'Salvar' : 'Criar Usuário'}</span>
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      {/* MODAL ADICIONAR / EDITAR USUÁRIO DENTRO DO CONDOMÍNIO (UTILIZANDO COMPONENTE PADRONIZADO) */}
+      <UserFormModal
+        isOpen={showAddUserModal || !!userToEdit}
+        onClose={() => {
+          setShowAddUserModal(false);
+          setUserToEdit(null);
+        }}
+        currentUser={user}
+        editingUser={userToEdit}
+        condominiums={condos}
+        presetCondominiumId={selectedCondo?.id}
+        onSuccess={(savedUser, isEdit) => {
+          if (selectedCondo) {
+            fetchCondoUsers(selectedCondo.id);
+          }
+          fetchCondominiums();
+        }}
+      />
 
       {/* MODAL RESET DE SENHA DE USUÁRIO */}
       {userToReset && (
@@ -1830,7 +1738,7 @@ export default function CondominiumList() {
       {/* MODAL SUB-FORMULÁRIO PARA ADICIONAR/EDITAR USUÁRIO DA LISTA INICIAL */}
       {showAddInitialUserModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in zoom-in-95 duration-200">
-          <div className="bg-white rounded-3xl w-full max-w-md shadow-2xl p-6 space-y-4">
+          <div className="bg-white rounded-3xl w-full max-w-md shadow-2xl p-6 space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-zinc-100">
               <div className="flex items-center gap-2">
                 <div className="w-8 h-8 bg-emerald-100 text-emerald-600 rounded-xl flex items-center justify-center">
@@ -1897,17 +1805,64 @@ export default function CondominiumList() {
                 </div>
               </div>
 
+              {normalizeRole(initialUserForm.role) === 'porteiro' && (
+                <div className="space-y-3 p-3.5 bg-zinc-50 rounded-2xl border border-zinc-100">
+                  <div>
+                    <label className="block text-xs font-bold text-zinc-600 uppercase tracking-wider mb-1">
+                      Escala de Trabalho
+                    </label>
+                    <select
+                      value={
+                        SHIFT_PRESETS.find(p => p.inicio === initialUserForm.horario_inicio && p.fim === initialUserForm.horario_fim)?.label || 'Horário Personalizado'
+                      }
+                      onChange={e => {
+                        const selected = SHIFT_PRESETS.find(p => p.label === e.target.value);
+                        if (selected && selected.inicio !== 'custom') {
+                          setInitialUserForm({ ...initialUserForm, horario_inicio: selected.inicio, horario_fim: selected.fim });
+                        }
+                      }}
+                      className="w-full px-3.5 py-2 rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 bg-white text-xs font-medium"
+                    >
+                      {SHIFT_PRESETS.map((preset, idx) => (
+                        <option key={idx} value={preset.label}>{preset.label}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <div>
+                      <label className="block text-[11px] font-medium text-zinc-600 mb-1">Horário de Entrada</label>
+                      <input
+                        type="time"
+                        value={initialUserForm.horario_inicio || ''}
+                        onChange={e => setInitialUserForm({ ...initialUserForm, horario_inicio: e.target.value })}
+                        className="w-full px-3 py-2 rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 text-xs font-medium"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-zinc-600 mb-1">Horário de Saída</label>
+                      <input
+                        type="time"
+                        value={initialUserForm.horario_fim || ''}
+                        onChange={e => setInitialUserForm({ ...initialUserForm, horario_fim: e.target.value })}
+                        className="w-full px-3 py-2 rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 text-xs font-medium"
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
               <div>
                 <label className="block text-xs font-bold text-zinc-700 uppercase tracking-wider mb-1">
-                  E-mail *
+                  E-mail {normalizeRole(initialUserForm.role) === 'porteiro' ? <span className="text-zinc-400 font-normal text-xs lowercase">(opcional)</span> : '*'}
                 </label>
                 <input
                   type="email"
-                  required
+                  required={normalizeRole(initialUserForm.role) !== 'porteiro'}
                   value={initialUserForm.email}
                   onChange={(e) => setInitialUserForm({ ...initialUserForm, email: e.target.value })}
                   className="w-full px-3.5 py-2.5 rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 text-sm font-medium"
-                  placeholder="usuario@condominio.com"
+                  placeholder={normalizeRole(initialUserForm.role) === 'porteiro' ? 'Opcional (gerado automaticamente)' : 'usuario@condominio.com'}
                 />
               </div>
 
@@ -1971,6 +1926,44 @@ export default function CondominiumList() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Regenerar Código de Acesso da Portaria */}
+      {regenerateConfirmCondo && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fade-in">
+          <div className="bg-white rounded-3xl p-6 max-w-md w-full shadow-2xl space-y-4 border border-zinc-100">
+            <div className="w-12 h-12 bg-amber-100 text-amber-600 rounded-2xl flex items-center justify-center">
+              <AlertTriangle className="w-6 h-6" />
+            </div>
+            <div>
+              <h3 className="text-lg font-extrabold text-zinc-900">Gerar Novo Código da Portaria?</h3>
+              <p className="text-xs text-zinc-600 mt-2 leading-relaxed">
+                Ao gerar um novo código de acesso, o código anterior e a sessão do dispositivo atualmente vinculado à portaria do condomínio <strong className="text-zinc-900">{regenerateConfirmCondo.name}</strong> serão <strong>invalidados imediatamente</strong>.
+              </p>
+              <p className="text-xs text-amber-800 font-semibold bg-amber-50 p-2.5 rounded-xl border border-amber-200 mt-2">
+                O dispositivo instalado na guarita precisará ser ativado novamente informando o novo código.
+              </p>
+            </div>
+            <div className="flex items-center gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setRegenerateConfirmCondo(null)}
+                className="flex-1 py-3 text-xs font-extrabold text-zinc-600 hover:bg-zinc-100 rounded-xl transition-all"
+                disabled={regeneratingLoading}
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={() => handleRegeneratePortariaCode(regenerateConfirmCondo)}
+                className="flex-1 py-3 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-extrabold transition-all shadow-md flex items-center justify-center gap-2"
+                disabled={regeneratingLoading}
+              >
+                {regeneratingLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Confirmar e Invalidar Anterior'}
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -1,10 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
+import { api } from '../lib/apiClient';
 import { Condominium, Profile } from '../types';
 import { Building, Loader2, Search, MapPin, CheckCircle } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 
+import { clearActivePlantao } from '../lib/plantaoUtils';
+import { clearManualPorter } from '../lib/porterUtils';
 import { normalizeRole } from '../lib/authUtils';
 
 interface SelectCondominiumProps {
@@ -42,32 +45,20 @@ export default function SelectCondominium({ user, onUpdateUser }: SelectCondomin
   const handleSelect = async (condoId: string) => {
     setSelecting(condoId);
     try {
-      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
-      if (sessionError || !session) {
-        toast.error('Sessão não encontrada. Por favor, faça login novamente.');
-        setSelecting(null);
-        return;
-      }
+      const res = await api.post('/api/profiles/select-condominium', { condominiumId: condoId });
 
-      const response = await fetch('/api/profiles/select-condominium', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session.access_token}`
-        },
-        body: JSON.stringify({ condominiumId: condoId })
-      });
-
-      const result = await response.json();
-
-      if (!response.ok) {
-        throw new Error(result.error || 'Erro ao selecionar condomínio');
+      if (!res.ok) {
+        throw new Error(res.error || 'Erro ao selecionar condomínio');
       }
 
       toast.success('Condomínio selecionado com sucesso!');
-      onUpdateUser(result.profile);
+      clearActivePlantao();
+      clearManualPorter();
+      if (res.data?.profile) {
+        onUpdateUser(res.data.profile);
+      }
       
-      const role = normalizeRole(result.profile.role);
+      const role = normalizeRole(res.data?.profile?.role);
       if (role === 'porteiro') {
         navigate('/portaria');
       } else if (role === 'admin' || role === 'sindico') {

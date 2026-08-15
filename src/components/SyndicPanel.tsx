@@ -6,7 +6,8 @@ import {
   Clock, Phone, Home, Calendar, ArrowUpRight, ArrowDownRight,
   AlertCircle, RefreshCw, Trash2, Edit2, Eye, UserPlus, Power,
   TrendingUp, Truck, Mail, MessageSquare, User, LogOut, QrCode,
-  Shield, FileText, History, Camera, ArrowLeft, Plus, Smartphone, Zap
+  Shield, FileText, History, Camera, ArrowLeft, Plus, Smartphone, Zap,
+  FileSpreadsheet
 } from 'lucide-react';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, 
@@ -17,12 +18,14 @@ import { formatDate, formatSafeDateTime, formatSafeDate } from '../lib/dateUtils
 import { formatResidentAddress, formatPackageUnit } from '../lib/residentUtils';
 import { ptBR } from 'date-fns/locale';
 import { supabase } from '../lib/supabase';
+import { api } from '../lib/apiClient';
 import { Profile, Package as PackageType, Notification, MessageLog, WhatsAppConversation, CondominiumSettings } from '../types';
 import { toast } from 'react-hot-toast';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { motion } from 'motion/react';
 import { testZApiConnection } from '../services/whatsappService';
+import ResidentImporterModal from './ResidentImporterModal';
 
 
 
@@ -468,9 +471,20 @@ const PackagesList = ({ user, counts: externalCounts }: any) => {
     }
   };
 
+const isValidUuid = (id?: string | null): boolean => {
+  if (!id) return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+};
+
   const handleConfirmDelivery = async (method: 'manual' | 'qr_code' | 'photo' | 'code' | 'CÓDIGO' = 'manual') => {
-    if (!pkgForDelivery) return;
+    if (!pkgForDelivery || actionLoading) return;
     
+    const targetId = pkgForDelivery.package_id || pkgForDelivery.id;
+    if (!targetId) {
+      toast.error("ID da encomenda não informado");
+      return;
+    }
+
     const hasCodeInput = confirmationCode.trim().length > 0;
     const hasPhoto = !!deliveryPhoto;
     const isQrCode = pkgForDelivery.delivery_method === 'qr_code';
@@ -497,24 +511,27 @@ const PackagesList = ({ user, counts: externalCounts }: any) => {
       }
 
       const { data: { user: authUser } } = await supabase.auth.getUser();
+      const validDeliveredBy = (authUser?.id && isValidUuid(authUser.id)) 
+        ? authUser.id 
+        : (user?.id && isValidUuid(user.id) ? user.id : null);
 
       const { error } = await supabase
         .from('packages')
         .update({ 
           status: 'delivered', 
           delivered_at: new Date().toISOString(),
-          delivered_by: authUser?.id || user.id,
+          delivered_by: validDeliveredBy,
           entregue_por: (getCurrentPorter() && getCurrentPorter() !== 'Selecione o Porteiro') ? getCurrentPorter() : user.full_name,
           delivery_method: finalMethod,
           delivery_photo_url: finalPhotoUrl
         })
-        .eq('id', pkgForDelivery.package_id);
+        .eq('id', targetId);
       
       if (error) throw error;
       setIsDeliverySuccess(true);
       
       // Update local state
-      setPackages(prev => prev.map(p => p.package_id === pkgForDelivery.package_id ? { 
+      setPackages(prev => prev.map(p => (p.package_id === targetId || p.id === targetId) ? { 
         ...p, 
         status: 'delivered', 
         delivered_at: new Date().toISOString(),
@@ -533,8 +550,9 @@ const PackagesList = ({ user, counts: externalCounts }: any) => {
         setDeliveryPhoto(null);
         setConfirmationCode('');
       }, 2000);
-    } catch (err) {
-      toast.error("Erro ao processar entrega");
+    } catch (err: any) {
+      console.error("Erro ao confirmar entrega:", err);
+      toast.error(`Erro ao processar entrega: ${err.message || 'Falha no banco de dados'}`);
     } finally {
       setActionLoading(false);
     }
@@ -1519,6 +1537,7 @@ const HistoryTab = ({ user }: any) => {
 const ResidentsList = ({ user, residents = [], onUpdate }: any) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isImporterOpen, setIsImporterOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [editingResident, setEditingResident] = useState<any>(null);
   const [formData, setFormData] = useState({
@@ -1633,7 +1652,7 @@ const ResidentsList = ({ user, residents = [], onUpdate }: any) => {
 
   return (
     <div className="space-y-4">
-      <div className="flex justify-between items-center">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div className="relative w-full max-w-xs">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
           <input 
@@ -1643,12 +1662,20 @@ const ResidentsList = ({ user, residents = [], onUpdate }: any) => {
             placeholder="Buscar morador..." 
           />
         </div>
-        {normalizeRole(user.role) !== 'sindico' && (
+        <div className="flex flex-col gap-2 w-full sm:w-auto items-stretch sm:items-end">
           <Button onClick={() => { setEditingResident(null); setFormData({ nome: '', unidade: '', telefone: '', ativo: true, unit_type: '', block: '', lote: '', street: '' }); setIsModalOpen(true); }}>
             <UserPlus className="w-4 h-4" />
             Novo Morador
           </Button>
-        )}
+          <Button
+            variant="outline"
+            onClick={() => setIsImporterOpen(true)}
+            className="flex items-center justify-center gap-2 border-zinc-200 hover:bg-zinc-50 text-zinc-700"
+          >
+            <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+            Importar Planilha
+          </Button>
+        </div>
       </div>
 
       <Card className="p-0 overflow-hidden">
@@ -1664,17 +1691,45 @@ const ResidentsList = ({ user, residents = [], onUpdate }: any) => {
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-50">
-              {filtered.map((res: any) => (
-                <tr key={res.id} className={`hover:bg-zinc-50 transition-colors group ${!res.ativo ? 'opacity-60 grayscale' : ''}`}>
-                  <td className="px-6 py-4 font-bold text-zinc-900">{res.nome}</td>
-                  <td className="px-6 py-4 text-sm text-zinc-600">{formatResidentAddress(res)}</td>
-                  <td className="px-6 py-4 text-sm text-zinc-600">{res.telefone}</td>
-                  <td className="px-6 py-4">
-                    <span className={`px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${res.ativo ? 'bg-emerald-100 text-emerald-700' : 'bg-zinc-200 text-zinc-600'}`}>
-                      {res.ativo ? 'Ativo' : 'Inativo'}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4 text-right relative">
+              {filtered.map((res: any) => {
+                const hasValidRes = Boolean(res.unidade && String(res.unidade).trim().length > 0);
+                const hasPhone = Boolean(res.telefone && String(res.telefone).trim().length > 0);
+                const isPendingWhatsApp = hasValidRes && !hasPhone;
+
+                return (
+                  <tr key={res.id} className={`hover:bg-zinc-50 transition-colors group ${!res.ativo ? 'opacity-60 grayscale' : ''}`}>
+                    <td className="px-6 py-4 font-bold text-zinc-900">{res.nome}</td>
+                    <td className="px-6 py-4 text-sm font-semibold text-zinc-800">
+                      {hasValidRes ? (
+                        formatResidentAddress(res)
+                      ) : (
+                        <span className="text-red-600 font-bold italic text-xs">Inconsistente — Residência obrigatória</span>
+                      )}
+                    </td>
+                    <td className="px-6 py-4 text-sm text-zinc-600">
+                      {hasPhone ? (
+                        <span className="font-mono">{res.telefone}</span>
+                      ) : isPendingWhatsApp ? (
+                        <span className="inline-flex items-center gap-1 text-xs font-bold text-amber-800 bg-amber-50 px-2.5 py-1 rounded-lg border border-amber-200">
+                          Adicione o WhatsApp!
+                        </span>
+                      ) : (
+                        <span className="text-zinc-400 italic text-xs">---</span>
+                      )}
+                    </td>
+                    <td className="px-6 py-4">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${res.ativo ? 'bg-emerald-100 text-emerald-700' : 'bg-zinc-200 text-zinc-600'}`}>
+                          {res.ativo ? 'Ativo' : 'Inativo'}
+                        </span>
+                        {isPendingWhatsApp && res.ativo && (
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-amber-100 text-amber-800">
+                            Pendente
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-6 py-4 text-right relative">
                     <div className="flex justify-end">
                       <button
                         onClick={() => setActiveResidentMenu(activeResidentMenu === res.id ? null : res.id)}
@@ -1737,7 +1792,8 @@ const ResidentsList = ({ user, residents = [], onUpdate }: any) => {
                     </div>
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -1839,6 +1895,13 @@ const ResidentsList = ({ user, residents = [], onUpdate }: any) => {
           </Button>
         </form>
       </Modal>
+
+      <ResidentImporterModal
+        isOpen={isImporterOpen}
+        onClose={() => setIsImporterOpen(false)}
+        user={user}
+        onImportComplete={onUpdate}
+      />
     </div>
   );
 };
@@ -2149,26 +2212,17 @@ const SettingsPanel = ({ user, systemStatus, onUpdateUser }: any) => {
     e.preventDefault();
     setCreatingCondo(true);
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) throw new Error('Sessão não encontrada');
+      const res = await api.post('/api/condominiums/create', { name: newCondoName, address: newCondoAddress });
 
-      const response = await fetch('/api/condominiums/create', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session.access_token}`
-        },
-        body: JSON.stringify({ name: newCondoName, address: newCondoAddress })
-      });
-
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error || 'Erro ao criar condomínio');
+      if (!res.ok) throw new Error(res.error || 'Erro ao criar condomínio');
 
       toast.success('Condomínio criado com sucesso!');
       setShowNewCondoModal(false);
       setNewCondoName('');
       setNewCondoAddress('');
-      onUpdateUser(result.profile);
+      if (res.data?.profile) {
+        onUpdateUser(res.data.profile);
+      }
       navigate('/dashboard');
     } catch (err: any) {
       toast.error(err.message);

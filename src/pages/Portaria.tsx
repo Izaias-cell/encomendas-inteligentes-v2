@@ -40,13 +40,22 @@ import {
   Layers,
   ChevronLeft,
   ChevronRight,
-  Image as ImageIcon
+  Image as ImageIcon,
+  FileSpreadsheet
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { formatDate, formatSafeDateTime } from '../lib/dateUtils';
 import { getResidentAddressLines, formatPackageUnit } from '../lib/residentUtils';
 import { ptBR } from 'date-fns/locale';
 import { getCurrentPorter, setManualPorter, clearManualPorter } from '../lib/porterUtils';
+import { 
+  getActivePlantao, 
+  setActivePlantao as saveActivePlantao, 
+  clearActivePlantao, 
+  isTimeInShift, 
+  isPlantaoExpired, 
+  PlantaoAtivo 
+} from '../lib/plantaoUtils';
 
 import toast from 'react-hot-toast';
 import { registrarAuditoria } from '../services/auditService';
@@ -57,6 +66,7 @@ import { CondominiumSettings } from '../types';
 
 import PackageItem from '../components/portaria/PackageItem';
 import ResidentCard from '../components/portaria/ResidentCard';
+import ResidentImporterModal from '../components/ResidentImporterModal';
 
 interface PortariaProps {
   user: Profile;
@@ -77,6 +87,7 @@ export default function Portaria({ user }: PortariaProps) {
 
   const [activeTab, setActiveTab] = useState<'pending' | 'delivered' | 'all' | 'residents'>('pending');
   const [activeResidentMenu, setActiveResidentMenu] = useState<string | null>(null);
+  const [isImporterOpen, setIsImporterOpen] = useState(false);
   const navigate = useNavigate();
 
   // Batch WhatsApp State
@@ -90,8 +101,163 @@ export default function Portaria({ user }: PortariaProps) {
   const [batchPackages, setBatchPackages] = useState<Package[]>([]);
   const [notificationSuccess, setNotificationSuccess] = useState(false);
   const [condoName, setCondoName] = useState('');
-  const [currentPorter, setCurrentPorter] = useState(getCurrentPorter());
+  const [currentPorter, setCurrentPorter] = useState(() => getCurrentPorter(user?.condominium_id));
   const [showPorterModal, setShowPorterModal] = useState(false);
+
+  // Shift Management States (FASE 3, 4, 5, 6, 7 & 8)
+  const [activePlantao, setActivePlantaoState] = useState<PlantaoAtivo | null>(() => getActivePlantao(user?.condominium_id));
+  const [porteirosList, setPorteirosList] = useState<Profile[]>([]);
+  const [showShiftModal, setShowShiftModal] = useState<boolean>(() => {
+    const current = getActivePlantao(user?.condominium_id);
+    return !current || isPlantaoExpired(current);
+  });
+  const [isShiftExpired, setIsShiftExpired] = useState<boolean>(false);
+
+  // Substitution State (FASE 7)
+  const [showSubstitutionModal, setShowSubstitutionModal] = useState<boolean>(false);
+  const [selectedSubstituto, setSelectedSubstituto] = useState<Profile | null>(null);
+  const [selectedSubstituido, setSelectedSubstituido] = useState<Profile | null>(null);
+  const [motivoSubstituicao, setMotivoSubstituicao] = useState<string>('Troca de Turno');
+  const [obsSubstituicao, setObsSubstituicao] = useState<string>('');
+
+  const fetchPorteiros = async () => {
+    if (!user?.condominium_id) return;
+    try {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('condominium_id', user.condominium_id)
+        .eq('role', 'porteiro')
+        .eq('active', true)
+        .order('full_name');
+
+      if (!error && data) {
+        setPorteirosList(data);
+      }
+    } catch (err) {
+      console.error('Erro ao buscar porteiros:', err);
+    }
+  };
+
+  useEffect(() => {
+    if (user?.condominium_id) {
+      const current = getActivePlantao(user.condominium_id);
+      setActivePlantaoState(current);
+      setCurrentPorter(getCurrentPorter(user.condominium_id));
+      setShowShiftModal(!current || isPlantaoExpired(current));
+      fetchPorteiros();
+    }
+  }, [user?.condominium_id]);
+
+  useEffect(() => {
+    const checkInterval = setInterval(() => {
+      const current = getActivePlantao(user?.condominium_id);
+      if (current) {
+        if (isPlantaoExpired(current)) {
+          setIsShiftExpired(true);
+          setShowShiftModal(true);
+        } else {
+          setIsShiftExpired(false);
+        }
+      } else {
+        setShowShiftModal(true);
+      }
+    }, 30000);
+
+    return () => clearInterval(checkInterval);
+  }, [user?.condominium_id]);
+
+  const handleSelectPlantao = (porteiro: Profile) => {
+    const now = new Date();
+    const inShift = isTimeInShift(now, porteiro.horario_inicio, porteiro.horario_fim);
+
+    if (!inShift) {
+      setSelectedSubstituto(porteiro);
+      setShowSubstitutionModal(true);
+      return;
+    }
+
+    const newPlantao: PlantaoAtivo = {
+      id: porteiro.id,
+      condominium_id: user?.condominium_id || '',
+      porteiro_id: porteiro.id,
+      porteiro_nome: porteiro.full_name,
+      horario_inicio: porteiro.horario_inicio || '00:00',
+      horario_fim: porteiro.horario_fim || '23:59',
+      started_at: new Date().toISOString(),
+      substituicao: {
+        is_substituicao: false
+      }
+    };
+
+    saveActivePlantao(newPlantao);
+    setActivePlantaoState(newPlantao);
+    setCurrentPorter(porteiro.full_name);
+    setManualPorter(porteiro.full_name, user?.condominium_id);
+    setShowShiftModal(false);
+    setShowPorterModal(false);
+    setIsShiftExpired(false);
+
+    registrarAuditoria({
+      condominio_id: user?.condominium_id || '',
+      usuario_id: user?.id || '',
+      usuario_nome: user?.full_name || 'Porteiro',
+      usuario_perfil: user?.role || 'porteiro',
+      tipo_evento: 'INICIO_PLANTAO',
+      acao: 'CREATE',
+      tabela_afetada: 'profiles',
+      registro_id: porteiro.id,
+      descricao: `Início do plantão assumido por ${porteiro.full_name} (${porteiro.horario_inicio || '00:00'} às ${porteiro.horario_fim || '23:59'})`,
+      metodo: 'SISTEMA'
+    }).catch(() => {});
+
+    toast.success(`Plantão iniciado com sucesso! Porteiro responsável: ${porteiro.full_name} 🕒`);
+  };
+
+  const handleConfirmSubstitution = () => {
+    if (!selectedSubstituto) return;
+
+    const newPlantao: PlantaoAtivo = {
+      id: selectedSubstituto.id,
+      condominium_id: user?.condominium_id || '',
+      porteiro_id: selectedSubstituto.id,
+      porteiro_nome: selectedSubstituto.full_name,
+      horario_inicio: selectedSubstituto.horario_inicio || '00:00',
+      horario_fim: selectedSubstituto.horario_fim || '23:59',
+      started_at: new Date().toISOString(),
+      substituicao: {
+        is_substituicao: true,
+        substituido_id: selectedSubstituido?.id,
+        substituido_nome: selectedSubstituido?.full_name,
+        motivo: motivoSubstituicao,
+        observacoes: obsSubstituicao
+      }
+    };
+
+    saveActivePlantao(newPlantao);
+    setActivePlantaoState(newPlantao);
+    setCurrentPorter(selectedSubstituto.full_name);
+    setManualPorter(selectedSubstituto.full_name, user?.condominium_id);
+    setShowSubstitutionModal(false);
+    setShowShiftModal(false);
+    setShowPorterModal(false);
+    setIsShiftExpired(false);
+
+    registrarAuditoria({
+      condominio_id: user?.condominium_id || '',
+      usuario_id: user?.id || '',
+      usuario_nome: user?.full_name || 'Porteiro',
+      usuario_perfil: user?.role || 'porteiro',
+      tipo_evento: 'SUBSTITUICAO_PLANTAO',
+      acao: 'CREATE',
+      tabela_afetada: 'profiles',
+      registro_id: selectedSubstituto.id,
+      descricao: `Substituição de plantão registrada: Substituto ${selectedSubstituto.full_name}${selectedSubstituido ? ` (no lugar de ${selectedSubstituido.full_name})` : ''}. Motivo: ${motivoSubstituicao}. Obs: ${obsSubstituicao || 'Nenhuma'}`,
+      metodo: 'SISTEMA'
+    }).catch(() => {});
+
+    toast.success(`Substituição de plantão registrada! Porteiro: ${selectedSubstituto.full_name} 🔁`);
+  };
 
   useEffect(() => {
     if (currentPorter === 'Selecione o Porteiro') {
@@ -1396,10 +1562,15 @@ export default function Portaria({ user }: PortariaProps) {
     }
   };
 
-  const handleDeliver = async (pkgId: string, method: 'manual' | 'qr_code' | 'photo' | 'foto' | 'code' | 'CÓDIGO' | 'CONFIRMADO_PELO_MORADOR' = 'manual', photoOverride?: string, packageData?: Package) => {
+const isValidUuid = (id?: string | null): boolean => {
+  if (!id) return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+};
+
+  const handleDeliver = async (pkgId: string, method: 'manual' | 'qr_code' | 'photo' | 'foto' | 'code' | 'CÓDIGO' | 'CONFIRMADO_PELO_MORADOR' = 'manual', photoOverride?: string, packageData?: Package): Promise<boolean> => {
     if (!pkgId) {
       toast.error('ID da encomenda não encontrado');
-      return;
+      return false;
     }
 
     // Usar dados passados ou do estado
@@ -1432,22 +1603,38 @@ export default function Portaria({ user }: PortariaProps) {
       const pickupToken = activePackage?.pickup_token;
       const pickupCode = activePackage?.pickup_code;
 
-      // REQUISITO CRÍTICO: Buscar/Utilizar todos os IDs do grupo ou buscar semelhantes
+      // Buscar IDs exatos do grupo ou correspondentes ao token/código e morador
       let idsToUpdate: string[] = [pkgId];
       const activePkgAny = activePackage as any;
       if (activePkgAny?.isGroup && activePkgAny?.packages && activePkgAny.packages.length > 0) {
-        idsToUpdate = activePkgAny.packages.map((p: any) => p.id);
-      } else {
+        idsToUpdate = activePkgAny.packages.map((p: any) => p.id || p.package_id).filter(Boolean);
+      } else if (pickupToken) {
         const { data: relatedPackages } = await supabase
           .from('packages')
           .select('id')
           .eq('condominium_id', user.condominium_id)
-          .in('status', ['received', 'pending'])
-          .or(pickupToken ? `pickup_token.eq.${pickupToken}` : `pickup_code.eq.${pickupCode || 'none'},recipient_id.eq.${activePackage?.recipient_id || 'none'}`);
+          .eq('pickup_token', pickupToken)
+          .in('status', ['received', 'pending']);
 
         if (relatedPackages && relatedPackages.length > 0) {
           idsToUpdate = relatedPackages.map(p => p.id);
         }
+      } else if (pickupCode && activePackage?.recipient_id) {
+        const { data: relatedPackages } = await supabase
+          .from('packages')
+          .select('id')
+          .eq('condominium_id', user.condominium_id)
+          .eq('pickup_code', pickupCode)
+          .eq('recipient_id', activePackage.recipient_id)
+          .in('status', ['received', 'pending']);
+
+        if (relatedPackages && relatedPackages.length > 0) {
+          idsToUpdate = relatedPackages.map(p => p.id);
+        }
+      }
+
+      if (!idsToUpdate.includes(pkgId)) {
+        idsToUpdate.push(pkgId);
       }
 
       const porterNameToSave = (currentPorter && currentPorter !== 'Selecione o Porteiro') ? currentPorter : user.full_name;
@@ -1467,13 +1654,18 @@ export default function Portaria({ user }: PortariaProps) {
         }
       }
 
+      // Validar UUID para entregue_por/delivered_by para evitar erros de sintaxe 22P02 no Postgres
+      const validDeliveredBy = (authUser?.id && isValidUuid(authUser.id)) 
+        ? authUser.id 
+        : (user?.id && isValidUuid(user.id) ? user.id : null);
+
       const { error: updateError } = await supabase
         .from('packages')
         .update({ 
           status: 'delivered',
           delivered_at: new Date().toISOString(),
           delivery_method: finalMethod,
-          delivered_by: authUser?.id || user.id,
+          delivered_by: validDeliveredBy,
           entregue_por: porterNameToSave,
           pickup_qr_code: 'used',
           delivered_to_name: finalDeliveredToName,
@@ -1482,7 +1674,10 @@ export default function Portaria({ user }: PortariaProps) {
         })
         .in('id', idsToUpdate);
 
-      if (updateError) throw updateError;
+      if (updateError) {
+        console.error("Erro ao atualizar status da encomenda:", updateError);
+        throw updateError;
+      }
       
       // Atualização local imediata
       const now = new Date().toISOString();
@@ -1492,7 +1687,7 @@ export default function Portaria({ user }: PortariaProps) {
          delivered_at: now,
          delivery_method: finalMethod,
          entregue_por: porterNameToSave,
-         delivered_by: authUser?.id,
+         delivered_by: validDeliveredBy,
          delivered_to_name: finalDeliveredToName,
          delivery_photo_url: finalPhotoUrl || p.delivery_photo_url
        } : p));
@@ -1527,47 +1722,9 @@ export default function Portaria({ user }: PortariaProps) {
         console.warn('Erro ao registrar auditoria de entrega:', logErr);
       }
 
-      // VALIDAR SE AINDA EXISTE PENDENTE COM ESSE CÓDIGO (Anti-Update-Gap)
-      const { data: remainingPending } = await supabase
-        .from('packages')
-        .select('id')
-        .eq('condominium_id', user.condominium_id)
-        .in('status', ['received', 'pending'])
-        .or(pickupToken ? `pickup_token.eq.${pickupToken}` : `pickup_code.eq.${pickupCode},recipient_id.eq.${activePackage?.recipient_id}`);
-
-      if (remainingPending && remainingPending.length > 0) {
-        throw new Error('Algumas encomendas ainda constam como pendentes. Tente novamente.');
-      }
-
-      // Notificar morador sobre a retirada - DESATIVADO PARA NÃO ABRIR CHAT
-      /*
-      try {
-        const residentToNotify = residents.find(r => r.id === activePackage?.recipient_id);
-        if (residentToNotify) {
-          const retiroMsg = prepareWhatsAppNotification(
-            residentToNotify,
-            condoName,
-            pickupCode || '',
-            undefined,
-            pickupToken || '',
-            idsToUpdate.length,
-            'retirada',
-            currentPorter,
-            // ...
-          );
-        }
-      } catch (notifyErr) {
-        console.warn("Erro ao processar notificação de retirada:", notifyErr);
-      }
-      */
-      
-      const deliveredCount = idsToUpdate.length;
-
-      // Som de confirmação de baixa - Abordagem estável
+      // Som de confirmação de baixa
       playSuccessSound();
 
-      // Aguardar o som iniciar antes de mostrar sucesso e resetar interface
-    setTimeout(() => {
       setIsDeliverySuccess(true);
       toast.success(`Baixa concluída com sucesso`, { duration: 2500 });
       
@@ -1594,7 +1751,6 @@ export default function Portaria({ user }: PortariaProps) {
       fetchData(); 
       setActiveTab('pending');
       
-      // Manter o estado de sucesso visual por 2 segundos antes de fechar o modal e resetar variáveis de UI
       setTimeout(() => {
         setIsScanning(false);
         setIsDeliverySuccess(false);
@@ -1603,13 +1759,14 @@ export default function Portaria({ user }: PortariaProps) {
         setShowManualInput(false);
         setCameraStarted(false);
       }, 2000);
-    }, 50);
+
+      return true;
 
     } catch (error: any) {
       console.error('Erro ao entregar encomenda:', error);
       feedback.error();
       toast.error(`Erro: ${error.message || 'Falha ao confirmar entrega'}`);
-      setQrScanStatus('success');
+      setQrScanStatus('idle');
       return false;
     }
   };
@@ -1679,16 +1836,24 @@ export default function Portaria({ user }: PortariaProps) {
           <div className="flex items-center justify-between gap-8 mt-1 border-b border-zinc-100 pb-2">
             <p className="text-zinc-500 font-medium truncate max-w-[60%] md:max-w-none">{condoName}</p>
             <button 
-              onClick={() => setShowPorterModal(true)}
-              className={`flex items-center gap-1.5 text-[10px] whitespace-nowrap px-3 py-1.5 rounded-full border transition-all active:scale-95 flex-shrink-0 ${
-                currentPorter === 'Selecione o Porteiro' 
-                  ? 'bg-amber-50 text-amber-600 border-amber-200 animate-pulse' 
-                  : 'text-zinc-500 bg-zinc-50 border-zinc-200 hover:bg-zinc-100'
+              onClick={() => setShowShiftModal(true)}
+              className={`flex items-center gap-2 text-[11px] whitespace-nowrap px-3.5 py-1.5 rounded-full border transition-all active:scale-95 flex-shrink-0 font-bold ${
+                !activePlantao || isShiftExpired || currentPorter === 'Selecione o Porteiro'
+                  ? 'bg-amber-50 text-amber-700 border-amber-300 animate-pulse shadow-sm' 
+                  : activePlantao?.substituicao?.is_substituicao
+                  ? 'bg-purple-50 text-purple-700 border-purple-200 hover:bg-purple-100'
+                  : 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100'
               }`}
-              title="Trocar Porteiro"
+              title="Gerenciar Plantão / Trocar Porteiro"
             >
-              <span className="font-medium uppercase tracking-tight flex items-center gap-1.5">
-                {currentPorter === 'Selecione o Porteiro' ? '👤 SELECIONE O PORTEIRO' : `👤 ${currentPorter.toUpperCase()}`}
+              <span className="uppercase tracking-tight flex items-center gap-1.5">
+                👤 {activePlantao ? activePlantao.porteiro_nome.toUpperCase() : 'INICIAR PLANTÃO'}
+                {activePlantao && (
+                  <span className="text-[9px] opacity-80 font-mono font-medium">
+                    ({activePlantao.horario_inicio} - {activePlantao.horario_fim})
+                    {activePlantao.substituicao?.is_substituicao && ' 🔁'}
+                  </span>
+                )}
               </span>
             </button>
           </div>
@@ -1875,19 +2040,32 @@ export default function Portaria({ user }: PortariaProps) {
         />
       </div>
 
-      {activeTab === 'residents' && (user.role === 'admin' || user.role === 'porteiro') && (
+      {activeTab === 'residents' && (
         <div className="flex justify-end mb-6">
-          <button
-            type="button"
-            onClick={(e) => {
-              e.preventDefault();
-              navigate('/profiles/new');
-            }}
-            className="flex items-center gap-2 px-6 py-3 bg-emerald-600 text-white rounded-2xl font-bold hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-200"
-          >
-            <UserPlus className="w-5 h-5" />
-            Adicionar Morador
-          </button>
+          <div className="flex flex-col gap-2 w-full sm:w-auto items-stretch sm:items-end">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.preventDefault();
+                navigate('/profiles/new');
+              }}
+              className="flex items-center justify-center gap-2 px-6 py-3 bg-emerald-600 text-white rounded-2xl font-bold hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-200"
+            >
+              <UserPlus className="w-5 h-5" />
+              Novo Morador
+            </button>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.preventDefault();
+                setIsImporterOpen(true);
+              }}
+              className="flex items-center justify-center gap-2 px-5 py-3 bg-white border border-zinc-200 text-zinc-700 rounded-2xl font-bold hover:bg-zinc-50 transition-all shadow-sm"
+            >
+              <FileSpreadsheet className="w-5 h-5 text-emerald-600" />
+              Importar Planilha
+            </button>
+          </div>
         </div>
       )}
 
@@ -2832,7 +3010,7 @@ export default function Portaria({ user }: PortariaProps) {
                         type="button"
                         disabled={isConfirmingDelivery || (deliveredToType === 'authorized' && !authorizedName.trim())}
                         onClick={async () => {
-                          if (isConfirmingDelivery) return;
+                          if (isConfirmingDelivery || !packageToConfirm) return;
                           
                           setIsConfirmingDelivery(true);
                           
@@ -2848,7 +3026,7 @@ export default function Portaria({ user }: PortariaProps) {
 
                           // Registra no banco
                           try {
-                            await handleDeliver(
+                            const ok = await handleDeliver(
                               packageToConfirm.package_id || packageToConfirm.id, 
                               'CONFIRMADO_PELO_MORADOR' as any, 
                               undefined, 
@@ -2856,17 +3034,19 @@ export default function Portaria({ user }: PortariaProps) {
                             );
                             
                             setIsConfirmingDelivery(false);
-                            setIsDeliverySuccess(true);
-                            
-                            // Aguarda 2 segundos e fecha
-                            setTimeout(() => {
-                              setShowConfirmDelivery(false);
-                              setIsDeliverySuccess(false);
-                              setPackageToConfirm(null);
-                              setDeliveredToType('resident');
-                              setAuthorizedName('');
-                              setAuthorizedDoc('');
-                            }, 2000);
+                            if (ok) {
+                              setIsDeliverySuccess(true);
+                              
+                              // Aguarda 2 segundos e fecha
+                              setTimeout(() => {
+                                setShowConfirmDelivery(false);
+                                setIsDeliverySuccess(false);
+                                setPackageToConfirm(null);
+                                setDeliveredToType('resident');
+                                setAuthorizedName('');
+                                setAuthorizedDoc('');
+                              }, 2000);
+                            }
                           } catch (err) {
                             setIsConfirmingDelivery(false);
                             // O erro já é tratado pelo handleDeliver/toast
@@ -2907,50 +3087,222 @@ export default function Portaria({ user }: PortariaProps) {
         )}
       </AnimatePresence>
 
+      {/* Modal de Início de Plantão / Seleção de Porteiro (FASE 3, 4, 5, 6, 7 & 8) */}
       <AnimatePresence>
-        {showPorterModal && (
+        {(showPorterModal || showShiftModal) && (
           <div className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-zinc-900/80 backdrop-blur-sm">
             <motion.div
               initial={{ opacity: 0, scale: 0.95, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-sm overflow-hidden"
+              className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-md overflow-hidden border border-zinc-100"
             >
-              <div className="p-8">
-                <div className="flex justify-between items-center mb-6">
-                  <h3 className="text-xl font-bold text-zinc-900">Selecionar Porteiro</h3>
-                  <button onClick={() => setShowPorterModal(false)} className="p-2 hover:bg-zinc-100 rounded-full transition-colors text-zinc-400">
-                    <X className="w-5 h-5" />
-                  </button>
-                </div>
-                
-                <div className="grid grid-cols-1 gap-3">
-                  {['Marcos', 'Izaias', 'Rodrigo', 'Marisa', 'Bruno', 'Outro'].map((porter) => (
-                    <button
-                      key={porter}
+              <div className="p-6 md:p-8">
+                <div className="flex justify-between items-start mb-5">
+                  <div className="flex-1 pr-2">
+                    <h3 className="text-lg md:text-xl font-bold text-zinc-900 tracking-tight">
+                      Início de Plantão / Operacional
+                    </h3>
+                    <p className="text-sm md:text-base font-semibold text-zinc-800 mt-2 mb-1 leading-snug">
+                      Quem está assumindo o controle da portaria neste turno?
+                    </p>
+                  </div>
+                  {activePlantao && !isShiftExpired && (
+                    <button 
                       onClick={() => {
-                        setCurrentPorter(porter);
-                        setManualPorter(porter);
                         setShowPorterModal(false);
-                        toast.success(`Porteiro alterado para ${porter}`);
-                      }}
-                      className={`w-full py-4 px-6 rounded-2xl font-bold transition-all text-left flex items-center justify-between border ${
-                        currentPorter === porter 
-                          ? 'bg-emerald-50 border-emerald-200 text-emerald-700' 
-                          : 'bg-zinc-50 border-zinc-100 text-zinc-600 hover:bg-zinc-100 hover:border-zinc-200'
-                      }`}
+                        setShowShiftModal(false);
+                      }} 
+                      className="p-2 hover:bg-zinc-100 rounded-full transition-colors text-zinc-400 shrink-0"
                     >
-                      {porter}
-                      {currentPorter === porter && <Check className="w-5 h-5" />}
+                      <X className="w-5 h-5" />
                     </button>
-                  ))}
+                  )}
                 </div>
 
+                {isShiftExpired && (
+                  <div className="p-3 bg-amber-50 rounded-2xl border border-amber-200 mb-4 text-xs text-amber-800 leading-relaxed flex items-start gap-2">
+                    <Clock className="w-4 h-4 mt-0.5 shrink-0 text-amber-600 animate-pulse" />
+                    <span>
+                      <strong>Turno Anterior Encerrado ({activePlantao?.horario_fim}).</strong>
+                      Por favor, selecione quem está assumindo o novo plantão para continuar operando.
+                    </span>
+                  </div>
+                )}
+
+                <div className="space-y-3 max-h-[350px] overflow-y-auto pr-1 my-4">
+                  {porteirosList.length === 0 ? (
+                    <div className="p-6 text-center text-zinc-400 bg-zinc-50 rounded-2xl">
+                      <User className="w-8 h-8 mx-auto mb-2 text-zinc-300" />
+                      <p className="text-sm font-medium">Nenhum porteiro cadastrado neste condomínio.</p>
+                      <p className="text-xs text-zinc-400 mt-1">Cadastre porteiros no menu "Usuários".</p>
+                    </div>
+                  ) : (
+                    porteirosList.map((porteiro) => {
+                      const now = new Date();
+                      const inShift = isTimeInShift(now, porteiro.horario_inicio, porteiro.horario_fim);
+                      const isCurrent = activePlantao?.porteiro_id === porteiro.id;
+
+                      return (
+                        <button
+                          key={porteiro.id}
+                          onClick={() => handleSelectPlantao(porteiro)}
+                          className={`w-full p-4 rounded-2xl font-bold transition-all text-left flex flex-col gap-1.5 border relative ${
+                            isCurrent
+                              ? 'bg-emerald-50 border-emerald-300 text-emerald-950 ring-2 ring-emerald-500/20'
+                              : inShift
+                              ? 'bg-white border-zinc-200 hover:border-emerald-500 hover:bg-emerald-50/30'
+                              : 'bg-zinc-50 border-zinc-100 text-zinc-600 hover:bg-amber-50/50 hover:border-amber-200'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between w-full">
+                            <span className="font-bold text-sm text-zinc-900">{porteiro.full_name}</span>
+                            {inShift ? (
+                              <span className="text-[10px] bg-emerald-100 text-emerald-700 px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider">
+                                Escalado Agora
+                              </span>
+                            ) : (
+                              <span className="text-[10px] bg-amber-100 text-amber-700 px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider">
+                                Fora da Escala
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="flex items-center gap-2 text-xs text-zinc-500 font-normal">
+                            <Clock className="w-3.5 h-3.5 text-zinc-400" />
+                            <span>Horário: {porteiro.horario_inicio || '00:00'} às {porteiro.horario_fim || '23:59'}</span>
+                          </div>
+
+                          {isCurrent && (
+                            <div className="flex items-center gap-1.5 text-xs text-emerald-600 font-bold mt-1">
+                              <Check className="w-4 h-4" />
+                              <span>Plantão Ativo</span>
+                            </div>
+                          )}
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+
+                {activePlantao && !isShiftExpired && (
+                  <button
+                    onClick={() => {
+                      setShowPorterModal(false);
+                      setShowShiftModal(false);
+                    }}
+                    className="w-full py-3.5 bg-zinc-900 text-white rounded-2xl font-bold hover:bg-black transition-all text-sm"
+                  >
+                    Permanecer no Plantão Atual
+                  </button>
+                )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Modal de Substituição de Plantão (FASE 7) */}
+      <AnimatePresence>
+        {showSubstitutionModal && (
+          <div className="fixed inset-0 z-[80] flex items-center justify-center p-4 bg-zinc-900/80 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-md overflow-hidden border border-zinc-100 p-6 md:p-8"
+            >
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-12 h-12 bg-amber-100 rounded-2xl flex items-center justify-center text-amber-600">
+                  <Clock className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="text-xl font-bold text-zinc-900">Substituição de Plantão</h3>
+                  <p className="text-xs text-zinc-500">Porteiro fora da escala de horário atual</p>
+                </div>
+              </div>
+
+              <div className="p-4 bg-amber-50 rounded-2xl border border-amber-100 mb-5 text-xs text-amber-800 leading-relaxed">
+                O porteiro <strong>{selectedSubstituto?.full_name}</strong> não está escalado para o horário de agora. Deseja registrar uma substituição oficial de plantão?
+              </div>
+
+              <div className="space-y-4 mb-6">
+                <div>
+                  <label className="block text-xs font-bold text-zinc-500 uppercase tracking-wider mb-1">
+                    Porteiro Substituto (Quem Assume)
+                  </label>
+                  <input
+                    type="text"
+                    disabled
+                    value={selectedSubstituto?.full_name || ''}
+                    className="w-full px-4 py-3 bg-zinc-100 rounded-xl font-bold text-zinc-900 text-sm border border-zinc-200"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-zinc-500 uppercase tracking-wider mb-1">
+                    Porteiro Substituído (Titular do Horário)
+                  </label>
+                  <select
+                    value={selectedSubstituido?.id || ''}
+                    onChange={(e) => {
+                      const found = porteirosList.find(p => p.id === e.target.value);
+                      setSelectedSubstituido(found || null);
+                    }}
+                    className="w-full px-4 py-3 bg-white rounded-xl font-medium text-zinc-900 text-sm border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500"
+                  >
+                    <option value="">Selecione quem está sendo substituído (Opcional)</option>
+                    {porteirosList.filter(p => p.id !== selectedSubstituto?.id).map(p => (
+                      <option key={p.id} value={p.id}>{p.full_name} ({p.horario_inicio} às {p.horario_fim})</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-zinc-500 uppercase tracking-wider mb-1">
+                    Motivo da Substituição *
+                  </label>
+                  <select
+                    value={motivoSubstituicao}
+                    onChange={(e) => setMotivoSubstituicao(e.target.value)}
+                    className="w-full px-4 py-3 bg-white rounded-xl font-medium text-zinc-900 text-sm border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500"
+                  >
+                    <option value="Troca de Turno">Troca de Turno Entre Colegas</option>
+                    <option value="Cobertura Especial">Cobertura Especial</option>
+                    <option value="Atestado / Saúde">Atestado Médico / Saúde</option>
+                    <option value="Falta Não Programada">Falta Não Programada</option>
+                    <option value="Outro">Outro Motivo</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-zinc-500 uppercase tracking-wider mb-1">
+                    Observações (Opcional)
+                  </label>
+                  <input
+                    type="text"
+                    value={obsSubstituicao}
+                    onChange={(e) => setObsSubstituicao(e.target.value)}
+                    placeholder="Ex: Autorizado pelo Síndico"
+                    className="w-full px-4 py-3 bg-white rounded-xl font-medium text-zinc-900 text-sm border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
+                </div>
+              </div>
+
+              <div className="flex gap-3">
                 <button
-                  onClick={() => setShowPorterModal(false)}
-                  className="w-full mt-6 py-4 bg-zinc-900 text-white rounded-2xl font-bold hover:bg-zinc-800 transition-all"
+                  type="button"
+                  onClick={() => setShowSubstitutionModal(false)}
+                  className="flex-1 py-3 px-4 bg-zinc-100 text-zinc-600 rounded-xl font-bold hover:bg-zinc-200 transition-all text-sm"
                 >
-                  Fechar
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmSubstitution}
+                  className="flex-1 py-3 px-4 bg-emerald-600 text-white rounded-xl font-bold hover:bg-emerald-700 transition-all text-sm shadow-md"
+                >
+                  Confirmar e Iniciar
                 </button>
               </div>
             </motion.div>
@@ -3507,6 +3859,13 @@ export default function Portaria({ user }: PortariaProps) {
           </div>
         )}
       </AnimatePresence>
+
+      <ResidentImporterModal
+        isOpen={isImporterOpen}
+        onClose={() => setIsImporterOpen(false)}
+        user={user}
+        onImportComplete={fetchData}
+      />
     </div>
   );
 }

@@ -2,10 +2,13 @@ import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { Profile } from '../types';
-import { Users, Plus, Loader2, Search, User, Phone, Home, Shield, Trash2, MoreVertical, Edit, Power, X } from 'lucide-react';
+import { Users, Plus, Loader2, Search, User, Phone, Home, Shield, Trash2, MoreVertical, Edit, Power, X, FileSpreadsheet } from 'lucide-react';
 import { formatResidentAddress } from '../lib/residentUtils';
 import { toast } from 'react-hot-toast';
 import { registrarAuditoria } from '../services/auditService';
+import { normalizeRole } from '../lib/authUtils';
+import { SHIFT_PRESETS } from '../lib/plantaoUtils';
+import ResidentImporterModal from '../components/ResidentImporterModal';
 
 interface ProfileListProps {
   user: Profile;
@@ -27,9 +30,12 @@ export default function ProfileList({ user }: ProfileListProps) {
     unidade: '',
     unit_type: '',
     block: '',
-    street: ''
+    street: '',
+    horario_inicio: '',
+    horario_fim: ''
   });
   const [condoSettings, setCondoSettings] = useState<any>(null);
+  const [isImporterOpen, setIsImporterOpen] = useState(false);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -208,12 +214,14 @@ export default function ProfileList({ user }: ProfileListProps) {
     setFormData({
       full_name: profile.full_name,
       phone: profile.phone || '',
-      role: profile.role,
+      role: normalizeRole(profile.role) as any,
       active: profile.active,
       unidade: profile.unidade || '',
       unit_type: profile.unit_type || '',
       block: profile.block || '',
-      street: profile.street || ''
+      street: profile.street || '',
+      horario_inicio: profile.horario_inicio || '',
+      horario_fim: profile.horario_fim || ''
     });
     setShowEditModal(true);
   };
@@ -247,6 +255,8 @@ export default function ProfileList({ user }: ProfileListProps) {
             phone: formData.phone,
             role: formData.role,
             active: formData.active,
+            horario_inicio: formData.horario_inicio || null,
+            horario_fim: formData.horario_fim || null,
             updated_at: new Date().toISOString()
           })
           .eq('id', editingProfile.id);
@@ -317,20 +327,30 @@ export default function ProfileList({ user }: ProfileListProps) {
 
   return (
     <div className="max-w-6xl mx-auto p-6">
-      <div className="flex justify-between items-center mb-8">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-8">
         <div>
           <h1 className="text-3xl font-bold text-zinc-900 uppercase">Moradores: {activeResidentsCount}</h1>
           <h2 className="text-xl font-bold text-zinc-500 uppercase mt-1">Casas: {uniqueUnitsCount}</h2>
           <p className="text-zinc-400 mt-2">Gerencie os moradores do condomínio</p>
         </div>
         {(user.role === 'admin' || user.role === 'sindico') && (
-          <button
-            onClick={() => navigate('/profiles/new')}
-            className="bg-emerald-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-emerald-700 transition-all flex items-center gap-2"
-          >
-            <Plus className="w-5 h-5" />
-            Novo Morador
-          </button>
+          <div className="flex flex-col gap-2 w-full sm:w-auto items-stretch sm:items-end">
+            <button
+              onClick={() => navigate('/profiles/new')}
+              className="bg-emerald-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-emerald-700 transition-all flex items-center justify-center gap-2 shadow-sm cursor-pointer"
+            >
+              <Plus className="w-5 h-5" />
+              Novo Morador
+            </button>
+            <button
+              onClick={() => setIsImporterOpen(true)}
+              className="bg-zinc-900 text-white px-5 py-3 rounded-xl font-bold hover:bg-zinc-800 transition-all flex items-center justify-center gap-2 shadow-sm cursor-pointer"
+              title="Importar moradores a partir de planilha (.xlsx, .xls, .csv)"
+            >
+              <FileSpreadsheet className="w-5 h-5 text-emerald-400" />
+              Importar Planilha
+            </button>
+          </div>
         )}
       </div>
 
@@ -360,12 +380,21 @@ export default function ProfileList({ user }: ProfileListProps) {
                 <div className="w-12 h-12 bg-zinc-50 text-emerald-600 rounded-2xl flex items-center justify-center group-hover:bg-emerald-100 transition-colors">
                   <User className="w-6 h-6" />
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap justify-end">
                   {!profile.active && profile.role === 'resident' && (
                     <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-red-100 text-red-700">
                       Inativo
                     </span>
                   )}
+
+                  {/* Badge PENDENTE: apenas se for morador com residência válida e sem WhatsApp/telefone */}
+                  {profile.role === 'resident' && Boolean(profile.unidade && profile.unidade.trim()) && (!profile.phone || !profile.phone.trim()) && (
+                    <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-amber-100 text-amber-800 flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                      PENDENTE
+                    </span>
+                  )}
+
                   <div className="relative">
                     <button
                       onClick={() => setActiveResidentMenu(activeResidentMenu === profile.id ? null : profile.id)}
@@ -441,16 +470,41 @@ export default function ProfileList({ user }: ProfileListProps) {
               <h3 className="text-xl font-bold text-zinc-900 mb-4">{profile.full_name}</h3>
               
               <div className="space-y-3">
-                <div className="flex items-center gap-3 text-zinc-500 text-sm">
-                  <Phone className="w-4 h-4 flex-shrink-0" />
-                  <p>{profile.phone}</p>
+                {/* Identificação Completa da Residência */}
+                <div className="flex items-center gap-3 text-zinc-600 text-sm">
+                  <Home className="w-4 h-4 flex-shrink-0 text-zinc-400" />
+                  <p className="font-semibold text-zinc-800">
+                    {profile.unidade ? (
+                      formatResidentAddress(profile)
+                    ) : profile.role === 'resident' ? (
+                      <span className="text-red-600 font-bold italic">Inconsistente — Residência obrigatória</span>
+                    ) : (
+                      <span className="text-zinc-400 italic">Equipe do Condomínio</span>
+                    )}
+                  </p>
                 </div>
-                {(profile.unidade || profile.unit_type) && (
-                  <div className="flex items-center gap-3 text-zinc-500 text-sm">
-                    <Home className="w-4 h-4 flex-shrink-0" />
-                    <p>{formatResidentAddress(profile)}</p>
-                  </div>
+
+                {/* Bloco / Rua se aplicável e não no endereço formatado */}
+                {Boolean(profile.block || profile.street) && (
+                  <p className="text-xs text-zinc-500 pl-7 truncate">
+                    {profile.block && `Bloco ${profile.block}`}
+                    {profile.block && profile.street && ' • '}
+                    {profile.street && `Rua ${profile.street}`}
+                  </p>
                 )}
+
+                {/* WhatsApp / Telefone */}
+                {profile.phone ? (
+                  <div className="flex items-center gap-3 text-zinc-500 text-sm">
+                    <Phone className="w-4 h-4 flex-shrink-0" />
+                    <p className="font-mono">{profile.phone}</p>
+                  </div>
+                ) : profile.role === 'resident' && Boolean(profile.unidade && profile.unidade.trim()) ? (
+                  <div className="flex items-center gap-2.5 text-amber-800 text-xs font-bold bg-amber-50 px-3 py-2 rounded-xl border border-amber-200/80">
+                    <Phone className="w-3.5 h-3.5 flex-shrink-0 text-amber-600" />
+                    <span>Adicione o WhatsApp!</span>
+                  </div>
+                ) : null}
               </div>
             </div>
           ))}
@@ -468,7 +522,7 @@ export default function ProfileList({ user }: ProfileListProps) {
       {/* Edit Staff Modal */}
       {showEditModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
-          <div className="bg-white rounded-3xl w-full max-w-lg shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200">
+          <div className="bg-white rounded-3xl w-full max-w-lg shadow-2xl overflow-hidden max-h-[90vh] overflow-y-auto animate-in zoom-in-95 duration-200">
             <div className="p-6 border-b border-zinc-100 flex justify-between items-center">
               <h2 className="text-xl font-bold text-zinc-900">Editar Perfil</h2>
               <button onClick={() => setShowEditModal(false)} className="p-2 hover:bg-zinc-100 rounded-full transition-colors">
@@ -503,7 +557,7 @@ export default function ProfileList({ user }: ProfileListProps) {
                 <div>
                   <label className="block text-sm font-medium text-zinc-700 mb-1">Perfil</label>
                   <select
-                    value={formData.role}
+                    value={normalizeRole(formData.role)}
                     onChange={e => setFormData({...formData, role: e.target.value as any})}
                     className="w-full px-4 py-2 rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 bg-white"
                   >
@@ -524,6 +578,53 @@ export default function ProfileList({ user }: ProfileListProps) {
                   </select>
                 </div>
               </div>
+
+              {normalizeRole(formData.role) === 'porteiro' && (
+                <div className="space-y-3 p-4 bg-zinc-50 rounded-2xl border border-zinc-100 animate-in fade-in slide-in-from-top-2 duration-200">
+                  <div>
+                    <label className="block text-xs font-bold text-zinc-600 uppercase tracking-wider mb-1">
+                      Escala de Trabalho
+                    </label>
+                    <select
+                      value={
+                        SHIFT_PRESETS.find(p => p.inicio === formData.horario_inicio && p.fim === formData.horario_fim)?.label || 'Horário Personalizado'
+                      }
+                      onChange={e => {
+                        const selected = SHIFT_PRESETS.find(p => p.label === e.target.value);
+                        if (selected && selected.inicio !== 'custom') {
+                          setFormData({ ...formData, horario_inicio: selected.inicio, horario_fim: selected.fim });
+                        }
+                      }}
+                      className="w-full px-3.5 py-2 rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 bg-white text-xs font-medium"
+                    >
+                      {SHIFT_PRESETS.map((preset, idx) => (
+                        <option key={idx} value={preset.label}>{preset.label}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <div>
+                      <label className="block text-[11px] font-medium text-zinc-600 mb-1">Horário de Entrada</label>
+                      <input
+                        type="time"
+                        value={formData.horario_inicio || ''}
+                        onChange={e => setFormData({ ...formData, horario_inicio: e.target.value })}
+                        className="w-full px-3 py-2 rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 text-xs font-medium"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-zinc-600 mb-1">Horário de Saída</label>
+                      <input
+                        type="time"
+                        value={formData.horario_fim || ''}
+                        onChange={e => setFormData({ ...formData, horario_fim: e.target.value })}
+                        className="w-full px-3 py-2 rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 text-xs font-medium"
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
 
               <div className="pt-4 flex gap-3">
                 <button
@@ -546,6 +647,15 @@ export default function ProfileList({ user }: ProfileListProps) {
           </div>
         </div>
       )}
+      {/* Modal de Importação Inteligente de Planilhas */}
+      <ResidentImporterModal
+        isOpen={isImporterOpen}
+        onClose={() => setIsImporterOpen(false)}
+        user={user}
+        onImportComplete={() => {
+          fetchProfiles();
+        }}
+      />
     </div>
   );
 }

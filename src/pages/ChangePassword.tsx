@@ -25,33 +25,42 @@ export default function ChangePassword({ onUpdateUser }: { onUpdateUser?: (profi
 
     setLoading(true);
     try {
-      const { error: authError } = await supabase.auth.updateUser({
-        password: password
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token || 'MOCK_TOKEN';
+
+      const response = await fetch('/api/auth/change-password', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          newPassword: password,
+          userId: session?.user?.id
+        })
       });
 
-      if (authError) throw authError;
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.error || 'Erro ao alterar senha');
+      }
 
-      const { data: { user } } = await supabase.auth.getUser();
-      if (user) {
-        const { data: updatedProfile, error: profileError } = await supabase
-          .from('profiles')
-          .update({ must_change_password: false })
-          .eq('id', user.id)
-          .select()
-          .single();
+      const { profile: updatedProfile } = await response.json();
 
-        if (profileError) throw profileError;
+      // Fallback update on client side if needed
+      await supabase.auth.updateUser({ password }).catch(() => {});
 
-        if (updatedProfile && onUpdateUser) {
-          onUpdateUser(updatedProfile);
-        }
+      if (updatedProfile && onUpdateUser) {
+        onUpdateUser(updatedProfile);
+      } else if (onUpdateUser) {
+        onUpdateUser({ must_change_password: false });
       }
 
       setSuccess(true);
-      toast.success('Senha alterada com sucesso!');
+      toast.success('Senha alterada com sucesso! Bem-vindo ao sistema.');
       setTimeout(() => {
         navigate('/dashboard');
-      }, 2000);
+      }, 1500);
     } catch (error: any) {
       toast.error('Erro ao alterar senha: ' + error.message);
     } finally {

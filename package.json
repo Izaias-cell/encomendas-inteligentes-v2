@@ -8,7 +8,10 @@
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
     "clean": "rm -rf dist",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "tsx src/tests/condominiums.test.ts && tsx src/tests/persistence-integrity.test.ts",
+    "test:condos": "tsx src/tests/condominiums.test.ts",
+    "test:persistence": "tsx src/tests/persistence-integrity.test.ts"
   },
   "dependencies": {
     "@google/genai": "^1.29.0",
@@ -38,6 +41,7 @@
     "tailwind-merge": "^3.5.0",
     "twilio": "^5.12.2",
     "vite": "^6.2.0",
+    "xlsx": "^0.18.5",
     "zod": "^4.3.6"
   },
   "devDependencies": {

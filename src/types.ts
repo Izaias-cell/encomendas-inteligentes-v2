@@ -81,6 +81,8 @@ export interface Condominium {
   rules?: string;
   internal_notes?: string;
   active?: boolean;
+  portaria_name?: string;
+  portaria_access_code?: string;
   created_at: string;
   user_count?: number;
   unit_count?: number;

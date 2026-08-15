@@ -1,28 +1,55 @@
 import { Morador } from '../types';
 
 export const getResidentAddressLines = (resident: Morador | any) => {
+  if (!resident) return [];
   const lines: string[] = [];
   
-  // Line 1: unit_type + unit_number
+  // Line 1: unit_number / unidade (preserves complete string e.g. "CASA 426", "BLOCO 11/CASA 426", "TORRE 5/CASA 426")
+  const rawUnit = resident.unidade || resident.unit_number || '';
   const unitType = resident.unit_type || '';
-  const unitNumber = resident.unit_number || resident.unidade || '';
-  lines.push(`${unitType} ${unitNumber}`.trim());
   
-  // Line 2: block (if exists)
-  if (resident.block || resident.bloco) {
-    lines.push(resident.block || resident.bloco);
+  let mainUnit = String(rawUnit).trim();
+  if (unitType && mainUnit) {
+    const unitUpper = mainUnit.toUpperCase();
+    const typeUpper = String(unitType).toUpperCase();
+    if (!unitUpper.includes(typeUpper)) {
+      mainUnit = `${unitType} ${mainUnit}`.trim();
+    }
+  } else if (unitType && !mainUnit) {
+    mainUnit = unitType;
+  }
+
+  if (mainUnit) {
+    lines.push(mainUnit);
   }
   
-  // Line 3: street (if exists)
+  // Line 2: block (only if not already included in mainUnit)
+  const block = resident.block || resident.bloco;
+  if (block) {
+    const blockUpper = String(block).toUpperCase();
+    const mainUpper = mainUnit.toUpperCase();
+    if (!mainUpper.includes(blockUpper)) {
+      lines.push(blockUpper.startsWith('BLOCO') || blockUpper.startsWith('TORRE') ? block : `Bloco ${block}`);
+    }
+  }
+  
+  // Line 3: street (only if not already included in mainUnit)
   if (resident.street) {
-    lines.push(resident.street);
+    const streetUpper = String(resident.street).toUpperCase();
+    const mainUpper = mainUnit.toUpperCase();
+    if (!mainUpper.includes(streetUpper)) {
+      lines.push(resident.street);
+    }
   }
   
   return lines;
 };
 
 export const formatResidentAddress = (resident: Morador | any) => {
-  return getResidentAddressLines(resident).join(' • ');
+  if (!resident) return 'Unidade';
+  const lines = getResidentAddressLines(resident);
+  if (lines.length > 0) return lines.join(' • ');
+  return resident.unidade ? String(resident.unidade).trim() : 'Unidade';
 };
 
 export const formatPackageUnit = (pkg: any) => {

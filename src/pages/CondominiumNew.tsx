@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { supabase } from '../lib/supabase';
+import { api } from '../lib/apiClient';
 import { toast } from 'react-hot-toast';
 import { Building, ArrowLeft, Loader2 } from 'lucide-react';
 import { Profile } from '../types';
@@ -21,37 +21,20 @@ export default function CondominiumNew({ user, onUpdateUser }: CondominiumNewPro
     setLoading(true);
 
     try {
-      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
-      
-      if (sessionError || !session) {
-        toast.error('Sessão não encontrada. Por favor, faça login novamente.');
-        setLoading(false);
-        return;
-      }
+      const res = await api.post('/api/condominiums/create', { name, address });
 
-      // 2. Call the backend API to create the condominium and update profile
-      // This bypasses RLS using the service role key on the server
-      const response = await fetch('/api/condominiums/create', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session.access_token}`
-        },
-        body: JSON.stringify({ name, address })
-      });
-
-      const result = await response.json();
-
-      if (!response.ok) {
-        throw new Error(result.error || 'Erro ao cadastrar condomínio');
+      if (!res.ok) {
+        throw new Error(res.error || 'Erro ao cadastrar condomínio');
       }
 
       toast.success('Condomínio cadastrado e vinculado com sucesso!');
-      onUpdateUser(result.profile);
+      if (res.data?.profile) {
+        onUpdateUser(res.data.profile);
+      }
       navigate('/dashboard');
     } catch (error: any) {
       console.error('Erro ao cadastrar condomínio:', error);
-      toast.error('Erro ao cadastrar condomínio: ' + (error.message || 'Verifique as permissões de RLS no Supabase.'));
+      toast.error('Erro ao cadastrar condomínio: ' + (error.message || 'Verifique as permissões.'));
     } finally {
       setLoading(false);
     }

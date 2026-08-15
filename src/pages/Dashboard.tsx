@@ -230,12 +230,12 @@ export default function Dashboard({ user }: DashboardProps) {
       if (resError) console.warn('Erro ao limpar moradores de teste:', resError);
 
       // 4. Porteiros (profiles) de teste
-      // Porteiros: is_teste = true OR full_name contém teste OR email contém teste
+      // Porteiros: full_name contém teste
       const { data: profiles, error: profileError } = await supabase
         .from('profiles')
         .delete()
         .eq('condominium_id', user.condominium_id)
-        .or('full_name.ilike.%teste%,email.ilike.%teste%')
+        .ilike('full_name', '%teste%')
         .select('id');
 
       if (profileError) console.warn('Erro ao limpar porteiros de teste:', profileError);
@@ -309,7 +309,7 @@ export default function Dashboard({ user }: DashboardProps) {
     if (user.condominium_id) {
       const [resC, porterC, pkgC, pkgPendingC, pkgDeliverC] = await Promise.all([
         supabase.from('moradores').select('id', { count: 'exact', head: true }).eq('condominium_id', user.condominium_id).or('nome.ilike.%teste%,observacoes.ilike.%teste%'),
-        supabase.from('profiles').select('id', { count: 'exact', head: true }).eq('condominium_id', user.condominium_id).or('full_name.ilike.%teste%,email.ilike.%teste%'),
+        supabase.from('profiles').select('id', { count: 'exact', head: true }).eq('condominium_id', user.condominium_id).ilike('full_name', '%teste%'),
         supabase.from('packages').select('id', { count: 'exact', head: true }).eq('condominium_id', user.condominium_id),
         supabase.from('packages').select('id', { count: 'exact', head: true }).eq('condominium_id', user.condominium_id).neq('status', 'delivered'),
         supabase.from('packages').select('id', { count: 'exact', head: true }).eq('condominium_id', user.condominium_id).eq('status', 'delivered')
@@ -678,11 +678,11 @@ export default function Dashboard({ user }: DashboardProps) {
                         />
                       </div>
                       <div>
-                        <label className="block text-xs font-bold text-zinc-500 mb-1">E-mail (Acesso)</label>
+                        <label className="block text-xs font-bold text-zinc-500 mb-1">E-mail (Opcional)</label>
                         <input 
                           type="email"
                           className="w-full p-3 rounded-lg border border-zinc-200 outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
-                          placeholder="porteiro@exemplo.com"
+                          placeholder="Opcional (gerado automaticamente)"
                           value={porter.email}
                           onChange={(e) => handlePorterChange(index, 'email', e.target.value)}
                         />

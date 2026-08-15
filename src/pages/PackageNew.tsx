@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 /*
  * REGRA DE OURO DO REGISTRO DE ENCOMENDAS (PROTEÇÃO DE FLUXO):
  * 1. O OCR nunca deve rodar antes da foto estar capturada e armazenada.
@@ -31,20 +31,23 @@ import {
   Save,
   Send,
   ArrowRight,
-  ExternalLink
+  ExternalLink,
+  MessageCircle
 } from 'lucide-react';
 import { feedback } from '../lib/feedback';
 import { supabase } from '../lib/supabase';
 import { Profile, Morador, CondominiumSettings } from '../types';
 import toast from 'react-hot-toast';
-import { registrarAuditoria } from '../services/auditService';
+import { registrarAuditoria, sanitizeUuid, isValidUuid } from '../services/auditService';
 import { getCurrentPorter, setManualPorter } from '../lib/porterUtils';
+import { getActivePlantao } from '../lib/plantaoUtils';
 import { extractBasicText } from '../services/geminiService';
 import { parseLabelText } from '../services/labelParser';
 import { findMatchingResidents, ScoredResident, normalizeUnit, normalizeName } from '../services/residentMatcher';
 import { formatResidentAddress } from '../lib/residentUtils';
 import { motion, AnimatePresence } from 'motion/react';
 import { generatePickupCode, prepareWhatsAppNotification, sendWhatsAppMessage, getWhatsAppLink } from '../services/whatsappService';
+import { isTestResident } from '../services/residentModeService';
 
 interface PackageNewProps {
   user: Profile;
@@ -76,6 +79,7 @@ export default function PackageNew({ user }: PackageNewProps) {
   const [loading, setLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
+  const [isSearchingResidents, setIsSearchingResidents] = useState(false);
   const [selectedResident, setSelectedResident] = useState<Morador | null>(null);
   const [matchingResidents, setMatchingResidents] = useState<ScoredResident[]>([]);
   
@@ -100,8 +104,35 @@ export default function PackageNew({ user }: PackageNewProps) {
     return localStorage.getItem('notify_after_registration') === 'true';
   });
 
-  const [currentPorterState, setCurrentPorterState] = useState(getCurrentPorter());
+  const [currentPorterState, setCurrentPorterState] = useState(() => {
+    const plantao = getActivePlantao(user?.condominium_id);
+    return plantao ? plantao.porteiro_nome : getCurrentPorter(user?.condominium_id);
+  });
   const [showPorterModal, setShowPorterModal] = useState(false);
+  const [portersList, setPortersList] = useState<Profile[]>([]);
+
+  useEffect(() => {
+    if (user?.condominium_id) {
+      supabase
+        .from('profiles')
+        .select('*')
+        .eq('condominium_id', user.condominium_id)
+        .eq('role', 'porteiro')
+        .eq('active', true)
+        .order('full_name')
+        .then(({ data, error }) => {
+          if (!error && data) {
+            setPortersList(data);
+          }
+        });
+    }
+  }, [user?.condominium_id]);
+
+  useEffect(() => {
+    const plantao = getActivePlantao(user?.condominium_id);
+    const p = plantao ? plantao.porteiro_nome : getCurrentPorter(user?.condominium_id);
+    setCurrentPorterState(p);
+  }, [user?.condominium_id]);
 
   useEffect(() => {
     if (currentPorterState === 'Selecione o Porteiro') {
@@ -142,6 +173,36 @@ export default function PackageNew({ user }: PackageNewProps) {
   const uploadPromiseRef = useRef<Promise<string | null> | null>(null);
   const currentPhotoRef = useRef<string>('');
 
+  // Pre-indexed resident data for O(1)/instant searches without repeating regexes
+  const indexedResidents = useMemo(() => {
+    if (!allResidents || allResidents.length === 0) return [];
+    return allResidents.map(r => {
+      const normUnit = normalizeUnit(r.unidade || '');
+      const normName = normalizeName(r.nome || '');
+      const fullNameUpper = (r.nome || '').toUpperCase();
+      const rawUnitUpper = (r.unidade || '').toUpperCase();
+      return {
+        raw: r,
+        normUnit,
+        normName,
+        fullNameUpper,
+        rawUnitUpper,
+        condoId: r.condominium_id
+      };
+    });
+  }, [allResidents]);
+
+  // Refs de controle para estabilidade de memória, concorrência e câmera
+  const isStartingCameraRef = useRef<boolean>(false);
+  const activeRequestIdRef = useRef<number>(0);
+  const objectUrlRef = useRef<string | null>(null);
+  const scrollTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const lastScrolledTargetYRef = useRef<number>(-1);
+  const searchedTermRef = useRef<string>('');
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const whatsAppOpenedTimeRef = useRef<number>(0);
+  const hasBeenHiddenRef = useRef<boolean>(false);
+
   const playSuccessSound = () => {
     feedback.success();
   };
@@ -157,19 +218,57 @@ export default function PackageNew({ user }: PackageNewProps) {
     return first.endsWith('a') || first.endsWith('e');
   };
 
-  // Detect context return for individual flow
+  // Detect context return for individual flow (e.g. from WhatsApp)
   useEffect(() => {
-    const handleFocus = () => {
+    const handleReturn = () => {
       if (isWaitingForReturn) {
+        const elapsed = Date.now() - whatsAppOpenedTimeRef.current;
+        // Evita processar retornos instantâneos gerados pelo próprio disparo do window.open
+        if (!hasBeenHiddenRef.current && elapsed < 1200) {
+          return;
+        }
+
         setIsWaitingForReturn(false);
+        hasBeenHiddenRef.current = false;
         resetForm();
-        // Feedback visual de que está pronto para o próximo
-        toast.success('Câmera aberta para o próximo registro', { icon: '📸' });
+        startCamera();
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        toast.success('Câmera pronta para o próximo registro!', { icon: '📸', duration: 4000 });
+      }
+    };
+
+    const handleFocus = () => {
+      if (isWaitingForReturn && (hasBeenHiddenRef.current || (Date.now() - whatsAppOpenedTimeRef.current > 1500))) {
+        handleReturn();
+      }
+    };
+
+    const handleBlur = () => {
+      if (isWaitingForReturn) {
+        hasBeenHiddenRef.current = true;
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        if (isWaitingForReturn) {
+          hasBeenHiddenRef.current = true;
+        }
+      } else if (document.visibilityState === 'visible') {
+        if (isWaitingForReturn && (hasBeenHiddenRef.current || (Date.now() - whatsAppOpenedTimeRef.current > 1500))) {
+          handleReturn();
+        }
       }
     };
 
     window.addEventListener('focus', handleFocus);
-    return () => window.removeEventListener('focus', handleFocus);
+    window.addEventListener('blur', handleBlur);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('blur', handleBlur);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
   }, [isWaitingForReturn]);
 
   // Fetch residents and settings on mount
@@ -190,7 +289,10 @@ export default function PackageNew({ user }: PackageNewProps) {
         .eq('condominium_id', user.condominium_id)
         .eq('ativo', true)
         .order('nome');
-      if (residentsList) setAllResidents(residentsList);
+      if (residentsList) {
+        setAllResidents(residentsList);
+        setAllCondoResidents(residentsList as Morador[]);
+      }
     };
     fetchData();
   }, [user?.condominium_id]);
@@ -203,21 +305,8 @@ export default function PackageNew({ user }: PackageNewProps) {
     return () => stopCamera();
   }, [step, photoUrl, blockAutoCamera]);
 
-  // Fetch all residents for AI context
+  // Fetch condominium name on mount
   useEffect(() => {
-    const fetchAllResidents = async () => {
-      if (!user?.condominium_id) return;
-      const { data, error } = await supabase
-        .from('moradores')
-        .select('nome, unidade')
-        .eq('condominium_id', user.condominium_id)
-        .eq('ativo', true);
-      
-      if (!error && data) {
-        setAllCondoResidents(data as Morador[]);
-      }
-    };
-    
     const fetchCondoName = async () => {
       if (!user?.condominium_id) return;
       const { data, error } = await supabase
@@ -231,7 +320,6 @@ export default function PackageNew({ user }: PackageNewProps) {
       }
     };
 
-    fetchAllResidents();
     fetchCondoName();
   }, [user?.condominium_id]);
 
@@ -241,6 +329,21 @@ export default function PackageNew({ user }: PackageNewProps) {
       setCameraError("Câmera não suportada neste dispositivo.");
       return;
     }
+
+    // Evitar chamadas concorrentes/simultâneas que travam o WebRTC do navegador
+    if (isStartingCameraRef.current) {
+      return;
+    }
+
+    // Se já estiver ativa com track funcionando, não precisa recriar
+    if (cameraActive && streamRef.current) {
+      const activeTrack = streamRef.current.getVideoTracks()[0];
+      if (activeTrack && activeTrack.readyState === 'live') {
+        return;
+      }
+    }
+
+    isStartingCameraRef.current = true;
 
     // 2. Parar qualquer stream existente antes de abrir uma nova
     stopCamera();
@@ -315,12 +418,17 @@ export default function PackageNew({ user }: PackageNewProps) {
       
       setCameraActive(false);
       setIsCameraStabilizing(false);
+    } finally {
+      isStartingCameraRef.current = false;
     }
   };
 
   const stopCamera = () => {
+    isStartingCameraRef.current = false;
     if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current.getTracks().forEach(track => {
+        try { track.stop(); } catch(e) {}
+      });
       streamRef.current = null;
     }
     if (videoRef.current) {
@@ -362,16 +470,22 @@ export default function PackageNew({ user }: PackageNewProps) {
   const capturePhoto = async () => {
     if (!videoRef.current || !canvasRef.current || isCameraStabilizing || isCapturing) return;
     
-    // Feedback visual imediato (flash)
     setIsCapturing(true);
-    
+    const requestId = ++activeRequestIdRef.current;
+
+    // Abortar chamadas anteriores do Gemini se houver
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    abortControllerRef.current = new AbortController();
+
     const video = videoRef.current;
     const canvas = canvasRef.current;
     
-    // Resolução otimizada para precisão OCR (máximo 1600px conforme solicitado)
+    // Resolução otimizada para foto da encomenda (máximo 1600px)
     const MAX_DIMENSION = 1600; 
-    let width = video.videoWidth;
-    let height = video.videoHeight;
+    let width = video.videoWidth || 1280;
+    let height = video.videoHeight || 720;
     
     const ratio = Math.min(MAX_DIMENSION / width, MAX_DIMENSION / height);
     if (ratio < 1) {
@@ -384,16 +498,14 @@ export default function PackageNew({ user }: PackageNewProps) {
     
     const context = canvas.getContext('2d', { alpha: false });
     if (context) {
-      // Captura de alta fidelidade para armazenamento
       context.imageSmoothingEnabled = true;
       context.imageSmoothingQuality = 'high';
       context.drawImage(video, 0, 0, width, height);
-      const base64 = canvas.toDataURL('image/jpeg', 0.90);
 
       // Captura de baixa resolução para OCR (Alta velocidade e foco no essencial)
       const OCR_MAX = 600; 
-      let ocrWidth = video.videoWidth;
-      let ocrHeight = video.videoHeight;
+      let ocrWidth = video.videoWidth || 600;
+      let ocrHeight = video.videoHeight || 450;
       const ocrRatio = Math.min(OCR_MAX / ocrWidth, OCR_MAX / ocrHeight);
       ocrWidth = Math.round(ocrWidth * ocrRatio);
       ocrHeight = Math.round(ocrHeight * ocrRatio);
@@ -402,45 +514,62 @@ export default function PackageNew({ user }: PackageNewProps) {
       ocrCanvas.width = ocrWidth;
       ocrCanvas.height = ocrHeight;
       const ocrCtx = ocrCanvas.getContext('2d', { alpha: false });
-      let ocrBase64 = base64; // Fallback
+      let ocrBase64 = '';
       if (ocrCtx) {
         ocrCtx.imageSmoothingEnabled = true;
         ocrCtx.imageSmoothingQuality = 'medium';
         ocrCtx.drawImage(video, 0, 0, ocrWidth, ocrHeight);
         ocrBase64 = ocrCanvas.toDataURL('image/jpeg', 0.70);
       }
-      
-      // Mudar fluxo IMEDIATAMENTE para manual
+
+      // Parar câmera imediatamente para liberar hardware
       stopCamera();
-      setPhotoUrl(base64);
-      currentPhotoRef.current = base64;
-      setDebugOcrImage(ocrBase64); 
+
+      // Limpar seleções e preparar entrada manual imediatamente
+      setSelectedResident(null);
+      setRecipientName('');
+      setUnitNumber('');
+      setSearchTerm('');
+      setMatchingResidents([]);
+      setNotes('');
+      lastScrolledTargetYRef.current = -1;
+      searchedTermRef.current = '';
       setIsOcrLoading(false);
       setStatusMessage('Entrada Manual');
-      setIsManualUnitSearch(true); 
-      
+      setIsManualUnitSearch(true);
       setStep('manual');
-      
-      // Ativa o foco com um pequeno delay para garantir que o estado de 'manual' disparou o render do input
-      setTimeout(() => {
-        setShouldFocusSearch(true);
-      }, 100);
+      setShouldFocusSearch(true);
 
-      // Inicia o fluxo de processamento (Apenas Upload em background)
-      // Agora habilitamos o OCR para o recurso "EVITAR ERRO" em background
-      processImageFlow(base64, ocrBase64, true); 
+      // Processar Blob da foto em paralelo para upload e visualização rápida
+      canvas.toBlob((blob) => {
+        if (!blob || requestId !== activeRequestIdRef.current) return;
+
+        if (objectUrlRef.current && objectUrlRef.current.startsWith('blob:')) {
+          try { URL.revokeObjectURL(objectUrlRef.current); } catch(e) {}
+        }
+        const previewUrl = URL.createObjectURL(blob);
+        objectUrlRef.current = previewUrl;
+        setPhotoUrl(previewUrl);
+
+        // Inicia upload e OCR com o blob direto sem converter de volta
+        processImageFlow(previewUrl, ocrBase64, true, requestId, blob);
+      }, 'image/jpeg', 0.85);
     } else {
       setIsCapturing(false);
     }
   };
 
-  const processImageFlow = async (base64: string, ocrBase64: string, runOcr: boolean = true) => {
+  const processImageFlow = async (previewUrl: string, ocrBase64: string, runOcr: boolean = true, requestId?: number, capturedBlob?: Blob) => {
+    const currentReq = requestId || activeRequestIdRef.current;
     try {
-      // 1. Inicia upload em background (Prova Jurídica)
+      // 1. Inicia upload em background (Prova Jurídica) direto com o Blob
       uploadPromiseRef.current = (async () => {
         try {
-          const res = await fetch(base64);
-          const blob = await res.blob();
+          let blob = capturedBlob;
+          if (!blob) {
+            const res = await fetch(previewUrl);
+            blob = await res.blob();
+          }
           const file = new File([blob], "package_photo.jpg", { type: "image/jpeg" });
           const fileName = `${Date.now()}_${Math.random().toString(36).substring(7)}.jpg`;
           const filePath = `package-photos/${fileName}`;
@@ -453,7 +582,10 @@ export default function PackageNew({ user }: PackageNewProps) {
             const { data: { publicUrl } } = supabase.storage
               .from('packages')
               .getPublicUrl(filePath);
-            setPhotoUrl(publicUrl);
+
+            if (currentReq === activeRequestIdRef.current) {
+              setPhotoUrl(publicUrl);
+            }
             return publicUrl;
           }
           return null;
@@ -463,61 +595,53 @@ export default function PackageNew({ user }: PackageNewProps) {
         }
       })();
 
-      // Se não for para rodar OCR, apenas encerramos aqui (o step já foi mudado para manual)
-      if (!runOcr) {
-        setIsOcrLoading(false);
-        setIsCapturing(false);
+      if (!runOcr || !ocrBase64) {
+        if (currentReq === activeRequestIdRef.current) {
+          setIsOcrLoading(false);
+          setIsCapturing(false);
+        }
         return;
       }
 
-      // 2. Executa OCR
-      const result = await processImageWithWait(base64, ocrBase64);
+      // 2. Executa OCR apenas na miniatura leve de 600px
+      const result = await processImageWithWait(ocrBase64, ocrBase64);
 
-      if (currentPhotoRef.current !== base64) {
-        console.log("[OCR] Cancelando processamento pois o cadastro foi salvo ou cancelado.");
+      if (currentReq !== activeRequestIdRef.current) {
         return;
       }
 
       if (result && (result.casa || result.inicial || result.destinatario)) {
-        await handleOCRResult(result);
-        if (currentPhotoRef.current === base64) {
-          setStep('manual'); // Garantir que está no passo manual para mostrar os campos
-        }
+        await handleOCRResult(result, currentReq);
       } else {
-        fallbackToManual(base64);
+        fallbackToManual(previewUrl, currentReq);
       }
     } catch (error) {
       console.error('Erro no fluxo de imagem:', error);
-      fallbackToManual(base64);
+      fallbackToManual(previewUrl, currentReq);
     } finally {
-      setIsOcrLoading(false);
-      setIsCapturing(false);
+      if (currentReq === activeRequestIdRef.current) {
+        setIsOcrLoading(false);
+        setIsCapturing(false);
+      }
     }
   };
 
-  const fallbackToManual = (originalBase64?: string) => {
-    // Pequeno atraso para o usuário perceber que a IA não identificou automaticamente
-    setTimeout(() => {
-      if (originalBase64 && currentPhotoRef.current !== originalBase64) {
-        console.log("[OCR] Cancelando fallback manual pois o cadastro foi salvo ou cancelado.");
-        return;
-      }
-      setOcrConfidence('baixa');
-      setShouldFocusSearch(true);
-      setStatusMessage('Entrada Manual');
-      setStep('manual');
-      setIsOcrLoading(false);
-      toast('Identifique o morador manualmente', { icon: '⌨️' });
-    }, 600);
+  const fallbackToManual = (originalUrl?: string, requestId?: number) => {
+    if (requestId && requestId !== activeRequestIdRef.current) return;
+    setOcrConfidence('baixa');
+    setStatusMessage('Entrada Manual');
+    setStep('manual');
+    setIsOcrLoading(false);
   };
 
-  const handleOCRResult = async (parsedData: any) => {
+  const handleOCRResult = async (parsedData: any, requestId?: number) => {
+    if (requestId && requestId !== activeRequestIdRef.current) return;
+
     const unitToUse = parsedData.casa || '';
     const initialToUse = parsedData.inicial || '';
     const nameToUse = parsedData.destinatario || '';
     const confidence = parsedData.confianca as 'alta' | 'media' | 'baixa';
 
-    // Armazena o número identificado para comparação posterior (EVITAR ERRO)
     if (unitToUse && confidence === 'alta') {
       setDetectedHandwrittenUnit(unitToUse);
     }
@@ -536,48 +660,50 @@ export default function PackageNew({ user }: PackageNewProps) {
 
     if (unitToUse && !unitNumber) setUnitNumber(unitToUse);
     if (nameToUse && !recipientName) setRecipientName(nameToUse);
+
+    // Se o usuário já digitou ou selecionou um morador, não interferir no campo
+    if (searchTerm.trim().length > 0 || selectedResident) {
+      return;
+    }
     
     if ((unitToUse || initialToUse || nameToUse) && user?.condominium_id) {
-      if (!searchTerm) {
-        setStatusMessage('Buscando Morador...');
-      }
+      setStatusMessage('Buscando Morador...');
       
       const matches = await findMatchingResidents(
         user.condominium_id,
         unitToUse,
         nameToUse,
         undefined,
-        initialToUse
+        initialToUse,
+        allResidents
       );
  
       if (matches.length > 0) {
-        setMatchingResidents(matches.slice(0, 10));
-        setIsAiSearch(true);
-        const term = unitToUse || nameToUse || initialToUse;
-        
-        // SÓ ATUALIZA o campo de busca se o usuário ainda não tiver digitado nada
-        if (!searchTerm) {
+        if (!searchTerm.trim() && !selectedResident) {
+          setMatchingResidents(matches.slice(0, 10));
+          setIsAiSearch(true);
+          const term = unitToUse || nameToUse || initialToUse;
           setSearchTerm(term);
           setIsManualUnitSearch(!!unitToUse);
         }
       } else if (unitToUse) {
-        if (!searchTerm) {
+        if (!searchTerm.trim() && !selectedResident) {
           setSearchTerm(unitToUse);
           setIsManualUnitSearch(true);
+          const normalizedUnitSearch = normalizeUnit(unitToUse);
+          const houseMatches = (allResidents || [])
+            .filter(r => r && r.id && normalizeUnit(r.unidade || '').includes(normalizedUnitSearch))
+            .map(r => ({ resident: r, score: 100 }));
+          
+          if (houseMatches.length > 0) {
+            setMatchingResidents(houseMatches);
+            setOcrConfidence('media');
+          }
         }
-        const normalizedUnitSearch = normalizeUnit(unitToUse);
-        const houseMatches = allResidents
-          .filter(r => normalizeUnit(r.unidade || '').includes(normalizedUnitSearch))
-          .map(r => ({ resident: r, score: 100 }));
-        
-        if (houseMatches.length > 0) {
-          setMatchingResidents(houseMatches);
-          setOcrConfidence('media');
-        }
-      } else if (!searchTerm) {
+      } else if (!searchTerm.trim() && !selectedResident) {
         fallbackToManual();
       }
-    } else {
+    } else if (!searchTerm.trim() && !selectedResident) {
       fallbackToManual();
     }
   };
@@ -601,7 +727,7 @@ export default function PackageNew({ user }: PackageNewProps) {
 
       const ocrPromise = (async () => {
         try {
-          const parsedData = await extractBasicText(finalOcrBase64);
+          const parsedData = await extractBasicText(finalOcrBase64, abortControllerRef.current?.signal);
           return parsedData;
         } catch (err: any) {
           console.error("Erro no OCR:", err);
@@ -616,9 +742,9 @@ export default function PackageNew({ user }: PackageNewProps) {
         timeoutPromise
       ]);
 
-      // Feedback visual mínimo de 1.8 segundos para dar tempo do usuário ver a análise
+      // Transição visual suave (200ms em vez de 1.8s de espera artificial)
       const elapsedTime = Date.now() - startTime;
-      const minWait = 1800; // 1.8 segundos
+      const minWait = 200;
       if (elapsedTime < minWait) {
         await new Promise(resolve => setTimeout(resolve, minWait - elapsedTime));
       }
@@ -643,63 +769,203 @@ export default function PackageNew({ user }: PackageNewProps) {
   // Pre-fill if resident is passed via state
   useEffect(() => {
     if (location.state?.resident) {
-      handleSelectResident(location.state.resident);
+      handleSelectResident(location.state.resident, false);
       setStep('manual'); // If coming from resident card, go to manual/form
     }
   }, [location.state]);
 
-  // Search residents
+  // Search residents with indexed pre-normalized records
   useEffect(() => {
-    const searchResidents = async () => {
-      if (selectedResident) return;
+    if (selectedResident) {
+      setIsSearchingResidents(false);
+      return;
+    }
 
+    const trimmed = searchTerm.trim();
+    if (!trimmed) {
+      setIsSearchingResidents(false);
+      searchedTermRef.current = '';
       if (isManualUnitSearch) {
-        if (!searchTerm) {
+        setMatchingResidents([]);
+      } else if (!foundPartialData) {
+        setMatchingResidents((allResidents || []).slice(0, 10).map(r => ({ resident: r, score: 0 })));
+      }
+      return;
+    }
+
+    setIsSearchingResidents(true);
+
+    const timer = setTimeout(() => {
+      try {
+        if (!indexedResidents || indexedResidents.length === 0) {
           setMatchingResidents([]);
           return;
         }
-        // Manual search by house number with normalization
-        const normalizedSearch = normalizeUnit(searchTerm);
-        const matches = allResidents
-          .filter(r => {
-            const resUnit = normalizeUnit(r.unidade || '');
-            return resUnit.includes(normalizedSearch);
-          })
-          .map(r => {
-            const resUnit = normalizeUnit(r.unidade || '');
-            return { resident: r, score: (resUnit === normalizedSearch ? 100 : 50) };
-          })
-          .sort((a,b) => b.score - a.score);
-        setMatchingResidents(matches as ScoredResident[]);
-        return;
-      }
 
-      // If empty search, show some default residents (browse mode)
-      if (!searchTerm && !foundPartialData) {
-        setMatchingResidents(allResidents.slice(0, 10).map(r => ({ resident: r, score: 0 })));
-        return;
-      }
+        const condoId = user?.condominium_id;
 
-      // Intelligent search: Use the matcher even for manual typing
-      const matches = await findMatchingResidents(
-        user?.condominium_id || '',
-        searchTerm, // Try as unit
-        searchTerm, // Try as name
-        { full_string: searchTerm } // Try as full string
-      );
+        if (isManualUnitSearch) {
+          const normalizedSearch = normalizeUnit(trimmed);
+          const rawSearchUpper = trimmed.toUpperCase();
+          
+          const matches: ScoredResident[] = [];
+          for (let i = 0; i < indexedResidents.length; i++) {
+            const item = indexedResidents[i];
+            if (!item.raw || !item.raw.id) continue;
+            if (condoId && item.condoId && item.condoId !== condoId) continue;
 
-      if (matches.length > 0) {
-        setMatchingResidents(matches);
-      } else {
+            if (item.normUnit.includes(normalizedSearch) || item.rawUnitUpper.includes(rawSearchUpper)) {
+              const exact = item.normUnit === normalizedSearch || item.rawUnitUpper === rawSearchUpper;
+              matches.push({
+                resident: item.raw,
+                score: exact ? 100 : 50
+              });
+              if (matches.length >= 25) break;
+            }
+          }
+          matches.sort((a, b) => b.score - a.score);
+          setMatchingResidents(matches);
+        } else {
+          const normalizedSearch = normalizeName(trimmed);
+          const rawSearchUpper = trimmed.toUpperCase();
+
+          const matches: ScoredResident[] = [];
+          for (let i = 0; i < indexedResidents.length; i++) {
+            const item = indexedResidents[i];
+            if (!item.raw || !item.raw.id) continue;
+            if (condoId && item.condoId && item.condoId !== condoId) continue;
+
+            if (
+              item.normName.includes(normalizedSearch) || 
+              item.fullNameUpper.includes(rawSearchUpper) || 
+              item.normUnit.includes(normalizedSearch)
+            ) {
+              const exact = item.normName === normalizedSearch || item.fullNameUpper === rawSearchUpper;
+              const starts = item.normName.startsWith(normalizedSearch) || item.fullNameUpper.startsWith(rawSearchUpper);
+              matches.push({
+                resident: item.raw,
+                score: exact ? 100 : (starts ? 80 : 60)
+              });
+              if (matches.length >= 25) break;
+            }
+          }
+          matches.sort((a, b) => b.score - a.score);
+          setMatchingResidents(matches);
+        }
+        searchedTermRef.current = trimmed;
+      } catch (err) {
+        console.error("Erro ao pesquisar morador:", err);
         setMatchingResidents([]);
+      } finally {
+        setIsSearchingResidents(false);
       }
-    };
+    }, 100);
 
-    const timer = setTimeout(searchResidents, 300);
     return () => clearTimeout(timer);
-  }, [searchTerm, user?.condominium_id, selectedResident, allResidents, foundPartialData, isAiSearch]);
+  }, [searchTerm, user?.condominium_id, selectedResident, indexedResidents, foundPartialData, isManualUnitSearch, allResidents]);
 
-  const handleSelectResident = async (resident: Morador) => {
+  // Fechamento automático do teclado e posicionamento suave da lista de moradores após a digitação estabilizada
+  useEffect(() => {
+    const trimmed = searchTerm.trim();
+    if (
+      !isSearchingResidents && 
+      matchingResidents.length > 0 && 
+      step === 'manual' && 
+      !selectedResident && 
+      trimmed.length > 0 && 
+      searchedTermRef.current === trimmed
+    ) {
+      // Aguarda a estabilização completa da digitação (400ms após a última tecla)
+      const stabilizationTimer = setTimeout(() => {
+        // 1. Fecha o teclado virtual liberando a área visual da tela
+        if (unitInputRef.current && document.activeElement === unitInputRef.current) {
+          unitInputRef.current.blur();
+        }
+
+        // 2. Executa o scroll automático com pequeno delay para adaptação da viewport pós-teclado
+        setTimeout(() => {
+          if (residentsSectionRef.current) {
+            const element = residentsSectionRef.current;
+            const rect = element.getBoundingClientRect();
+            const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
+            
+            const targetY = Math.max(0, rect.top + scrollTop - 40);
+
+            if (lastScrolledTargetYRef.current === -1 || Math.abs(targetY - lastScrolledTargetYRef.current) > 15) {
+              lastScrolledTargetYRef.current = targetY;
+              window.scrollTo({
+                top: targetY,
+                behavior: 'smooth'
+              });
+            }
+          }
+        }, 100);
+      }, 400);
+
+      return () => clearTimeout(stabilizationTimer);
+    }
+  }, [isSearchingResidents, matchingResidents.length, step, selectedResident, searchTerm]);
+
+  const triggerWhatsAppForResident = (resident: Morador, codeToUse?: string) => {
+    try {
+      const activeCode = codeToUse || pickupCode || generatePickupCode();
+      const nameOfCondo = condoName || 'Condomínio';
+      const isBatchNote = isBatch || batchQuantity > 1;
+      const batchLabel = isBatchNote ? ` (Lote de ${batchQuantity} encomendas)` : '';
+      const finalNotes = isBatchNote ? (notes ? `${notes}, Lote de ${batchQuantity} encomendas` : `Lote de ${batchQuantity} encomendas`) : notes;
+      const isLargePackage = notes.includes('Encomenda grande (retirada imediata)');
+
+      let directMessage = `Olá, ${resident.nome}! Sua encomenda chegou na portaria de ${nameOfCondo}. Código: ${activeCode}${batchLabel}`;
+      try {
+        const prepared = prepareWhatsAppNotification(
+          resident,
+          nameOfCondo,
+          activeCode,
+          finalNotes,
+          undefined,
+          1,
+          'disponivel',
+          undefined,
+          undefined,
+          photoUrl,
+          isLargePackage
+        );
+        if (prepared) directMessage = prepared;
+      } catch (prepErr) {
+        console.warn("Erro ao preparar texto do WhatsApp:", prepErr);
+      }
+
+      const cleanPhone = resident.telefone ? resident.telefone.replace(/\D/g, '') : '';
+      if (cleanPhone && cleanPhone.length >= 10) {
+        // BLINDAGEM DE MODO TESTE: Se o morador for importado em MODO TESTE, simula e NUNCA abre WhatsApp real
+        if (isTestResident(resident)) {
+          toast.success(`🧪 [MODO TESTE] Envio simulado com sucesso para ${resident.nome}. Nenhuma mensagem real foi enviada.`, {
+            icon: '🧪',
+            duration: 4000
+          });
+          resetForm();
+          startCamera();
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+          toast.success('Câmera pronta para o próximo registro!', { icon: '📸', duration: 4000 });
+          return;
+        }
+
+        whatsAppOpenedTimeRef.current = Date.now();
+        hasBeenHiddenRef.current = false;
+        setIsWaitingForReturn(true);
+        const link = getWhatsAppLink(resident.telefone!, directMessage, photoUrl);
+        window.open(link, '_blank');
+        toast.success(`Abrindo WhatsApp para ${resident.nome}...`, { icon: '💬' });
+        // O reset do formulário e reativação da câmera ocorrerão suavemente no retorno do WhatsApp (ao focar a janela)
+      } else {
+        toast.error(`Morador ${resident.nome} selecionado, porém não possui telefone válido cadastrado para WhatsApp.`, { duration: 5000 });
+      }
+    } catch (err) {
+      console.error("Erro ao disparar WhatsApp do morador:", err);
+    }
+  };
+
+  const handleSelectResident = async (resident: Morador, shouldOpenWhatsapp: boolean = false) => {
     unitInputRef.current?.blur();
     setSelectedResident(resident);
     setRecipientName(resident.nome || '');
@@ -712,7 +978,9 @@ export default function PackageNew({ user }: PackageNewProps) {
     setSearchTerm(resident.nome || '');
     setMatchingResidents([]);
 
-    // Check for existing pending packages to reuse code/token
+    let activeCode = pickupCode;
+
+    // Check for existing pending packages to reuse code/token em background
     try {
       const { data: existing } = await supabase
         .from('packages')
@@ -722,9 +990,9 @@ export default function PackageNew({ user }: PackageNewProps) {
         .order('received_at', { ascending: false })
         .limit(1);
 
-      if (existing && existing.length > 0) {
-        if (existing[0].pickup_code) setPickupCode(existing[0].pickup_code);
-        // Token isn't in state but used in handleSubmit, it handles it there
+      if (existing && existing.length > 0 && existing[0].pickup_code) {
+        activeCode = existing[0].pickup_code;
+        setPickupCode(activeCode);
       }
     } catch (err) {
       console.warn("Erro ao buscar código existente:", err);
@@ -735,6 +1003,8 @@ export default function PackageNew({ user }: PackageNewProps) {
     setSelectedResident(null);
     setLoading(false);
     setIsSaving(false);
+    lastScrolledTargetYRef.current = -1;
+    searchedTermRef.current = '';
     // Não limpamos recipientName e unitNumber para que o porteiro possa ver o que o OCR leu
     setSearchTerm('');
     setMatchingResidents([]);
@@ -768,6 +1038,21 @@ export default function PackageNew({ user }: PackageNewProps) {
   };
 
   const resetForm = (stayInManual: boolean = false) => {
+    // Invalida requisições assíncronas pendentes (OCR e Uploads)
+    activeRequestIdRef.current++;
+    lastScrolledTargetYRef.current = -1;
+    searchedTermRef.current = '';
+
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+
+    if (objectUrlRef.current && objectUrlRef.current.startsWith('blob:')) {
+      try { URL.revokeObjectURL(objectUrlRef.current); } catch(e) {}
+      objectUrlRef.current = null;
+    }
+
     if (!stayInManual) {
       setStep('camera');
       setPhotoUrl('');
@@ -810,43 +1095,22 @@ export default function PackageNew({ user }: PackageNewProps) {
 
   useEffect(() => {
     if (shouldFocusSearch && step === 'manual') {
+      // Se o usuário já começou a digitar ou interagir, cancela o foco automático de background
+      if (searchTerm.trim().length > 0) {
+        setShouldFocusSearch(false);
+        return;
+      }
+
       const timer = setTimeout(() => {
-        if (unitInputRef.current) {
+        if (unitInputRef.current && searchTerm.trim().length === 0) {
           unitInputRef.current.focus();
-          // Tentativa extra para garantir em dispositivos móveis
-          setTimeout(() => unitInputRef.current?.focus(), 50);
-          setShouldFocusSearch(false);
         }
-      }, 400); // Delay de 400ms conforme solicitado
+        setShouldFocusSearch(false);
+      }, 40);
       return () => clearTimeout(timer);
     }
-  }, [shouldFocusSearch, step]);
+  }, [shouldFocusSearch, step, searchTerm]);
 
-  // Efeito de rolagem automática ao digitar número da casa (Mobile UX)
-  useEffect(() => {
-    if (isManualUnitSearch && searchTerm.length > 0 && step === 'manual' && !selectedResident) {
-      const scrollTimer = setTimeout(() => {
-        // Se houver moradores encontrados para esta unidade, fecha o teclado para facilitar visualização
-        if (matchingResidents.length > 0) {
-          unitInputRef.current?.blur();
-          
-          if (residentsSectionRef.current) {
-            // Calcula a posição para deixar o input visível no topo
-            const element = residentsSectionRef.current;
-            const rect = element.getBoundingClientRect();
-            const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
-            const targetY = rect.top + scrollTop - 80; // 80px de margem do topo para evitar esconder atrás de headers e menus do navegador
-
-            window.scrollTo({
-              top: targetY,
-              behavior: 'smooth'
-            });
-          }
-        }
-      }, 500); // Delay de 500ms conforme solicitado por UX de digitação
-      return () => clearTimeout(scrollTimer);
-    }
-  }, [searchTerm, isManualUnitSearch, step, selectedResident, matchingResidents.length]);
 
   useEffect(() => {
     if (selectedResident && detectedHandwrittenUnit && !ignoreResidencyAlert) {
@@ -880,7 +1144,7 @@ export default function PackageNew({ user }: PackageNewProps) {
         setShowResidencyAlert(true);
         // Se foi um clique direto na lista, selecionamos o morador mas NÃO salvamos ainda
         if (directResident) {
-          handleSelectResident(directResident);
+          handleSelectResident(directResident, false);
         }
         return;
       }
@@ -893,6 +1157,14 @@ export default function PackageNew({ user }: PackageNewProps) {
       return;
     }
 
+    unitInputRef.current?.blur();
+    setSelectedResident(targetResident);
+    setRecipientName(targetResident.nome || '');
+    setUnitNumber(targetResident.unidade || '');
+    if (targetResident.unit_type) {
+      setUnitType(targetResident.unit_type);
+    }
+
     setLoading(true);
     setIsSaving(true);
     setStatusMessage('SALVANDO...');
@@ -903,7 +1175,7 @@ export default function PackageNew({ user }: PackageNewProps) {
       let finalPhotoUrl = photoUrl;
       console.log("[SALVAMENTO] Iniciando com foto:", finalPhotoUrl?.substring(0, 50));
       
-      if (finalPhotoUrl && finalPhotoUrl.startsWith('data:') && uploadPromiseRef.current) {
+      if (finalPhotoUrl && (finalPhotoUrl.startsWith('data:') || finalPhotoUrl.startsWith('blob:')) && uploadPromiseRef.current) {
         setStatusMessage('FINALIZANDO FOTO...');
         const uploadedUrl = await uploadPromiseRef.current;
         if (uploadedUrl) {
@@ -912,8 +1184,28 @@ export default function PackageNew({ user }: PackageNewProps) {
         }
       }
 
-      // 1. Obter o usuário logado para capturar o ID se disponível
+      // 1. Obter o usuário logado e tratar UUIDs de forma segura
       const { data: { user: authUser } } = await supabase.auth.getUser();
+      const condoId = sanitizeUuid(user?.condominium_id) || user?.condominium_id || '';
+      const candidateUuid = (authUser?.id && isValidUuid(authUser.id)) 
+        ? authUser.id 
+        : (user?.id && isValidUuid(user.id) ? user.id : sanitizeUuid(user?.id));
+
+      let validProfileId: string | null = null;
+      if (candidateUuid) {
+        try {
+          const { data: prof } = await supabase
+            .from('profiles')
+            .select('id')
+            .eq('id', candidateUuid)
+            .maybeSingle();
+          if (prof?.id) {
+            validProfileId = prof.id;
+          }
+        } catch (e) {
+          console.warn("Verificação de perfil ignorada:", e);
+        }
+      }
 
       // 2. Verificar agrupamento (encomendas pendentes do mesmo morador)
       const { data: existingPackages } = await supabase
@@ -973,44 +1265,57 @@ export default function PackageNew({ user }: PackageNewProps) {
       const hasValidPhone = !!(targetResident.telefone && targetResident.telefone.replace(/\D/g, '').length >= 10);
       const shouldOpenWhatsAppNow = hasValidPhone && !notifyAfter;
       
-      const packageData = {
-        condominium_id: user.condominium_id,
+      const packageData: any = {
+        condominium_id: condoId,
         recipient_id: targetResident.id,
         unit_number: unitNumber || targetResident.unidade || '',
-        carrier,
-        tracking_code: trackingNumber,
-        notes: finalNotes,
-        photo_url: finalPhotoUrl,
-        received_by: user.id,
-        recebido_por: (currentPorterState && currentPorterState !== 'Selecione o Porteiro') ? currentPorterState : user.full_name,
-        porter_name: (currentPorterState && currentPorterState !== 'Selecione o Porteiro') ? currentPorterState : user.full_name,
-        registered_by: user.id,
+        carrier: carrier || '',
+        tracking_code: trackingNumber || '',
+        notes: finalNotes || '',
+        photo_url: finalPhotoUrl || '',
+        recebido_por: (currentPorterState && currentPorterState !== 'Selecione o Porteiro') ? currentPorterState : (user?.full_name || 'Porteiro'),
+        porter_name: (currentPorterState && currentPorterState !== 'Selecione o Porteiro') ? currentPorterState : (user?.full_name || 'Porteiro'),
         received_at: new Date().toISOString(),
         pickup_code: finalPickupCode,
         pickup_token: finalPickupToken,
-        status: 'received', // Valor aceito pelo banco conforme requisito
+        status: 'received',
         whatsapp_notified: shouldOpenWhatsAppNow, 
         whatsapp_sent: shouldOpenWhatsAppNow,
         whatsapp_status: shouldOpenWhatsAppNow ? 'enviado' : (targetResident.telefone ? 'pending' : 'no_recipient'),
         whatsapp_message: directMessage
       };
 
+      if (validProfileId) {
+        packageData.received_by = validProfileId;
+        packageData.registered_by = validProfileId;
+      }
+
       console.log("[SALVAMENTO] Objeto final:", packageData);
 
-      const { data: newPackage, error: insertError } = await supabase
+      let insertResult = await supabase
         .from('packages')
         .insert([packageData])
         .select('*')
         .single();
 
-      if (insertError) {
-        console.error("[ERRO_CRITICO] Falha ao inserir no banco:", insertError);
-        throw new Error(insertError.message);
+      if (insertResult.error && (insertResult.error.code === '23503' || insertResult.error.message?.includes('foreign key constraint'))) {
+        console.warn("[FALLBACK] Falha de chave estrangeira em received_by/registered_by. Tentando salvar com autor em texto:", insertResult.error);
+        const fallbackData = { ...packageData };
+        delete fallbackData.received_by;
+        delete fallbackData.registered_by;
+        insertResult = await supabase
+          .from('packages')
+          .insert([fallbackData])
+          .select('*')
+          .single();
       }
 
-      if (!newPackage) {
-        throw new Error('Erro ao confirmar salvamento da encomenda.');
+      if (insertResult.error) {
+        console.error("[ERRO_CRITICO] Falha ao inserir no banco:", insertResult.error);
+        throw new Error(insertResult.error.message);
       }
+
+      const newPackage = insertResult.data;
 
       console.log("[SUCESSO] Encomenda salva com ID:", newPackage.id);
 
@@ -1050,10 +1355,10 @@ export default function PackageNew({ user }: PackageNewProps) {
       // 6. Auditoria
       try {
         await registrarAuditoria({
-          condominio_id: user.condominium_id || '',
-          usuario_id: user.id,
-          usuario_nome: user.full_name,
-          usuario_perfil: user.role,
+          condominio_id: user?.condominium_id || '',
+          usuario_id: user?.id || '',
+          usuario_nome: user?.full_name || 'Porteiro',
+          usuario_perfil: user?.role || 'porteiro',
           tipo_evento: 'ENCOMENDA_CADASTRADA',
           acao: 'CREATE',
           tabela_afetada: 'encomendas',
@@ -1072,21 +1377,22 @@ export default function PackageNew({ user }: PackageNewProps) {
       // ENVIO AUTOMÁTICO VIA LINK (SOLICITAÇÃO DO USUÁRIO)
       if (shouldOpenWhatsAppNow) {
         try {
+          whatsAppOpenedTimeRef.current = Date.now();
+          hasBeenHiddenRef.current = false;
+          setIsWaitingForReturn(true);
           const link = getWhatsAppLink(targetResident.telefone, directMessage, finalPhotoUrl);
           window.open(link, '_blank');
         } catch (linkErr) {
           console.error('Erro ao abrir link do WhatsApp:', linkErr);
         }
+      } else {
+        // FLUXO DE ESTABILIDADE: Highlight, Scroll e Reset para a próxima encomenda apenas se NÃO abriu o WhatsApp
+        setIsHighlighting(true);
+        setTimeout(() => setIsHighlighting(false), 1000);
+        setBlockAutoCamera(false);
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        resetForm();
       }
-
-      // FLUXO DE ESTABILIDADE: Highlight, Scroll e Reset sem câmera auto se abrir WhatsApp
-      setIsHighlighting(true);
-      setTimeout(() => setIsHighlighting(false), 1000);
-      setBlockAutoCamera(false);
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-      
-      // Limpar campos
-      resetForm();
     } catch (error: any) {
       console.error('Erro ao registrar encomenda:', error);
       feedback.error();
@@ -1382,8 +1688,8 @@ export default function PackageNew({ user }: PackageNewProps) {
               animate={{ opacity: 1, x: 0 }}
               className="space-y-6"
             >
-              {/* Photo Preview */}
-              {photoUrl && (
+              {/* Photo Preview or Capture option */}
+              {photoUrl ? (
                 <div className="relative rounded-2xl overflow-hidden aspect-video bg-gray-100 border border-gray-200 shadow-sm">
                   <img 
                     src={photoUrl} 
@@ -1405,13 +1711,30 @@ export default function PackageNew({ user }: PackageNewProps) {
                   </button>
                   <button
                     type="button"
-                    onClick={(e) => { e.preventDefault(); resetForm(); }}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      setStep('camera');
+                      startCamera();
+                    }}
                     className="absolute bottom-2 right-2 px-3 py-1.5 bg-black/40 backdrop-blur-sm rounded-lg text-[10px] text-white font-bold uppercase tracking-wider flex items-center gap-1.5 hover:bg-black/60 transition-colors"
                   >
                     <Camera className="w-3.5 h-3.5" />
                     Tirar nova foto
                   </button>
                 </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    setStep('camera');
+                    startCamera();
+                  }}
+                  className="w-full py-4 border-2 border-dashed border-indigo-200 bg-indigo-50/50 hover:bg-indigo-50 rounded-2xl flex items-center justify-center gap-2 text-indigo-600 font-bold transition-all shadow-sm active:scale-[0.99]"
+                >
+                  <Camera className="w-5 h-5 text-indigo-600" />
+                  <span>Tirar foto da encomenda</span>
+                </button>
               )}
 
               <form id="package-form" onSubmit={(e) => e.preventDefault()} className="space-y-6">
@@ -1527,9 +1850,17 @@ export default function PackageNew({ user }: PackageNewProps) {
                                ref={unitInputRef}
                                type="tel"
                                inputMode="numeric"
+                               autoFocus
                                placeholder="Casa / Unidade..."
                                value={searchTerm}
                                onChange={(e) => setSearchTerm(e.target.value)}
+                               onKeyDown={(e) => {
+                                 if (e.key === 'Enter') {
+                                   e.preventDefault();
+                                   e.stopPropagation();
+                                   unitInputRef.current?.blur();
+                                 }
+                               }}
                                onFocus={() => setIsUnitInputFocused(true)}
                                onBlur={() => setIsUnitInputFocused(false)}
                                className="w-full pl-16 pr-4 py-5 bg-gray-50 border-2 border-transparent focus:border-indigo-500 focus:bg-white rounded-2xl transition-all outline-none text-2xl font-black text-indigo-900 placeholder:text-gray-300"
@@ -1547,14 +1878,29 @@ export default function PackageNew({ user }: PackageNewProps) {
                                 setSearchTerm(e.target.value);
                                 setIsAiSearch(false);
                               }}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  unitInputRef.current?.blur();
+                                }
+                              }}
                               className="w-full pl-12 pr-4 py-4 bg-gray-50 border-2 border-transparent focus:border-indigo-500 focus:bg-white rounded-xl transition-all outline-none text-lg text-gray-900 placeholder:text-gray-400"
                             />
                           </div>
                         )}
                       </div>
 
+                      {/* Loading indicator while searching */}
+                      {isSearchingResidents && (
+                        <div className="flex items-center gap-2 py-3 px-4 bg-indigo-50/80 rounded-xl mb-4 border border-indigo-100 text-indigo-700 font-bold text-xs animate-pulse">
+                          <Loader2 className="w-4 h-4 animate-spin text-indigo-600" />
+                          <span>Localizando morador da {isManualUnitSearch ? `unidade ${searchTerm}` : `busca '${searchTerm}'`}...</span>
+                        </div>
+                      )}
+
                       {/* Search Results / Intelligent Suggestions */}
-                      {matchingResidents.length > 0 && (
+                      {!isSearchingResidents && matchingResidents.length > 0 && (
                         <div className="space-y-4 max-h-[500px] overflow-y-auto pr-2 pb-2 scroll-smooth custom-scrollbar">
                           <div className="flex items-center gap-2 px-1 mb-2">
                              <Sparkles className="w-3.5 h-3.5 text-amber-500" />
@@ -1563,17 +1909,16 @@ export default function PackageNew({ user }: PackageNewProps) {
                              </p>
                           </div>
                           
-                          {matchingResidents.slice(0, 10).map(({ resident, score }, index) => {
-                            // Destaque para o primeiro da lista se houver score relevante
-                            const isBest = searchTerm && index === 0 && score >= 70;
+                          {matchingResidents.slice(0, 10).map((item, index) => {
+                            if (!item || !item.resident) return null;
+                            const { resident, score } = item;
+                            const isBest = !!(searchTerm && index === 0 && score >= 70);
                             
                             return (
                               <button
                                 key={resident.id}
                                 type="button"
                                 onClick={() => {
-                                  // Seleciona e salva automaticamente a encomenda após a escolha do morador
-                                  handleSelectResident(resident);
                                   registrarEncomenda(undefined, resident, false);
                                 }}
                                 className={`w-full relative flex flex-col p-4 rounded-2xl transition-all border-2 text-left outline-none hover:shadow-lg active:scale-[0.98] cursor-pointer touch-manipulation group ${
@@ -1633,45 +1978,53 @@ export default function PackageNew({ user }: PackageNewProps) {
                         </div>
                       )}
                       
-                      {searchTerm.length >= 2 && matchingResidents.length === 0 && (
-                        <div className="py-8 space-y-4">
+                      {!isSearchingResidents && searchTerm.trim().length >= 1 && matchingResidents.length === 0 && (
+                        <div className="py-6 space-y-4">
                           <div className="bg-white rounded-2xl p-6 border-2 border-dashed border-gray-200 text-center">
-                            <div className="w-12 h-12 bg-gray-50 rounded-full flex items-center justify-center mx-auto mb-4">
-                              <Search className="w-6 h-6 text-gray-400" />
+                            <div className="w-12 h-12 bg-amber-50 rounded-full flex items-center justify-center mx-auto mb-3 text-amber-600">
+                              <Search className="w-6 h-6" />
                             </div>
-                            <h3 className="text-gray-900 font-bold mb-1">Nenhum morador encontrado</h3>
-                            <p className="text-gray-500 text-sm mb-6">Tente uma das opções abaixo para continuar:</p>
+                            <h3 className="text-gray-900 font-bold mb-1 text-base">
+                              {isManualUnitSearch 
+                                ? `Nenhum morador encontrado na unidade ${searchTerm}`
+                                : `Nenhum morador encontrado para "${searchTerm}"`}
+                            </h3>
+                            <p className="text-gray-500 text-xs mb-5">
+                              Verifique se o número foi digitado corretamente ou escolha uma das opções:
+                            </p>
                             
                             <div className="grid grid-cols-1 gap-3">
+                              {isManualUnitSearch ? (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setIsManualUnitSearch(false);
+                                    setSearchTerm('');
+                                  }}
+                                  className="flex items-center justify-center gap-3 w-full py-3.5 bg-indigo-50 text-indigo-700 rounded-xl font-bold hover:bg-indigo-100 transition-all border border-indigo-100 text-xs"
+                                >
+                                  <Search className="w-4 h-4" />
+                                  Buscar pelo Nome do Morador
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setIsManualUnitSearch(true);
+                                    setSearchTerm('');
+                                  }}
+                                  className="flex items-center justify-center gap-3 w-full py-3.5 bg-emerald-50 text-emerald-700 rounded-xl font-bold hover:bg-emerald-100 transition-all border border-emerald-100 text-xs"
+                                >
+                                  <Hash className="w-4 h-4" />
+                                  Buscar pelo Número da Casa
+                                </button>
+                              )}
                               <button
                                 type="button"
-                                onClick={() => {
-                                  setIsManualUnitSearch(false);
-                                  setSearchTerm('');
-                                }}
-                                className="flex items-center justify-center gap-3 w-full py-4 bg-indigo-50 text-indigo-700 rounded-xl font-bold hover:bg-indigo-100 transition-all border border-indigo-100"
+                                onClick={() => setSearchTerm('')}
+                                className="flex items-center justify-center gap-3 w-full py-3 bg-gray-100 text-gray-700 rounded-xl font-bold hover:bg-gray-200 transition-all text-xs"
                               >
-                                <Search className="w-5 h-5" />
-                                Buscar por nome
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setIsManualUnitSearch(true);
-                                  setSearchTerm('');
-                                }}
-                                className="flex items-center justify-center gap-3 w-full py-4 bg-emerald-50 text-emerald-700 rounded-xl font-bold hover:bg-emerald-100 transition-all border border-emerald-100"
-                              >
-                                <Hash className="w-5 h-5" />
-                                Registrar por nº da casa
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => resetForm()}
-                                className="flex items-center justify-center gap-3 w-full py-4 bg-gray-100 text-gray-700 rounded-xl font-bold hover:bg-gray-200 transition-all border border-gray-200"
-                              >
-                                <Camera className="w-5 h-5" />
-                                Tirar nova foto
+                                Limpar Busca
                               </button>
                             </div>
                           </div>
@@ -1700,7 +2053,18 @@ export default function PackageNew({ user }: PackageNewProps) {
                             <p className={`text-[9px] font-black uppercase tracking-widest ${isFemale(selectedResident.nome) ? 'text-violet-400' : 'text-indigo-400'}`}>Morador Selecionado</p>
                           </div>
                         </div>
-                        <CheckCircle className={`w-5 h-5 ${isFemale(selectedResident.nome) ? 'text-violet-400' : 'text-indigo-400'}`} />
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => triggerWhatsAppForResident(selectedResident)}
+                            className="px-3 py-1.5 rounded-xl bg-emerald-600 text-white hover:bg-emerald-700 active:scale-95 transition-all shadow-sm flex items-center gap-1 text-xs font-bold"
+                            title="Notificar no WhatsApp"
+                          >
+                            <MessageCircle className="w-4 h-4" />
+                            <span>WhatsApp</span>
+                          </button>
+                          <CheckCircle className={`w-5 h-5 ${isFemale(selectedResident.nome) ? 'text-violet-400' : 'text-indigo-400'}`} />
+                        </div>
                       </div>
                     </div>
                   )}
@@ -1965,27 +2329,34 @@ export default function PackageNew({ user }: PackageNewProps) {
                   </button>
                 </div>
                 
-                <div className="grid grid-cols-1 gap-3">
-                  {['Marcos', 'Izaias', 'Rodrigo', 'Marisa', 'Bruno', 'Outro'].map((porter) => (
-                    <button
-                      type="button"
-                      key={porter}
-                      onClick={() => {
-                        setCurrentPorterState(porter);
-                        setManualPorter(porter);
-                        setShowPorterModal(false);
-                        toast.success(`Porteiro alterado para ${porter}`);
-                      }}
-                      className={`w-full py-4 px-6 rounded-2xl font-bold transition-all text-left flex items-center justify-between border cursor-pointer ${
-                        currentPorterState === porter 
-                          ? 'bg-emerald-50 border-emerald-200 text-emerald-700' 
-                          : 'bg-zinc-50 border-zinc-100 text-zinc-600 hover:bg-zinc-100 hover:border-zinc-200'
-                      }`}
-                    >
-                      {porter}
-                      {currentPorterState === porter && <Check className="w-5 h-5 text-emerald-600" />}
-                    </button>
-                  ))}
+                <div className="grid grid-cols-1 gap-3 max-h-[300px] overflow-y-auto pr-1">
+                  {portersList.length === 0 ? (
+                    <div className="p-4 text-center bg-zinc-50 rounded-2xl text-zinc-500 text-sm">
+                      <p className="font-semibold">Nenhum porteiro cadastrado neste condomínio.</p>
+                      <p className="text-xs text-zinc-400 mt-1">Cadastre porteiros no menu "Usuários".</p>
+                    </div>
+                  ) : (
+                    portersList.map((porter) => (
+                      <button
+                        type="button"
+                        key={porter.id}
+                        onClick={() => {
+                          setCurrentPorterState(porter.full_name);
+                          setManualPorter(porter.full_name, user?.condominium_id);
+                          setShowPorterModal(false);
+                          toast.success(`Porteiro alterado para ${porter.full_name}`);
+                        }}
+                        className={`w-full py-4 px-6 rounded-2xl font-bold transition-all text-left flex items-center justify-between border cursor-pointer ${
+                          currentPorterState === porter.full_name 
+                            ? 'bg-emerald-50 border-emerald-200 text-emerald-700' 
+                            : 'bg-zinc-50 border-zinc-100 text-zinc-600 hover:bg-zinc-100 hover:border-zinc-200'
+                        }`}
+                      >
+                        {porter.full_name}
+                        {currentPorterState === porter.full_name && <Check className="w-5 h-5 text-emerald-600" />}
+                      </button>
+                    ))
+                  )}
                 </div>
 
                 <button

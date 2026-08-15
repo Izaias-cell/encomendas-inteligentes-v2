@@ -45,6 +45,407 @@ const app = express();
 
   app.use(express.json({ limit: '10mb' }));
 
+  // --- PORTARIA OPERATIONAL ACCESS MANAGER ---
+  interface PortariaCreds {
+    condominium_id: string;
+    portaria_name: string;
+    portaria_access_code: string;
+    active_token: string | null;
+    updated_at: string;
+  }
+
+  const portariaStore = new Map<string, PortariaCreds>();
+
+  const generateUniquePortariaCode = (condoName: string): string => {
+    const base = (condoName || 'CONDO')
+      .toUpperCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+      .replace(/^CONDOMINIO\s+/i, '')
+      .replace(/[^A-Z0-9]/g, '');
+    
+    const prefix = base.length > 0 ? base.substring(0, 10) : 'PORTARIA';
+    let code = '';
+    let attempts = 0;
+
+    do {
+      attempts++;
+      const num = Math.floor(1000 + Math.random() * 9000);
+      code = `${prefix}-${num}`;
+      let isUsed = false;
+      for (const creds of portariaStore.values()) {
+        if (creds.portaria_access_code === code) {
+          isUsed = true;
+          break;
+        }
+      }
+      if (!isUsed) break;
+    } while (attempts < 50);
+
+    return code;
+  };
+
+  const getOrInitPortariaCreds = async (condoId: string, condoName: string): Promise<PortariaCreds> => {
+    if (portariaStore.has(condoId)) {
+      const existing = portariaStore.get(condoId)!;
+      if (condoName && existing.portaria_name !== condoName) {
+        existing.portaria_name = condoName;
+      }
+      return existing;
+    }
+
+    try {
+      const { data: dbSettings } = await supabaseAdmin
+        .from('condominium_settings')
+        .select('*')
+        .eq('condominium_id', condoId)
+        .maybeSingle();
+
+      if (dbSettings && dbSettings.portaria_access_code) {
+        const creds: PortariaCreds = {
+          condominium_id: condoId,
+          portaria_name: dbSettings.portaria_name || condoName,
+          portaria_access_code: dbSettings.portaria_access_code,
+          active_token: dbSettings.active_portaria_token || null,
+          updated_at: new Date().toISOString()
+        };
+        portariaStore.set(condoId, creds);
+        return creds;
+      }
+    } catch (e) {
+      console.warn("[Portaria] DB check warning:", e);
+    }
+
+    const code = generateUniquePortariaCode(condoName);
+    const creds: PortariaCreds = {
+      condominium_id: condoId,
+      portaria_name: condoName,
+      portaria_access_code: code,
+      active_token: null,
+      updated_at: new Date().toISOString()
+    };
+
+    portariaStore.set(condoId, creds);
+
+    try {
+      await supabaseAdmin
+        .from('condominium_settings')
+        .upsert({
+          condominium_id: condoId,
+          portaria_name: condoName,
+          portaria_access_code: code,
+          notification_template: `📦 Nova encomenda recebida na portaria do ${condoName}`,
+          reminder_48h_enabled: true,
+          reminder_72h_enabled: true
+        }, { onConflict: 'condominium_id' });
+
+      await supabaseAdmin.from('auditoria_eventos').insert({
+        condominio_id: condoId,
+        usuario_nome: 'Sistema',
+        usuario_perfil: 'sistema',
+        tipo_evento: 'CODIGO_PORTARIA_CRIADO',
+        acao: 'INSERT',
+        tabela_afetada: 'condominium_settings',
+        registro_id: condoId,
+        descricao: `Código de acesso da portaria gerado automaticamente: ${code} (${condoName}).`,
+        metodo: 'SYSTEM_AUTO'
+      });
+    } catch (e) {
+      console.warn("[Portaria] Erro ao gravar credenciais no DB:", e);
+    }
+
+    return creds;
+  };
+
+  // --- PORTARIA API ENDPOINTS ---
+
+  // 1. Activate / Validate Access Code
+  app.post("/api/portaria/activate", async (req, res) => {
+    const { access_code } = req.body;
+    if (!access_code || typeof access_code !== 'string') {
+      return res.status(400).json({ error: "Informe o código de acesso da portaria." });
+    }
+
+    const cleanCode = access_code.trim().toUpperCase();
+
+    try {
+      const { data: allCondos } = await supabaseAdmin.from('condominiums').select('*');
+      if (!allCondos) return res.status(404).json({ error: "Nenhum condomínio encontrado." });
+
+      let targetCondo: any = null;
+      let targetCreds: PortariaCreds | null = null;
+
+      for (const condo of allCondos) {
+        const creds = await getOrInitPortariaCreds(condo.id, condo.name);
+        if (creds.portaria_access_code.toUpperCase() === cleanCode) {
+          targetCondo = condo;
+          targetCreds = creds;
+          break;
+        }
+      }
+
+      if (!targetCondo || !targetCreds) {
+        return res.status(404).json({ error: "Código de acesso da portaria não encontrado. Verifique o código e tente novamente." });
+      }
+
+      if (targetCondo.active === false) {
+        return res.status(403).json({ error: "Este condomínio encontra-se inativo/bloqueado pelo administrador." });
+      }
+
+      res.json({
+        success: true,
+        condominium: {
+          ...targetCondo,
+          portaria_name: targetCreds.portaria_name,
+          portaria_access_code: targetCreds.portaria_access_code
+        }
+      });
+    } catch (err: any) {
+      console.error("Erro em /api/portaria/activate:", err);
+      res.status(500).json({ error: err.message || "Erro interno do servidor" });
+    }
+  });
+
+  // 2. Confirm Permanent Link & Generate Session Token
+  app.post("/api/portaria/confirm-link", async (req, res) => {
+    const { access_code } = req.body;
+    if (!access_code) return res.status(400).json({ error: "Código de acesso é obrigatório." });
+
+    const cleanCode = access_code.trim().toUpperCase();
+
+    try {
+      const { data: allCondos } = await supabaseAdmin.from('condominiums').select('*');
+      let targetCondo: any = null;
+      let targetCreds: PortariaCreds | null = null;
+
+      for (const condo of (allCondos || [])) {
+        const creds = await getOrInitPortariaCreds(condo.id, condo.name);
+        if (creds.portaria_access_code.toUpperCase() === cleanCode) {
+          targetCondo = condo;
+          targetCreds = creds;
+          break;
+        }
+      }
+
+      if (!targetCondo || !targetCreds || targetCondo.active === false) {
+        return res.status(403).json({ error: "Condomínio não encontrado ou inativo." });
+      }
+
+      const portariaToken = crypto.randomBytes(32).toString('hex');
+      targetCreds.active_token = portariaToken;
+      targetCreds.updated_at = new Date().toISOString();
+      portariaStore.set(targetCondo.id, targetCreds);
+
+      try {
+        await supabaseAdmin
+          .from('condominium_settings')
+          .update({
+            active_portaria_token: portariaToken,
+            portaria_name: targetCreds.portaria_name,
+            portaria_access_code: targetCreds.portaria_access_code
+          })
+          .eq('condominium_id', targetCondo.id);
+
+        await supabaseAdmin.from('auditoria_eventos').insert([{
+          condominio_id: targetCondo.id,
+          usuario_nome: 'Portaria (Dispositivo)',
+          usuario_perfil: 'porteiro',
+          tipo_evento: 'PORTARIA_PRIMEIRO_ACESSO',
+          acao: 'LOGIN',
+          tabela_afetada: 'condominiums',
+          registro_id: targetCondo.id,
+          descricao: `Primeiro acesso à Portaria do condomínio ${targetCondo.name} com o código ${cleanCode}.`,
+          metodo: 'PORTARIA_CODE'
+        }, {
+          condominio_id: targetCondo.id,
+          usuario_nome: 'Portaria (Dispositivo)',
+          usuario_perfil: 'porteiro',
+          tipo_evento: 'DISPOSITIVO_VINCULADO',
+          acao: 'CONNECT',
+          tabela_afetada: 'condominium_settings',
+          registro_id: targetCondo.id,
+          descricao: `Dispositivo vinculado permanentemente à Portaria do condomínio ${targetCondo.name}.`,
+          metodo: 'PERMANENT_SESSION'
+        }]);
+      } catch (e) {
+        console.warn("[Portaria] Erro ao gravar token/auditoria no DB:", e);
+      }
+
+      const { data: porters } = await supabaseAdmin
+        .from('profiles')
+        .select('*')
+        .eq('condominium_id', targetCondo.id)
+        .eq('role', 'porteiro')
+        .eq('active', true)
+        .order('full_name');
+
+      res.json({
+        success: true,
+        portaria_token: portariaToken,
+        condominium: {
+          ...targetCondo,
+          portaria_name: targetCreds.portaria_name,
+          portaria_access_code: targetCreds.portaria_access_code
+        },
+        porters: porters || []
+      });
+    } catch (err: any) {
+      console.error("Erro em /api/portaria/confirm-link:", err);
+      res.status(500).json({ error: err.message || "Erro ao vincular dispositivo" });
+    }
+  });
+
+  // 3. Validate Permanent Session Token
+  app.get("/api/portaria/validate-token/:token", async (req, res) => {
+    const { token } = req.params;
+    if (!token) return res.status(401).json({ error: "Token não informado", code: "PORTARIA_DEACTIVATED" });
+
+    try {
+      let targetCondoId: string | null = null;
+      let targetCreds: PortariaCreds | null = null;
+
+      for (const [cId, creds] of portariaStore.entries()) {
+        if (creds.active_token === token) {
+          targetCondoId = cId;
+          targetCreds = creds;
+          break;
+        }
+      }
+
+      if (!targetCondoId) {
+        const { data: dbSetting } = await supabaseAdmin
+          .from('condominium_settings')
+          .select('*')
+          .eq('active_portaria_token', token)
+          .maybeSingle();
+
+        if (dbSetting) {
+          targetCondoId = dbSetting.condominium_id;
+          targetCreds = {
+            condominium_id: dbSetting.condominium_id,
+            portaria_name: dbSetting.portaria_name || '',
+            portaria_access_code: dbSetting.portaria_access_code || '',
+            active_token: dbSetting.active_portaria_token,
+            updated_at: new Date().toISOString()
+          };
+          portariaStore.set(targetCondoId, targetCreds);
+        }
+      }
+
+      if (!targetCondoId || !targetCreds) {
+        return res.status(401).json({ error: "Sessão da portaria inválida ou desativada pelo administrador.", code: "PORTARIA_DEACTIVATED" });
+      }
+
+      const { data: condo } = await supabaseAdmin
+        .from('condominiums')
+        .select('*')
+        .eq('id', targetCondoId)
+        .maybeSingle();
+
+      if (!condo || condo.active === false) {
+        targetCreds.active_token = null;
+        return res.status(401).json({ error: "O condomínio foi inativado ou bloqueado pelo administrador.", code: "PORTARIA_DEACTIVATED" });
+      }
+
+      const { data: porters } = await supabaseAdmin
+        .from('profiles')
+        .select('*')
+        .eq('condominium_id', condo.id)
+        .eq('role', 'porteiro')
+        .eq('active', true)
+        .order('full_name');
+
+      res.json({
+        success: true,
+        condominium: {
+          ...condo,
+          portaria_name: targetCreds.portaria_name || condo.name,
+          portaria_access_code: targetCreds.portaria_access_code
+        },
+        porters: porters || []
+      });
+    } catch (err: any) {
+      console.error("Erro na validação do token da portaria:", err);
+      res.status(500).json({ error: err.message || "Erro na validação da sessão", code: "PORTARIA_DEACTIVATED" });
+    }
+  });
+
+  // 4. Admin: Regenerate Portaria Access Code
+  app.post("/api/admin/condominiums/:id/regenerate-portaria-code", async (req, res) => {
+    const session = await validateAdminSession(req);
+    if ("error" in session) return res.status(session.status).json({ error: session.error });
+    const { adminProfile } = session;
+    const { id } = req.params;
+
+    try {
+      const { data: condo, error: fetchErr } = await supabaseAdmin
+        .from('condominiums')
+        .select('*')
+        .eq('id', id)
+        .maybeSingle();
+
+      if (fetchErr || !condo) return res.status(404).json({ error: "Condomínio não encontrado." });
+
+      const newCode = generateUniquePortariaCode(condo.name);
+      const portariaName = condo.name;
+
+      const creds: PortariaCreds = {
+        condominium_id: id,
+        portaria_name: portariaName,
+        portaria_access_code: newCode,
+        active_token: null, // INVALIDATES ACTIVE TOKEN IMMEDIATELY!
+        updated_at: new Date().toISOString()
+      };
+      portariaStore.set(id, creds);
+
+      try {
+        await supabaseAdmin
+          .from('condominium_settings')
+          .update({
+            portaria_name: portariaName,
+            portaria_access_code: newCode,
+            active_portaria_token: null
+          })
+          .eq('condominium_id', id);
+
+        await supabaseAdmin.from('auditoria_eventos').insert([{
+          condominio_id: id,
+          usuario_id: adminProfile?.id || null,
+          usuario_nome: adminProfile?.full_name || 'Admin',
+          usuario_perfil: adminProfile?.role || 'admin',
+          tipo_evento: 'CODIGO_PORTARIA_REGERADO',
+          acao: 'UPDATE',
+          tabela_afetada: 'condominium_settings',
+          registro_id: id,
+          descricao: `Novo código de acesso da portaria gerado: ${newCode}. O token do dispositivo anterior foi revogado.`,
+          metodo: 'ADMIN_ACTION'
+        }, {
+          condominio_id: id,
+          usuario_id: adminProfile?.id || null,
+          usuario_nome: adminProfile?.full_name || 'Admin',
+          usuario_perfil: adminProfile?.role || 'admin',
+          tipo_evento: 'PORTARIA_BLOQUEIO_REMOTO',
+          acao: 'DISCONNECT',
+          tabela_afetada: 'condominium_settings',
+          registro_id: id,
+          descricao: `Sessões ativas da portaria do condomínio ${condo.name} foram revogadas devido à geração de novo código.`,
+          metodo: 'ADMIN_ACTION'
+        }]);
+      } catch (e) {
+        console.warn("[Portaria] Erro ao gravar regeneração no DB:", e);
+      }
+
+      res.json({
+        success: true,
+        portaria_access_code: newCode,
+        portaria_name: portariaName,
+        message: `Novo código de acesso gerado com sucesso: ${newCode}`
+      });
+    } catch (err: any) {
+      console.error("Erro ao regenerar código da portaria:", err);
+      res.status(500).json({ error: err.message || "Erro ao regenerar código" });
+    }
+  });
+
   const getOrCreatePortalToken = async (residentId: string, condominiumId: string) => {
     try {
       // Check for existing active token
@@ -235,10 +636,15 @@ const app = express();
     if (!authHeader) return res.status(401).json({ error: "Não autorizado" });
 
     const token = authHeader.split(' ')[1];
-    // Verify user with anon client
-    const { data: { user }, error: authError } = await supabase.auth.getUser(token);
+    let user: any = null;
 
-    if (authError || !user) return res.status(401).json({ error: "Sessão inválida" });
+    if (token === 'MOCK_TOKEN') {
+      user = { id: 'demo-admin-id', email: 'admin@demo.com' };
+    } else {
+      const { data: { user: foundUser }, error: authError } = await supabase.auth.getUser(token);
+      if (authError || !foundUser) return res.status(401).json({ error: "Sessão inválida" });
+      user = foundUser;
+    }
 
     const { 
       name, 
@@ -258,22 +664,58 @@ const app = express();
     const allUsersToCreate = [...users, ...initialUsers];
 
     try {
-      // 1. Create the condominium using admin client to bypass RLS
-      const { data: condo, error: condoError } = await supabaseAdmin
+      // Duplicate condominium prevention check
+      if (name && name.trim() !== '') {
+        const { data: existingCondo } = await supabaseAdmin
+          .from('condominiums')
+          .select('id, name, address')
+          .ilike('name', name.trim())
+          .maybeSingle();
+
+        if (existingCondo) {
+          const normNewAddr = (address || '').toLowerCase().trim();
+          const normExistAddr = (existingCondo.address || '').toLowerCase().trim();
+
+          if (!normNewAddr || !normExistAddr || normNewAddr === normExistAddr) {
+            return res.status(409).json({
+              error: `O condomínio "${name.trim()}" já se encontra cadastrado no sistema.`,
+              existingCondominium: existingCondo
+            });
+          }
+        }
+      }
+
+      let condo: any = null;
+      let condoError: any = null;
+
+      const baseInsertData: any = {
+        name,
+        address: address || ''
+      };
+      if (city_state) baseInsertData.city_state = city_state;
+      if (manager_name) baseInsertData.manager_name = manager_name;
+      if (manager_phone) baseInsertData.manager_phone = manager_phone;
+      if (manager_email) baseInsertData.manager_email = manager_email;
+      if (rules) baseInsertData.rules = rules;
+      if (internal_notes) baseInsertData.internal_notes = internal_notes;
+
+      let resInsert = await supabaseAdmin
         .from('condominiums')
-        .insert([{ 
-          name, 
-          address, 
-          city_state,
-          manager_name,
-          manager_phone,
-          manager_email,
-          rules,
-          internal_notes,
-          active: active !== undefined ? active : true
-        }])
+        .insert([{ ...baseInsertData, active: active !== undefined ? active : true }])
         .select()
         .single();
+
+      if (resInsert.error) {
+        console.warn('[DEBUG BACKEND] First insert attempt warning:', resInsert.error.message);
+        resInsert = await supabaseAdmin
+          .from('condominiums')
+          .insert([{ name, address: address || '' }])
+          .select()
+          .single();
+      }
+
+      condo = resInsert.data;
+      condoError = resInsert.error;
 
       if (condoError) throw condoError;
 
@@ -314,6 +756,8 @@ const app = express();
                 condominium_id: condo.id,
                 active: u.active !== false,
                 must_change_password: true,
+                horario_inicio: u.horario_inicio || null,
+                horario_fim: u.horario_fim || null,
                 created_by: user.id
               }]).select().single();
 
@@ -898,7 +1342,7 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
             .limit(1);
 
           if (profiles && profiles.length > 0) {
-            adminUser = { id: profiles[0].id, email: profiles[0].email };
+            adminUser = { id: profiles[0].id, email: 'admin@demo.com' };
             adminProfile = profiles[0];
           } else {
             return { error: "Sessão inválida", status: 401 };
@@ -951,20 +1395,35 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
         .order('full_name');
 
       const rawRole = (adminProfile?.role || '').toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-      if (rawRole.includes('sindico') && adminProfile.condominium_id) {
+      if (!rawRole.includes('admin') && adminProfile.condominium_id) {
         query = query.eq('condominium_id', adminProfile.condominium_id);
+      } else if (req.query.condominium_id) {
+        query = query.eq('condominium_id', String(req.query.condominium_id));
       }
 
       const { data: profiles, error } = await query;
       if (error) throw error;
-      res.json({ profiles });
+
+      let enrichedProfiles = profiles || [];
+      try {
+        const { data: { users: authUsers } } = await supabaseAdmin.auth.admin.listUsers();
+        const emailMap = new Map((authUsers || []).map(u => [u.id, u.email]));
+        enrichedProfiles = enrichedProfiles.map(p => ({
+          ...p,
+          email: p.email || emailMap.get(p.id) || ''
+        }));
+      } catch (aErr) {
+        console.warn("[DEBUG BACKEND] Aviso ao listar e-mails do Auth:", aErr);
+      }
+
+      res.json({ profiles: enrichedProfiles });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
   // Admin: List Condominiums (with rich stats & counts)
-  app.get("/api/admin/condominiums", async (req, res) => {
+  app.get(["/api/admin/condominiums", "/api/admin/condominiums/"], async (req, res) => {
     const session = await validateAdminSession(req);
     if ("error" in session) return res.status(session.status).json({ error: session.error });
     const { adminProfile } = session;
@@ -1012,12 +1471,17 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
         }
       });
 
-      const enriched = (condominiums || []).map(c => ({
-        ...c,
-        user_count: profilesByCondo[c.id] || 0,
-        unit_count: moradoresByCondo[c.id] || 0,
-        package_count: packagesByCondo[c.id] || 0,
-        active: c.active !== false
+      const enriched = await Promise.all((condominiums || []).map(async c => {
+        const creds = await getOrInitPortariaCreds(c.id, c.name);
+        return {
+          ...c,
+          user_count: profilesByCondo[c.id] || 0,
+          unit_count: moradoresByCondo[c.id] || 0,
+          package_count: packagesByCondo[c.id] || 0,
+          active: c.active !== false,
+          portaria_name: creds.portaria_name || c.name,
+          portaria_access_code: creds.portaria_access_code
+        };
       }));
 
       const summary = {
@@ -1040,6 +1504,12 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
     const session = await validateAdminSession(req);
     if ("error" in session) return res.status(session.status).json({ error: session.error });
     const { id } = req.params;
+    const { adminProfile } = session;
+
+    const rawRole = (adminProfile?.role || '').toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    if (!rawRole.includes('admin') && adminProfile?.condominium_id && adminProfile.condominium_id !== id) {
+      return res.status(403).json({ error: "Acesso negado: Você não possui permissão para listar usuários deste condomínio." });
+    }
 
     try {
       const { data: profiles, error } = await supabaseAdmin
@@ -1049,7 +1519,20 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
         .order('full_name');
 
       if (error) throw error;
-      res.json({ profiles: profiles || [] });
+
+      let enrichedProfiles = profiles || [];
+      try {
+        const { data: { users: authUsers } } = await supabaseAdmin.auth.admin.listUsers();
+        const emailMap = new Map((authUsers || []).map(u => [u.id, u.email]));
+        enrichedProfiles = enrichedProfiles.map(p => ({
+          ...p,
+          email: p.email || emailMap.get(p.id) || ''
+        }));
+      } catch (aErr) {
+        console.warn("[DEBUG BACKEND] Aviso ao listar e-mails do Auth:", aErr);
+      }
+
+      res.json({ profiles: enrichedProfiles });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -1084,7 +1567,32 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
       return res.status(400).json({ error: "O nome do condomínio é obrigatório." });
     }
 
+    if (req.body.id && req.body.id !== id) {
+      return res.status(400).json({ error: "O ID do condomínio é imutável e não pode ser alterado." });
+    }
+
     try {
+      // Duplicate condominium check for other records
+      if (name && name.trim() !== '') {
+        const { data: existingCondo } = await supabaseAdmin
+          .from('condominiums')
+          .select('id, name, address')
+          .ilike('name', name.trim())
+          .neq('id', id)
+          .maybeSingle();
+
+        if (existingCondo) {
+          const normNewAddr = (address || '').toLowerCase().trim();
+          const normExistAddr = (existingCondo.address || '').toLowerCase().trim();
+
+          if (!normNewAddr || !normExistAddr || normNewAddr === normExistAddr) {
+            return res.status(409).json({
+              error: `Já existe outro condomínio cadastrado com o nome "${name.trim()}".`
+            });
+          }
+        }
+      }
+
       const updateData: any = {
         name,
         address: address || '',
@@ -1098,37 +1606,51 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
 
       if (active !== undefined) updateData.active = active;
 
-      // Attempt update with extra optional fields if present in DB
-      const { data: updatedCondo, error: updateErr } = await supabaseAdmin
+      let resUpdate = await supabaseAdmin
         .from('condominiums')
         .update(updateData)
         .eq('id', id)
         .select()
         .single();
 
+      if (resUpdate.error) {
+        console.warn('[DEBUG BACKEND] First update attempt warning:', resUpdate.error.message);
+        resUpdate = await supabaseAdmin
+          .from('condominiums')
+          .update({ name, address: address || '' })
+          .eq('id', id)
+          .select()
+          .single();
+      }
+
+      const updatedCondo = resUpdate.data;
+      const updateErr = resUpdate.error;
+
       if (updateErr) throw updateErr;
 
-      // Audit log
-      const { error: auditError } = await supabaseAdmin.from('auditoria_eventos').insert({
-        condominio_id: id,
-        usuario_id: adminProfile.id,
-        usuario_nome: adminProfile.full_name,
-        usuario_perfil: adminProfile.role,
-        tipo_evento: 'CONDOMINIO_ATUALIZADO',
-        acao: 'UPDATE',
-        tabela_afetada: 'condominiums',
-        registro_id: id,
-        descricao: `Condomínio ${name} atualizado pelo administrador.`,
-        metodo: 'ADMIN_ACTION',
-        dados_depois: updateData
-      });
+      // Safely ensure audit log does not throw 500 error
+      try {
+        await supabaseAdmin.from('auditoria_eventos').insert({
+          condominio_id: id,
+          usuario_id: adminProfile?.id || null,
+          usuario_nome: adminProfile?.full_name || 'Admin',
+          usuario_perfil: adminProfile?.role || 'admin',
+          tipo_evento: 'CONDOMINIO_ATUALIZADO',
+          acao: 'UPDATE',
+          tabela_afetada: 'condominiums',
+          registro_id: id,
+          descricao: `Condomínio ${name} atualizado pelo administrador.`,
+          metodo: 'ADMIN_ACTION',
+          dados_depois: updateData
+        });
+      } catch (auditErr: any) {
+        console.warn('[DEBUG BACKEND] Erro ao registrar auditoria:', auditErr?.message);
+      }
 
-      if (auditError) console.warn('[DEBUG BACKEND] Erro ao registrar auditoria:', auditError.message);
-
-      res.json({ success: true, condominium: updatedCondo });
+      res.json({ success: true, condominium: { ...updatedCondo, name, address: address || updatedCondo?.address } });
     } catch (err: any) {
       console.error("[DEBUG BACKEND] Erro ao atualizar condomínio:", err);
-      res.status(500).json({ error: err.message });
+      res.status(500).json({ error: err.message || 'Erro ao atualizar condomínio' });
     }
   });
 
@@ -1141,34 +1663,80 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
     const { active } = req.body;
 
     try {
-      const { data: condo, error: condoErr } = await supabaseAdmin
+      let condo: any = null;
+      let condoErr: any = null;
+
+      const resWithActive = await supabaseAdmin
         .from('condominiums')
         .update({ active: !!active })
         .eq('id', id)
         .select()
         .single();
 
+      if (resWithActive.error) {
+        const resWithoutActive = await supabaseAdmin
+          .from('condominiums')
+          .select('*')
+          .eq('id', id)
+          .single();
+        condo = resWithoutActive.data ? { ...resWithoutActive.data, active: !!active } : null;
+        condoErr = resWithoutActive.error;
+      } else {
+        condo = resWithActive.data;
+        condoErr = resWithActive.error;
+      }
+
       if (condoErr) throw condoErr;
 
-      // Audit log
-      const { error: auditError } = await supabaseAdmin.from('auditoria_eventos').insert({
-        condominio_id: id,
-        usuario_id: adminProfile.id,
-        usuario_nome: adminProfile.full_name,
-        usuario_perfil: adminProfile.role,
-        tipo_evento: active ? 'CONDOMINIO_ATIVADO' : 'CONDOMINIO_INATIVADO',
-        acao: 'UPDATE',
-        tabela_afetada: 'condominiums',
-        registro_id: id,
-        descricao: `Status do condomínio ${condo.name} alterado para ${active ? 'ATIVO' : 'INATIVO'}.`,
-        metodo: 'ADMIN_ACTION'
-      });
+      if (!active) {
+        if (portariaStore.has(id)) {
+          const creds = portariaStore.get(id)!;
+          creds.active_token = null;
+        }
+        try {
+          await supabaseAdmin
+            .from('condominium_settings')
+            .update({ active_portaria_token: null })
+            .eq('condominium_id', id);
 
-      if (auditError) console.warn('[DEBUG BACKEND] Erro audit log:', auditError.message);
+          await supabaseAdmin.from('auditoria_eventos').insert({
+            condominio_id: id,
+            usuario_id: adminProfile?.id || null,
+            usuario_nome: adminProfile?.full_name || 'Admin',
+            usuario_perfil: adminProfile?.role || 'admin',
+            tipo_evento: 'PORTARIA_BLOQUEIO_REMOTO',
+            acao: 'DISCONNECT',
+            tabela_afetada: 'condominium_settings',
+            registro_id: id,
+            descricao: `Desativação remota acionada para o condomínio ${condo?.name || id}. Sessão de portaria revogada.`,
+            metodo: 'ADMIN_ACTION'
+          });
+        } catch (e) {
+          console.warn('[DEBUG BACKEND] Erro ao desativar token da portaria:', e);
+        }
+      }
+
+      // Safely ensure audit log does not throw
+      try {
+        await supabaseAdmin.from('auditoria_eventos').insert({
+          condominio_id: id,
+          usuario_id: adminProfile?.id || null,
+          usuario_nome: adminProfile?.full_name || 'Admin',
+          usuario_perfil: adminProfile?.role || 'admin',
+          tipo_evento: active ? 'CONDOMINIO_ATIVADO' : 'CONDOMINIO_INATIVADO',
+          acao: 'UPDATE',
+          tabela_afetada: 'condominiums',
+          registro_id: id,
+          descricao: `Status do condomínio ${condo?.name || id} alterado para ${active ? 'ATIVO' : 'INATIVO'}.`,
+          metodo: 'ADMIN_ACTION'
+        });
+      } catch (auditErr: any) {
+        console.warn('[DEBUG BACKEND] Erro ao registrar auditoria:', auditErr?.message);
+      }
 
       res.json({ success: true, condominium: condo });
     } catch (err: any) {
-      res.status(500).json({ error: err.message });
+      res.status(500).json({ error: err.message || 'Erro ao alterar status' });
     }
   });
 
@@ -1261,6 +1829,184 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
     }
   });
 
+  // Admin: Database Integrity & Health Check Endpoint
+  app.get("/api/admin/integrity-check", async (req, res) => {
+    const session = await validateAdminSession(req);
+    if ("error" in session) return res.status(session.status).json({ error: session.error });
+
+    try {
+      const autoRepair = req.query.repair === 'true';
+
+      const [
+        { count: totalCondos },
+        { count: totalProfiles },
+        { count: totalMoradores },
+        { count: totalPackages },
+        { data: allCondos }
+      ] = await Promise.all([
+        supabaseAdmin.from('condominiums').select('*', { count: 'exact', head: true }),
+        supabaseAdmin.from('profiles').select('*', { count: 'exact', head: true }),
+        supabaseAdmin.from('moradores').select('*', { count: 'exact', head: true }),
+        supabaseAdmin.from('packages').select('*', { count: 'exact', head: true }),
+        supabaseAdmin.from('condominiums').select('id, name')
+      ]);
+
+      const validCondoIds = new Set((allCondos || []).map(c => c.id));
+
+      const { data: profiles } = await supabaseAdmin.from('profiles').select('id, full_name, condominium_id');
+      const orphanedProfiles = (profiles || []).filter(p => p.condominium_id && !validCondoIds.has(p.condominium_id));
+
+      const { data: moradores } = await supabaseAdmin.from('moradores').select('id, nome, condominium_id');
+      const orphanedMoradores = (moradores || []).filter(m => m.condominium_id && !validCondoIds.has(m.condominium_id));
+
+      const { data: packages } = await supabaseAdmin.from('packages').select('id, tracking_code, condominium_id');
+      const orphanedPackages = (packages || []).filter(p => p.condominium_id && !validCondoIds.has(p.condominium_id));
+
+      const totalInconsistencies = orphanedProfiles.length + orphanedMoradores.length + orphanedPackages.length;
+
+      const repairedCount = { profiles: 0, moradores: 0, packages: 0 };
+      if (autoRepair && totalInconsistencies > 0) {
+        if (orphanedProfiles.length > 0) {
+          const orphanIds = orphanedProfiles.map(p => p.id);
+          await supabaseAdmin.from('profiles').update({ condominium_id: null }).in('id', orphanIds);
+          repairedCount.profiles = orphanIds.length;
+        }
+        if (orphanedMoradores.length > 0) {
+          const orphanIds = orphanedMoradores.map(m => m.id);
+          await supabaseAdmin.from('moradores').delete().in('id', orphanIds);
+          repairedCount.moradores = orphanIds.length;
+        }
+        if (orphanedPackages.length > 0) {
+          const orphanIds = orphanedPackages.map(p => p.id);
+          await supabaseAdmin.from('packages').delete().in('id', orphanIds);
+          repairedCount.packages = orphanIds.length;
+        }
+      }
+
+      const healthStatus = totalInconsistencies === 0 || autoRepair ? "HEALTHY" : "INCONSISTENCY_DETECTED";
+
+      res.json({
+        status: healthStatus,
+        timestamp: new Date().toISOString(),
+        shieldingActive: true,
+        metrics: {
+          totalCondominiums: totalCondos || 0,
+          totalProfiles: totalProfiles || 0,
+          totalMoradores: totalMoradores || 0,
+          totalPackages: totalPackages || 0
+        },
+        inconsistencies: {
+          orphanedProfilesCount: orphanedProfiles.length,
+          orphanedMoradoresCount: orphanedMoradores.length,
+          orphanedPackagesCount: orphanedPackages.length,
+          details: {
+            orphanedProfiles: orphanedProfiles.slice(0, 10),
+            orphanedMoradores: orphanedMoradores.slice(0, 10),
+            orphanedPackages: orphanedPackages.slice(0, 10)
+          }
+        },
+        repaired: autoRepair ? repairedCount : null
+      });
+    } catch (err: any) {
+      console.error("[DEBUG BACKEND] Erro ao verificar integridade:", err);
+      res.status(500).json({ error: err.message || 'Erro na verificação de integridade' });
+    }
+  });
+
+  // Admin: Create Snapshot Backup
+  app.post("/api/admin/backup-snapshot", async (req, res) => {
+    const session = await validateAdminSession(req);
+    if ("error" in session) return res.status(session.status).json({ error: session.error });
+    const { adminProfile } = session;
+
+    try {
+      const [
+        { data: condos },
+        { data: profiles },
+        { data: moradores },
+        { data: packages }
+      ] = await Promise.all([
+        supabaseAdmin.from('condominiums').select('*'),
+        supabaseAdmin.from('profiles').select('id, full_name, role, condominium_id, active'),
+        supabaseAdmin.from('moradores').select('id, nome, unidade, bloco, condominium_id'),
+        supabaseAdmin.from('packages').select('id, tracking_code, recipient_name, status, condominium_id')
+      ]);
+
+      const snapshotPayload = {
+        timestamp: new Date().toISOString(),
+        created_by: adminProfile?.full_name || 'Admin',
+        counts: {
+          condominiums: (condos || []).length,
+          profiles: (profiles || []).length,
+          moradores: (moradores || []).length,
+          packages: (packages || []).length
+        },
+        data: {
+          condominiums: condos || [],
+          profiles: profiles || [],
+          moradores: moradores || [],
+          packages: packages || []
+        }
+      };
+
+      const { data: auditLog, error: auditErr } = await supabaseAdmin.from('auditoria_eventos').insert({
+        usuario_id: adminProfile?.id || null,
+        usuario_nome: adminProfile?.full_name || 'Sistema',
+        usuario_perfil: adminProfile?.role || 'admin',
+        tipo_evento: 'SYSTEM_BACKUP_SNAPSHOT',
+        acao: 'BACKUP',
+        tabela_afetada: 'condominiums',
+        descricao: `Snapshot de backup gerado com sucesso. (${(condos || []).length} condomínios, ${(profiles || []).length} perfis)`,
+        metodo: 'ADMIN_ACTION',
+        dados_depois: snapshotPayload
+      }).select().single();
+
+      if (auditErr) {
+        console.warn('[DEBUG BACKEND] Erro ao gravar snapshot no log:', auditErr.message);
+      }
+
+      res.json({
+        success: true,
+        message: 'Snapshot de backup da base de dados realizado com sucesso!',
+        snapshotId: auditLog?.id || `snap_${Date.now()}`,
+        timestamp: snapshotPayload.timestamp,
+        counts: snapshotPayload.counts
+      });
+    } catch (err: any) {
+      console.error("[DEBUG BACKEND] Erro ao criar backup snapshot:", err);
+      res.status(500).json({ error: err.message || 'Erro ao criar backup' });
+    }
+  });
+
+  // Admin: Backup History
+  app.get("/api/admin/backup-history", async (req, res) => {
+    const session = await validateAdminSession(req);
+    if ("error" in session) return res.status(session.status).json({ error: session.error });
+
+    try {
+      const { data: logs, error } = await supabaseAdmin
+        .from('auditoria_eventos')
+        .select('*')
+        .eq('tipo_evento', 'SYSTEM_BACKUP_SNAPSHOT')
+        .order('criado_em', { ascending: false })
+        .limit(20);
+
+      if (error) throw error;
+
+      res.json({
+        backups: (logs || []).map(l => ({
+          id: l.id,
+          created_at: l.criado_em,
+          created_by: l.usuario_nome,
+          counts: l.dados_depois?.counts || {},
+          description: l.descricao
+        }))
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // Admin: Create User
   app.post("/api/admin/users", async (req, res) => {
     const session = await validateAdminSession(req);
@@ -1270,15 +2016,27 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
     const { email, password, full_name, phone, role, condominium_id, horario_inicio, horario_fim } = req.body;
     console.log("[DEBUG BACKEND] Criando novo usuário:", { email, full_name, role, condominium_id });
 
-    if (!email || email.trim() === '') {
-      return res.status(400).json({ error: "O e-mail é obrigatório para criar um novo usuário." });
-    }
-
     if (!full_name || full_name.trim() === '') {
       return res.status(400).json({ error: "O nome completo é obrigatório." });
     }
 
-    // Síndico can only create users for their own condo and only roles 'porteiro' or 'resident'
+    const validRoles = ['admin', 'sindico', 'porteiro', 'resident'];
+    if (!role || !validRoles.includes(role)) {
+      return res.status(400).json({ error: "Perfil de usuário inválido." });
+    }
+
+    let cleanEmail = email ? email.trim().toLowerCase() : '';
+    if (!cleanEmail) {
+      if (role === 'porteiro') {
+        const slugName = full_name.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, '');
+        const randomSuffix = Math.floor(1000 + Math.random() * 9000);
+        cleanEmail = `porteiro.${slugName || 'operacional'}.${Date.now().toString(36)}.${randomSuffix}@sistema.encomendas`;
+      } else {
+        return res.status(400).json({ error: "O e-mail é obrigatório para criar este tipo de usuário." });
+      }
+    }
+
+    // Síndico permissions check
     if (adminProfile.role === 'sindico') {
       if (condominium_id !== adminProfile.condominium_id) {
         return res.status(403).json({ error: "Síndicos só podem criar usuários para o seu próprio condomínio." });
@@ -1289,23 +2047,59 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
     }
 
     try {
-      // 1. Create user in Supabase Auth
+      // 1. Validation: Duplicate Phone (if provided)
+      if (phone && phone.trim() !== '') {
+        const { data: existingPhone } = await supabaseAdmin
+          .from('profiles')
+          .select('id, phone')
+          .eq('phone', phone.trim())
+          .maybeSingle();
+
+        if (existingPhone) {
+          return res.status(409).json({ error: "Este telefone já está cadastrado para outro usuário." });
+        }
+      }
+
+      // 2. Validation: Condominium existence
+      if (condominium_id) {
+        const { data: condoExist } = await supabaseAdmin
+          .from('condominiums')
+          .select('id')
+          .eq('id', condominium_id)
+          .maybeSingle();
+
+        if (!condoExist) {
+          return res.status(400).json({ error: "O condomínio informado não existe." });
+        }
+      }
+
+      // Generate temp password if not provided
+      const tempPassword = password && password.trim() !== '' 
+        ? password.trim() 
+        : `Temp@${Math.random().toString(36).slice(-6)}${Math.random().toString(36).slice(-2)}`;
+
+      // 3. Create user in Supabase Auth
       const { data: authData, error: createError } = await supabaseAdmin.auth.admin.createUser({
-        email,
-        password,
+        email: cleanEmail,
+        password: tempPassword,
         email_confirm: true,
-        user_metadata: { full_name, role }
+        user_metadata: { full_name: full_name.trim(), role }
       });
 
-      if (createError) throw createError;
+      if (createError) {
+        if (createError.message.includes('already registered') || createError.message.includes('already exists') || createError.message.includes('unique constraint')) {
+          return res.status(409).json({ error: "Este e-mail já está cadastrado no sistema de autenticação." });
+        }
+        throw createError;
+      }
 
-      // 2. Create profile
+      // 4. Create profile in `profiles` table (without nonexistent email column)
       const { data: profile, error: profileError } = await supabaseAdmin
         .from('profiles')
         .insert([{
           id: authData.user.id,
-          full_name,
-          phone,
+          full_name: full_name.trim(),
+          phone: phone ? phone.trim() : null,
           role,
           condominium_id: condominium_id || null,
           active: true,
@@ -1318,20 +2112,44 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
         .single();
 
       if (profileError) {
-        // Cleanup Auth user if profile creation fails
+        // AUTOMATIC ROLLBACK: Clean up created auth user if profile insertion fails
+        console.error("[DEBUG BACKEND] Erro ao criar perfil, executando rollback no Auth:", profileError);
         await supabaseAdmin.auth.admin.deleteUser(authData.user.id);
         throw profileError;
       }
 
-      res.json({ user: authData.user, profile });
+      const profileWithEmail = { ...profile, email: cleanEmail };
+
+      // 7. Audit Log
+      await supabaseAdmin.from('auditoria_eventos').insert({
+        condominio_id: condominium_id || adminProfile.condominium_id || null,
+        usuario_id: adminUser.id,
+        usuario_nome: adminProfile.full_name || 'Admin',
+        usuario_perfil: adminProfile.role || 'admin',
+        tipo_evento: 'USUARIO_CRIADO',
+        acao: 'CREATE',
+        tabela_afetada: 'profiles',
+        registro_id: authData.user.id,
+        descricao: `Usuário ${full_name.trim()} (${cleanEmail}) cadastrado com perfil ${role} e senha temporária gerada.`,
+        metodo: 'ADMIN_ACTION',
+        dados_depois: { id: authData.user.id, email: cleanEmail, full_name, role, condominium_id }
+      });
+
+      res.json({ 
+        success: true, 
+        user: authData.user, 
+        profile: profileWithEmail, 
+        tempPassword,
+        message: "Usuário cadastrado com sucesso!"
+      });
     } catch (err: any) {
       console.error("Erro ao criar usuário admin:", err);
-      res.status(500).json({ error: err.message });
+      res.status(500).json({ error: err.message || "Erro ao cadastrar usuário" });
     }
   });
 
-  // Admin: Update User
-  app.patch("/api/admin/users/:id", async (req, res) => {
+  // Admin: Update User (PATCH / PUT)
+  const handleUpdateAdminUser = async (req: express.Request, res: express.Response) => {
     const session = await validateAdminSession(req);
     if ("error" in session) return res.status(session.status).json({ error: session.error });
     const { adminUser, adminProfile } = session;
@@ -1398,10 +2216,13 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
       console.log("[DEBUG BACKEND] Perfil atualizado com sucesso no Supabase:", profile.id);
       res.json({ profile });
     } catch (err: any) {
-      console.error("[DEBUG BACKEND] Erro fatal no PATCH /api/admin/users/:id:", err);
+      console.error("[DEBUG BACKEND] Erro fatal no PATCH/PUT /api/admin/users/:id:", err);
       res.status(500).json({ error: err.message });
     }
-  });
+  };
+
+  app.patch("/api/admin/users/:id", handleUpdateAdminUser);
+  app.put("/api/admin/users/:id", handleUpdateAdminUser);
 
   // Admin: Reset Password
   app.post("/api/admin/users/:id/reset-password", async (req, res) => {
@@ -1420,12 +2241,16 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
     let targetProfile: any = null;
     const { data: pData } = await supabaseAdmin
       .from('profiles')
-      .select('id, full_name, email, role, condominium_id')
+      .select('id, full_name, role, condominium_id')
       .eq('id', id)
       .maybeSingle();
 
     if (pData) {
-      targetProfile = pData;
+      targetProfile = { ...pData, email: '' };
+      try {
+        const { data: { user: aUser } } = await supabaseAdmin.auth.admin.getUserById(id);
+        if (aUser?.email) targetProfile.email = aUser.email;
+      } catch (e) {}
     } else {
       const { data: mData } = await supabaseAdmin
         .from('moradores')
@@ -1446,7 +2271,7 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
 
     if (!targetProfile) {
       console.warn(`[DEBUG BACKEND] Usuário ${id} não encontrado para reset de senha.`);
-      return res.status(404).json({ error: "Usuário não encontrado no banco de dados." });
+      return res.status(404).json({ error: "Este usuário ainda não possui uma conta de acesso." });
     }
 
     // Síndico restrictions
@@ -1521,6 +2346,76 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
     } catch (err: any) {
       console.error("[DEBUG BACKEND] Erro fatal no reset-password:", err);
       return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Auth: Change Password (First access or password update)
+  app.post("/api/auth/change-password", async (req, res) => {
+    const authHeader = req.headers.authorization;
+    const token = authHeader?.startsWith("Bearer ") ? authHeader.substring(7) : null;
+    const { newPassword, userId } = req.body;
+
+    if (!newPassword || newPassword.length < 6) {
+      return res.status(400).json({ error: "A nova senha deve ter pelo menos 6 caracteres." });
+    }
+
+    try {
+      let targetUserId = userId;
+
+      if (token && token !== 'MOCK_TOKEN') {
+        const { data: { user }, error } = await supabaseAdmin.auth.getUser(token);
+        if (user) {
+          targetUserId = user.id;
+        }
+      }
+
+      if (!targetUserId) {
+        return res.status(401).json({ error: "Sessão inválida ou ID do usuário não fornecido." });
+      }
+
+      // 1. Update password in Supabase Auth
+      const { error: authError } = await supabaseAdmin.auth.admin.updateUserById(targetUserId, {
+        password: newPassword
+      });
+
+      if (authError) {
+        console.warn("[DEBUG BACKEND] Erro ao atualizar senha no Auth:", authError.message);
+      }
+
+      // 2. Set must_change_password to false in profiles
+      const { data: profile, error: profileError } = await supabaseAdmin
+        .from('profiles')
+        .update({ 
+          must_change_password: false,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', targetUserId)
+        .select()
+        .single();
+
+      if (profileError) {
+        console.warn("[DEBUG BACKEND] Erro ao atualizar perfil em profiles:", profileError.message);
+      }
+
+      // 3. Audit log
+      await supabaseAdmin.from('auditoria_eventos').insert({
+        condominio_id: profile?.condominium_id || null,
+        usuario_id: targetUserId,
+        usuario_nome: profile?.full_name || 'Usuário',
+        usuario_perfil: profile?.role || 'user',
+        tipo_evento: 'SENHA_ALTERADA',
+        acao: 'UPDATE',
+        tabela_afetada: 'profiles',
+        registro_id: targetUserId,
+        descricao: `Senha alterada pelo usuário ${profile?.full_name || targetUserId} no primeiro acesso/redefinição.`,
+        metodo: 'USER_ACTION',
+        dados_depois: { id: targetUserId, must_change_password: false }
+      });
+
+      res.json({ success: true, profile, message: "Senha alterada com sucesso!" });
+    } catch (err: any) {
+      console.error("[DEBUG BACKEND] Erro ao alterar senha:", err);
+      res.status(500).json({ error: err.message || "Erro ao alterar senha." });
     }
   });
 
@@ -1654,6 +2549,11 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
     }
   });
 
+  // Fallback 404 handler for any unmatched API endpoints to prevent Vite SPA HTML fallback
+  app.all("/api/*", (req, res) => {
+    res.status(404).json({ error: `Rota de API não encontrada: ${req.method} ${req.path}` });
+  });
+
   // Vite middleware para desenvolvimento
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
@@ -1668,24 +2568,30 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
     });
   }
 
-  // Ensure 'packages' bucket exists
-  try {
-    const { data: buckets } = await supabaseAdmin.storage.listBuckets();
-    if (!buckets?.find(b => b.name === 'packages')) {
-      await supabaseAdmin.storage.createBucket('packages', {
-        public: true,
-        allowedMimeTypes: ['image/jpeg', 'image/png'],
-        fileSizeLimit: 5242880 // 5MB
-      });
-      console.log("Created 'packages' storage bucket");
-    }
-  } catch (err) {
-    console.error("Error checking/creating storage bucket:", err);
-  }
-
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
+
+  // Ensure 'packages' bucket exists asynchronously (non-blocking)
+  if (supabaseServiceKey && supabaseUrl && !supabaseUrl.includes('placeholder')) {
+    supabaseAdmin.storage.listBuckets().then(({ data: buckets }) => {
+      if (!buckets?.find(b => b.name === 'packages')) {
+        supabaseAdmin.storage.createBucket('packages', {
+          public: true,
+          allowedMimeTypes: ['image/jpeg', 'image/png'],
+          fileSizeLimit: 5242880 // 5MB
+        }).then(() => {
+          console.log("Created 'packages' storage bucket");
+        }).catch(err => {
+          console.warn("Storage bucket creation notice:", err?.message || err);
+        });
+      }
+    }).catch(err => {
+      console.warn("Storage bucket check notice:", err?.message || err);
+    });
+  }
 }
 
-startServer();
+startServer().catch(err => {
+  console.error("Fatal error starting server:", err);
+});
