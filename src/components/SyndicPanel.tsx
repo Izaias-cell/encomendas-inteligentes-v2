@@ -7,7 +7,7 @@ import {
   AlertCircle, RefreshCw, Trash2, Edit2, Eye, UserPlus, Power,
   TrendingUp, Truck, Mail, MessageSquare, User, LogOut, QrCode,
   Shield, FileText, History, Camera, ArrowLeft, Plus, Smartphone, Zap,
-  FileSpreadsheet
+  FileSpreadsheet, Gift
 } from 'lucide-react';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, 
@@ -39,6 +39,7 @@ import PackageNew from '../pages/PackageNew';
 import CondominiumNew from '../pages/CondominiumNew';
 import UserManagement from '../pages/UserManagement';
 import AuditLogs from '../pages/AuditLogs';
+import SyndicReferralSection from './SyndicReferralSection';
 
 // --- Shared UI Components ---
 
@@ -2684,6 +2685,7 @@ export default function SyndicPanel({ user, onLogout, onUpdateUser }: { user: Pr
     { id: 'historico', label: 'Histórico', icon: History },
     { id: 'moradores', label: `MORADORES (${activeResidentsCount})`, icon: Users },
     { id: 'moradores_desativados', label: 'Moradores Desativados', icon: XCircle },
+    { id: 'indicacao', label: 'Indique um Síndico (15+15)', icon: Gift },
     ...(normalizeRole(user.role) === 'admin' ? [
       { id: 'usuarios', label: 'Usuários', icon: Shield },
       { id: 'settings', label: 'Configurações', icon: Settings },
@@ -2704,6 +2706,8 @@ export default function SyndicPanel({ user, onLogout, onUpdateUser }: { user: Pr
         return <ResidentsList user={user} residents={residents} onUpdate={fetchInitialData} />;
       case 'moradores_desativados':
         return <InactiveResidentsList residents={residents} />;
+      case 'indicacao':
+        return <SyndicReferralSection />;
       case 'usuarios':
         return <UserManagement user={user} />;
       case 'settings':

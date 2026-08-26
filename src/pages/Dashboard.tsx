@@ -23,16 +23,21 @@ import {
   History,
   Trash2,
   AlertTriangle,
-  X
+  X,
+  QrCode,
+  Gift,
+  Link2
 } from 'lucide-react';
 
 import { normalizeRole } from '../lib/authUtils';
+import AdminDemoQrModal from '../components/AdminDemoQrModal';
 
 interface DashboardProps {
   user: Profile;
 }
 
 export default function Dashboard({ user }: DashboardProps) {
+  const [showDemoQrModal, setShowDemoQrModal] = useState(false);
   const [stats, setStats] = useState({
     total: 0,
     pending: 0,
@@ -366,13 +371,29 @@ export default function Dashboard({ user }: DashboardProps) {
     </div>
   );
 
-  const ActionCard = ({ title, description, icon: Icon, onClick, color }: any) => (
-    <button 
+  const ActionCard = ({ title, description, icon: Icon, onClick, color, extraAction }: any) => (
+    <div 
       onClick={onClick}
-      className="bg-white rounded-3xl border border-zinc-100 shadow-sm p-8 hover:shadow-md transition-all group text-left flex flex-col items-start"
+      className="bg-white rounded-3xl border border-zinc-100 shadow-sm p-6 sm:p-7 md:p-8 hover:shadow-md transition-all group text-left flex flex-col items-start cursor-pointer w-full"
     >
-      <div className={`w-14 h-14 ${color} rounded-2xl flex items-center justify-center mb-6 group-hover:scale-110 transition-transform`}>
-        <Icon className="w-7 h-7" />
+      <div className="flex items-center justify-between gap-2 w-full mb-6">
+        <div className={`w-12 h-12 sm:w-14 sm:h-14 ${color} rounded-2xl flex items-center justify-center group-hover:scale-110 transition-transform shrink-0`}>
+          <Icon className="w-6 h-6 sm:w-7 sm:h-7" />
+        </div>
+        {extraAction && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              extraAction.onClick();
+            }}
+            className="w-fit max-w-[65%] whitespace-nowrap text-[11px] sm:text-xs font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-2.5 py-1.5 sm:px-3 sm:py-1.5 rounded-xl transition-all inline-flex items-center gap-1.5 shrink-0 hover:scale-105 shadow-2xs"
+            title={extraAction.label}
+          >
+            <UserPlus className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+            <span className="truncate">{extraAction.label}</span>
+          </button>
+        )}
       </div>
       <h3 className="text-xl font-bold text-zinc-900 mb-2">{title}</h3>
       <p className="text-zinc-500 text-sm mb-6 flex-grow">{description}</p>
@@ -380,7 +401,7 @@ export default function Dashboard({ user }: DashboardProps) {
         Acessar agora
         <ArrowRight className="w-5 h-5" />
       </div>
-    </button>
+    </div>
   );
 
   if (loading) {
@@ -432,18 +453,23 @@ export default function Dashboard({ user }: DashboardProps) {
 
       <h2 className="text-2xl font-bold text-zinc-900 mb-6">Ações Rápidas</h2>
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        {/* Porter & Manager Actions */}
         {(() => {
           const role = normalizeRole(user.role);
-          return (role === 'porteiro' || role === 'sindico' || role === 'admin') && (
-            <>
+
+          if (role === 'resident') {
+            return (
               <ActionCard 
-                title="Registrar Encomenda" 
-                description="Registre a chegada de uma nova encomenda na portaria." 
-                icon={Plus} 
-                onClick={() => navigate('/packages/new')}
+                title="Minhas Encomendas" 
+                description="Veja o histórico e status das suas encomendas." 
+                icon={PackageIcon} 
+                onClick={() => navigate('/packages')}
                 color="bg-emerald-100 text-emerald-600"
               />
+            );
+          }
+
+          return (
+            <>
               <ActionCard 
                 title="Ver Encomendas" 
                 description="Visualize e gerencie todas as encomendas do condomínio." 
@@ -457,74 +483,43 @@ export default function Dashboard({ user }: DashboardProps) {
                 icon={Users} 
                 onClick={() => navigate('/profiles')}
                 color="bg-zinc-100 text-zinc-600"
+                extraAction={
+                  (role === 'sindico' || role === 'admin')
+                    ? {
+                        label: 'CADASTRAR MORADOR',
+                        onClick: () => navigate('/profiles/new')
+                      }
+                    : undefined
+                }
               />
+              {role === 'admin' && (
+                <>
+                  <ActionCard 
+                    title="Configurações" 
+                    description="Ajuste as configurações gerais, usuários, WhatsApp e manutenção." 
+                    icon={Settings} 
+                    onClick={() => navigate('/settings')}
+                    color="bg-zinc-100 text-zinc-600"
+                  />
+                  <ActionCard 
+                    title="GESTÃO DE CONDOMÍNIOS" 
+                    description="Gerencie todos os condomínios cadastrados, usuários e estatísticas da plataforma." 
+                    icon={Building2} 
+                    onClick={() => navigate('/condominiums')}
+                    color="bg-indigo-100 text-indigo-600"
+                  />
+                  <ActionCard 
+                    title="Link de Demonstração" 
+                    description="Gere Links de Demonstração para envio direto no WhatsApp e acompanhe adesões (QR Code opcional)." 
+                    icon={Link2} 
+                    onClick={() => setShowDemoQrModal(true)}
+                    color="bg-emerald-100 text-emerald-600"
+                  />
+                </>
+              )}
             </>
           );
         })()}
-
-        {/* Manager & Admin Only Actions */}
-        {(() => {
-          const role = normalizeRole(user.role);
-          return (role === 'sindico' || role === 'admin') && (
-            <>
-              <ActionCard 
-                title="Cadastrar Morador" 
-                description="Adicione um novo morador ao sistema." 
-                icon={UserPlus} 
-                onClick={() => navigate('/profiles/new')}
-                color="bg-emerald-100 text-emerald-600"
-              />
-            </>
-          );
-        })()}
-
-        {/* Admin Only Actions */}
-        {(() => {
-          const role = normalizeRole(user.role);
-          return role === 'admin' && (
-            <>
-              <ActionCard 
-                title="Usuários" 
-                description="Controle de acesso para administradores, síndicos e porteiros." 
-                icon={Shield} 
-                onClick={() => navigate('/users')}
-                color="bg-red-100 text-red-600"
-              />
-              <ActionCard 
-                title="Configurações" 
-                description="Ajuste as configurações gerais do condomínio." 
-                icon={Settings} 
-                onClick={() => navigate('/settings')}
-                color="bg-zinc-100 text-zinc-600"
-              />
-              <ActionCard 
-                title="GESTÃO DE CONDOMÍNIOS" 
-                description="Gerencie todos os condomínios cadastrados, usuários e estatísticas da plataforma." 
-                icon={Building2} 
-                onClick={() => navigate('/condominiums')}
-                color="bg-indigo-100 text-indigo-600"
-              />
-              <ActionCard 
-                title="Limpar Dados" 
-                description="Remova moradores de teste e todas as encomendas para iniciar o uso real." 
-                icon={Trash2} 
-                onClick={openClearModal}
-                color="bg-amber-100 text-amber-600"
-              />
-            </>
-          );
-        })()}
-
-        {/* Resident Actions */}
-        {normalizeRole(user.role) === 'resident' && (
-          <ActionCard 
-            title="Minhas Encomendas" 
-            description="Veja o histórico e status das suas encomendas." 
-            icon={PackageIcon} 
-            onClick={() => navigate('/packages')}
-            color="bg-emerald-100 text-emerald-600"
-          />
-        )}
       </div>
 
       {/* Modal de Cadastro de Condomínio */}
@@ -909,6 +904,12 @@ export default function Dashboard({ user }: DashboardProps) {
             </div>
           </div>
         </div>
+      )}
+      {showDemoQrModal && (
+        <AdminDemoQrModal
+          isOpen={showDemoQrModal}
+          onClose={() => setShowDemoQrModal(false)}
+        />
       )}
     </div>
   );

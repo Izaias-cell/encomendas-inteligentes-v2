@@ -30,6 +30,7 @@ import PackageNew from './pages/PackageNew';
 import Portaria from './pages/Portaria';
 import Settings from './pages/Settings';
 import ChangePassword from './pages/ChangePassword';
+import PublicDemo from './pages/PublicDemo';
 
 // --- Types ---
 import { Role, Profile, Package as PackageType, ScoredResident } from './types';
@@ -333,19 +334,92 @@ const LoginPage = ({ onLogin }: any) => {
 
     setActivatingPortaria(true);
     setError(null);
+    const cleanCode = code.trim().toUpperCase();
+
     try {
-      const res = await api.post('/api/portaria/activate', { access_code: code.trim() });
+      const res = await api.post('/api/portaria/activate', { access_code: cleanCode });
       if (res && res.data && res.data.success && res.data.condominium) {
         setPendingPortariaActivation({
           condominium: res.data.condominium,
-          access_code: code.trim().toUpperCase()
+          access_code: cleanCode
         });
-      } else {
+        return;
+      }
+
+      // If business error (e.g. inactive condo or explicit not found with json), handle it
+      if (res && (res.status === 404 || res.status === 403)) {
         const errMsg = res?.data?.error || res?.error || "Código de acesso da portaria não encontrado.";
         setError(errMsg);
         toast.error(errMsg);
+        return;
       }
+
+      // If server returned 405 (Method Not Allowed) or format error, fallback to direct Supabase verification
+      const { data: settingData } = await supabase
+        .from('condominium_settings')
+        .select('condominium_id, portaria_access_code, portaria_name')
+        .ilike('portaria_access_code', cleanCode)
+        .maybeSingle();
+
+      if (settingData && settingData.condominium_id) {
+        const { data: condoData } = await supabase
+          .from('condominiums')
+          .select('*')
+          .eq('id', settingData.condominium_id)
+          .single();
+
+        if (condoData) {
+          if (condoData.active === false) {
+            setError("Este condomínio encontra-se inativo/bloqueado pelo administrador.");
+            toast.error("Este condomínio encontra-se inativo/bloqueado pelo administrador.");
+            return;
+          }
+
+          setPendingPortariaActivation({
+            condominium: {
+              ...condoData,
+              portaria_name: settingData.portaria_name || condoData.name,
+              portaria_access_code: settingData.portaria_access_code
+            },
+            access_code: cleanCode
+          });
+          return;
+        }
+      }
+
+      const errMsg = res?.data?.error || res?.error || "Código de acesso da portaria não encontrado.";
+      setError(errMsg);
+      toast.error(errMsg);
     } catch (err: any) {
+      // Fallback to direct Supabase on exception
+      try {
+        const { data: settingData } = await supabase
+          .from('condominium_settings')
+          .select('condominium_id, portaria_access_code, portaria_name')
+          .ilike('portaria_access_code', cleanCode)
+          .maybeSingle();
+
+        if (settingData && settingData.condominium_id) {
+          const { data: condoData } = await supabase
+            .from('condominiums')
+            .select('*')
+            .eq('id', settingData.condominium_id)
+            .single();
+
+          if (condoData && condoData.active !== false) {
+            setPendingPortariaActivation({
+              condominium: {
+                ...condoData,
+                portaria_name: settingData.portaria_name || condoData.name,
+                portaria_access_code: settingData.portaria_access_code
+              },
+              access_code: cleanCode
+            });
+            return;
+          }
+        }
+      } catch {}
+
       setError(err.message || "Erro ao conectar à portaria.");
       toast.error(err.message || "Erro ao conectar à portaria.");
     } finally {
@@ -360,32 +434,41 @@ const LoginPage = ({ onLogin }: any) => {
     setActivatingPortaria(true);
     try {
       const res = await api.post('/api/portaria/confirm-link', { access_code });
-      if (res && res.data && res.data.success && res.data.portaria_token) {
-        if (permanent) {
-          localStorage.setItem('encomendas_portaria_token', res.data.portaria_token);
-        } else {
-          localStorage.removeItem('encomendas_portaria_token');
-        }
+      let portariaToken = res?.data?.portaria_token;
 
-        const portariaProfile: Profile = {
-          id: `portaria-${condominium.id}`,
-          full_name: `Portaria ${condominium.portaria_name || condominium.name}`,
-          email: `portaria@${condominium.id}.local`,
-          phone: '',
-          role: 'porteiro',
-          condominium_id: condominium.id,
-          active: true,
-          created_at: new Date().toISOString()
-        };
-
-        clearActivePlantao();
-        clearManualPorter();
-        onLogin(portariaProfile);
-        toast.success(`Portaria ativada: ${condominium.name}`);
-        navigate('/portaria');
-      } else {
-        toast.error(res?.data?.error || "Erro ao vincular portaria.");
+      if (!portariaToken) {
+        // Direct local token fallback
+        portariaToken = `ptk_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
+        try {
+          await supabase
+            .from('condominium_settings')
+            .update({ active_portaria_token: portariaToken })
+            .eq('condominium_id', condominium.id);
+        } catch {}
       }
+
+      if (permanent) {
+        localStorage.setItem('encomendas_portaria_token', portariaToken);
+      } else {
+        localStorage.removeItem('encomendas_portaria_token');
+      }
+
+      const portariaProfile: Profile = {
+        id: `portaria-${condominium.id}`,
+        full_name: `Portaria ${condominium.portaria_name || condominium.name}`,
+        email: `portaria@${condominium.id}.local`,
+        phone: '',
+        role: 'porteiro',
+        condominium_id: condominium.id,
+        active: true,
+        created_at: new Date().toISOString()
+      };
+
+      clearActivePlantao();
+      clearManualPorter();
+      onLogin(portariaProfile);
+      toast.success(`Portaria ativada: ${condominium.name}`);
+      navigate('/portaria');
     } catch (err: any) {
       toast.error(err.message || "Erro ao conectar portaria.");
     } finally {
@@ -2491,6 +2574,8 @@ export default function App() {
 
   return (
     <Routes>
+      <Route path="/demonstracao" element={<PublicDemo />} />
+      <Route path="/demonstracao/:token" element={<PublicDemo />} />
       <Route path="/portal/:token" element={<ResidentPortal />} />
       <Route path="/retirada" element={<Retirada />} />
       <Route path="/retirada/:token" element={<Retirada />} />
@@ -2514,7 +2599,7 @@ const AppLayout = ({ user, loading, setUser, handleLogout }: any) => {
     const token = localStorage.getItem('encomendas_portaria_token');
     if (token && !user && !loading) {
       api.get(`/api/portaria/validate-token/${token}`)
-        .then(res => {
+        .then(async res => {
           if (res && res.data && res.data.success && res.data.condominium) {
             const condo = res.data.condominium;
             const portariaProfile: Profile = {
@@ -2528,15 +2613,75 @@ const AppLayout = ({ user, loading, setUser, handleLogout }: any) => {
               created_at: new Date().toISOString()
             };
             setUser(portariaProfile);
-          } else {
+          } else if (res && res.status === 401 && res.data && res.data.code === 'PORTARIA_DEACTIVATED') {
             localStorage.removeItem('encomendas_portaria_token');
-            if (res && res.data && res.data.code === 'PORTARIA_DEACTIVATED') {
-              toast.error("Sessão da portaria desativada pelo administrador. Por favor, informe o novo código.");
-            }
+            toast.error("Sessão da portaria desativada pelo administrador. Por favor, informe o novo código.");
+          } else {
+            // Fallback: check Supabase directly in case of 405/offline/static deploy
+            try {
+              const { data: setting } = await supabase
+                .from('condominium_settings')
+                .select('condominium_id, portaria_name, portaria_access_code')
+                .eq('active_portaria_token', token)
+                .maybeSingle();
+
+              if (setting && setting.condominium_id) {
+                const { data: condo } = await supabase
+                  .from('condominiums')
+                  .select('*')
+                  .eq('id', setting.condominium_id)
+                  .single();
+
+                if (condo && condo.active !== false) {
+                  const portariaProfile: Profile = {
+                    id: `portaria-${condo.id}`,
+                    full_name: `Portaria ${setting.portaria_name || condo.name}`,
+                    email: `portaria@${condo.id}.local`,
+                    phone: '',
+                    role: 'porteiro',
+                    condominium_id: condo.id,
+                    active: true,
+                    created_at: new Date().toISOString()
+                  };
+                  setUser(portariaProfile);
+                  return;
+                }
+              }
+            } catch {}
+            localStorage.removeItem('encomendas_portaria_token');
           }
         })
-        .catch(() => {
-          // Fallback to standard login
+        .catch(async () => {
+          // Direct Supabase fallback
+          try {
+            const { data: setting } = await supabase
+              .from('condominium_settings')
+              .select('condominium_id, portaria_name, portaria_access_code')
+              .eq('active_portaria_token', token)
+              .maybeSingle();
+
+            if (setting && setting.condominium_id) {
+              const { data: condo } = await supabase
+                .from('condominiums')
+                .select('*')
+                .eq('id', setting.condominium_id)
+                .single();
+
+              if (condo && condo.active !== false) {
+                const portariaProfile: Profile = {
+                  id: `portaria-${condo.id}`,
+                  full_name: `Portaria ${setting.portaria_name || condo.name}`,
+                  email: `portaria@${condo.id}.local`,
+                  phone: '',
+                  role: 'porteiro',
+                  condominium_id: condo.id,
+                  active: true,
+                  created_at: new Date().toISOString()
+                };
+                setUser(portariaProfile);
+              }
+            }
+          } catch {}
         });
     }
   }, [user, loading, setUser]);

@@ -8,13 +8,14 @@ import {
   Users, Package, Edit2, Trash2, Power, Key, X, Filter, 
   Check, Copy, AlertTriangle, Phone, Mail, Calendar, 
   ArrowUpDown, Shield, User, FileText, CheckCircle2, XCircle,
-  MoreVertical, Eye, UserPlus
+  MoreVertical, Eye, UserPlus, QrCode, Link2
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { registrarAuditoria } from '../services/auditService';
 import { SHIFT_PRESETS } from '../lib/plantaoUtils';
 import { normalizeRole } from '../lib/authUtils';
 import UserFormModal from '../components/UserFormModal';
+import AdminDemoQrModal from '../components/AdminDemoQrModal';
 
 export interface NewCondoInitialUser {
   tempId: string;
@@ -60,6 +61,7 @@ export default function CondominiumList({ user }: CondominiumListProps) {
   const [sortBy, setSortBy] = useState<'recent' | 'oldest' | 'name_asc' | 'name_desc'>('recent');
 
   // Modal States
+  const [showDemoQrModal, setShowDemoQrModal] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [editingCondo, setEditingCondo] = useState<Condominium | null>(null);
   const [selectedCondo, setSelectedCondo] = useState<Condominium | null>(null);
@@ -707,16 +709,26 @@ export default function CondominiumList({ user }: CondominiumListProps) {
           </div>
         </div>
 
-        <button
-          onClick={() => {
-            resetCondoForm();
-            setShowCreateModal(true);
-          }}
-          className="bg-emerald-600 hover:bg-emerald-700 text-white px-6 py-3.5 rounded-2xl font-bold shadow-lg shadow-emerald-600/20 transition-all flex items-center justify-center gap-2.5 text-sm shrink-0"
-        >
-          <Plus className="w-5 h-5" />
-          <span>+ Adicionar Novo Condomínio</span>
-        </button>
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            onClick={() => setShowDemoQrModal(true)}
+            className="bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 px-5 py-3.5 rounded-2xl font-bold transition-all flex items-center justify-center gap-2 text-sm shrink-0"
+          >
+            <Link2 className="w-5 h-5" />
+            <span>Link de Demonstração & Leads</span>
+          </button>
+
+          <button
+            onClick={() => {
+              resetCondoForm();
+              setShowCreateModal(true);
+            }}
+            className="bg-emerald-600 hover:bg-emerald-700 text-white px-6 py-3.5 rounded-2xl font-bold shadow-lg shadow-emerald-600/20 transition-all flex items-center justify-center gap-2.5 text-sm shrink-0"
+          >
+            <Plus className="w-5 h-5" />
+            <span>+ Adicionar Novo Condomínio</span>
+          </button>
+        </div>
       </div>
 
       {/* PAINEL RESUMO (INDICATORS) */}
@@ -1966,6 +1978,12 @@ export default function CondominiumList({ user }: CondominiumListProps) {
             </div>
           </div>
         </div>
+      )}
+      {showDemoQrModal && (
+        <AdminDemoQrModal
+          isOpen={showDemoQrModal}
+          onClose={() => setShowDemoQrModal(false)}
+        />
       )}
     </div>
   );

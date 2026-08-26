@@ -87,6 +87,63 @@ export interface Condominium {
   user_count?: number;
   unit_count?: number;
   package_count?: number;
+  trial_started_at?: string;
+  trial_ends_at?: string;
+  plan_status?: 'trial' | 'active' | 'expired' | 'grace_period';
+  referral_code?: string;
+  referral_bonus_days?: number;
+}
+
+export type ReferralStatus = 'INTERESSE' | 'TESTE_ADERIDO' | 'TESTE_ATIVADO';
+export type ReferralOrigin = 'ADMINISTRADOR' | 'SINDICO';
+
+export interface DemoQRCode {
+  id: string;
+  token: string;
+  origin: ReferralOrigin;
+  created_by?: string;
+  created_at: string;
+  status: 'active' | 'inactive';
+  hits_count: number;
+  adhesions_count: number;
+  url: string;
+}
+
+export interface ReferralLead {
+  id: string;
+  name: string;
+  phone: string;
+  condo_name: string;
+  origin_type: ReferralOrigin;
+  referrer_condo_id?: string;
+  referrer_condo_name?: string;
+  referrer_user_id?: string;
+  referrer_user_name?: string;
+  token_or_ref: string;
+  status: ReferralStatus;
+  bonus_granted: boolean;
+  bonus_days_granted: number;
+  created_at: string;
+  activated_at?: string;
+  condo_created_id?: string;
+}
+
+export interface SyndicReferralInfo {
+  referral_code: string;
+  referral_url: string;
+  share_text: string;
+  trial_started_at?: string;
+  trial_ends_at?: string;
+  days_remaining: number;
+  plan_status: string;
+  referral_bonus_days: number;
+  referrals: ReferralLead[];
+  stats: {
+    total_referrals: number;
+    adhered_count: number;
+    activated_count: number;
+    total_bonus_days: number;
+  };
 }
 
 export interface Package {

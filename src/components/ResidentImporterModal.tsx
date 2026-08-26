@@ -120,6 +120,11 @@ export default function ResidentImporterModal({
     setStep('upload');
     setFile(null);
     setRawData(null);
+    setColumnMapping({
+      nameColumn: '',
+      unitColumn: '',
+      phoneColumn: ''
+    });
     setPreviewSummary(null);
     setImportResult(null);
     setProgress({ current: 0, total: 0, percentage: 0 });
@@ -127,6 +132,9 @@ export default function ResidentImporterModal({
     setPreviewSearch('');
     setImportMode('teste');
     setShowRealConfirmModal(false);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
   };
 
   const handleClose = () => {
@@ -143,6 +151,14 @@ export default function ResidentImporterModal({
       toast.error('Formato inválido. Por favor envie um arquivo .xlsx, .xls ou .csv');
       return;
     }
+
+    // Limpa estados residuais anteriores antes de carregar o novo arquivo
+    setRawData(null);
+    setPreviewSummary(null);
+    setImportResult(null);
+    setProgress({ current: 0, total: 0, percentage: 0 });
+    setPreviewFilter('all');
+    setPreviewSearch('');
 
     setIsLoadingFile(true);
     setFile(selectedFile);
@@ -170,6 +186,9 @@ export default function ResidentImporterModal({
       setFile(null);
     } finally {
       setIsLoadingFile(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
     }
   };
 
@@ -264,6 +283,7 @@ export default function ResidentImporterModal({
           `${result.successCount} moradores importados (${mode === 'teste' ? '🧪 MODO TESTE' : '🟢 MODO REAL'})!`,
           { duration: 4000 }
         );
+        fetchExistingResidents();
         if (onImportComplete) {
           onImportComplete();
         }
@@ -537,7 +557,7 @@ export default function ResidentImporterModal({
                     onChange={(e) => setColumnMapping({ ...columnMapping, unitColumn: e.target.value })}
                     className="w-full px-3.5 py-2.5 rounded-xl border border-zinc-300 bg-white text-sm font-medium text-zinc-900 focus:ring-2 focus:ring-emerald-500 outline-none"
                   >
-                    <option value="">-- Selecione a coluna de Residência --</option>
+                    <option value="">-- Nenhuma coluna de Residência (registros serão marcados como inconsistentes) --</option>
                     {rawData.headers.map(h => (
                       <option key={h} value={h}>{h}</option>
                     ))}
@@ -555,6 +575,23 @@ export default function ResidentImporterModal({
                     className="w-full px-3.5 py-2.5 rounded-xl border border-zinc-300 bg-white text-sm font-medium text-zinc-900 focus:ring-2 focus:ring-emerald-500 outline-none"
                   >
                     <option value="">-- Selecione a coluna de Telefone --</option>
+                    {rawData.headers.map(h => (
+                      <option key={h} value={h}>{h}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Observação / Status (Opcional) */}
+                <div>
+                  <label className="block text-xs font-bold text-zinc-500 uppercase tracking-wider mb-1.5">
+                    Observação / Status da Planilha (Opcional)
+                  </label>
+                  <select
+                    value={columnMapping.obsColumn || ''}
+                    onChange={(e) => setColumnMapping({ ...columnMapping, obsColumn: e.target.value || undefined })}
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-zinc-300 bg-white text-sm font-medium text-zinc-900 focus:ring-2 focus:ring-emerald-500 outline-none"
+                  >
+                    <option value="">-- Nenhuma coluna de observação --</option>
                     {rawData.headers.map(h => (
                       <option key={h} value={h}>{h}</option>
                     ))}
@@ -590,7 +627,7 @@ export default function ResidentImporterModal({
                 </button>
                 <button
                   type="button"
-                  disabled={!columnMapping.nameColumn || !columnMapping.unitColumn}
+                  disabled={!columnMapping.nameColumn}
                   onClick={() => handleRecalculatePreview(columnMapping)}
                   className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold text-sm rounded-xl shadow-sm flex items-center gap-2 transition-all"
                 >
