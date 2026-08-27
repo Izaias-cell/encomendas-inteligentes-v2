@@ -86,22 +86,101 @@ export default function CondominiumList({ user }: CondominiumListProps) {
   const [regenerateConfirmCondo, setRegenerateConfirmCondo] = useState<Condominium | null>(null);
   const [regeneratingLoading, setRegeneratingLoading] = useState(false);
 
+  const generateUniquePortariaCode = async (condoName: string): Promise<string> => {
+    const base = (condoName || 'CONDO')
+      .toUpperCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+      .replace(/^CONDOMINIO\s+/i, '')
+      .replace(/[^A-Z0-9]/g, '');
+    
+    const prefix = base.length > 0 ? base.substring(0, 10) : 'PORTARIA';
+    let code = '';
+    let attempts = 0;
+
+    do {
+      attempts++;
+      const num = Math.floor(1000 + Math.random() * 9000);
+      code = `${prefix}-${num}`;
+      
+      const { data: existing } = await supabase
+        .from('condominium_settings')
+        .select('id')
+        .eq('portaria_access_code', code)
+        .limit(1);
+
+      if (!existing || existing.length === 0) {
+        break;
+      }
+    } while (attempts < 50);
+
+    return code;
+  };
+
   const handleRegeneratePortariaCode = async (condo: Condominium) => {
     setRegeneratingLoading(true);
     try {
       const res = await api.post(`/api/admin/condominiums/${condo.id}/regenerate-portaria-code`);
-      if (res && res.data && res.data.success) {
-        toast.success(`Novo Código Gerado: ${res.data.portaria_access_code}`);
-        const updated = condos.map(c => c.id === condo.id ? { ...c, portaria_access_code: res.data.portaria_access_code, portaria_name: res.data.portaria_name } : c);
+      if (res && res.ok && res.data && res.data.success && res.data.portaria_access_code) {
+        const newCode = res.data.portaria_access_code;
+        const portariaName = res.data.portaria_name || condo.name;
+        toast.success(`Novo código de acesso gerado com sucesso: ${newCode}`);
+        const updated = condos.map(c => c.id === condo.id ? { ...c, portaria_access_code: newCode, portaria_name: portariaName } : c);
         setCondos(updated);
         if (selectedCondo && selectedCondo.id === condo.id) {
-          setSelectedCondo({ ...selectedCondo, portaria_access_code: res.data.portaria_access_code, portaria_name: res.data.portaria_name });
+          setSelectedCondo({ ...selectedCondo, portaria_access_code: newCode, portaria_name: portariaName });
         }
-      } else {
-        toast.error(res?.data?.error || res?.error || 'Erro ao regenerar código.');
+        return;
       }
-    } catch (err: any) {
-      toast.error(err.message || 'Erro ao regenerar código da portaria.');
+      throw new Error(res?.data?.error || res?.error || 'Falha na resposta da API Express');
+    } catch (apiError: any) {
+      console.warn('[CondominiumList] API indisponível para regeneração de código, executando fallback direto no Supabase:', apiError);
+      try {
+        const newCode = await generateUniquePortariaCode(condo.name);
+        const portariaName = condo.name;
+        const oldCode = condo.portaria_access_code || selectedCondo?.portaria_access_code;
+
+        const { error: upsertError } = await supabase
+          .from('condominium_settings')
+          .upsert({
+            condominium_id: condo.id,
+            portaria_name: portariaName,
+            portaria_access_code: newCode,
+            active_portaria_token: null
+          }, { onConflict: 'condominium_id' });
+
+        if (upsertError) {
+          throw upsertError;
+        }
+
+        try {
+          await registrarAuditoria({
+            condominio_id: condo.id,
+            usuario_id: user?.id || 'admin',
+            usuario_nome: user?.full_name || 'Administrador',
+            usuario_perfil: 'admin',
+            tipo_evento: 'CODIGO_PORTARIA_REGERADO',
+            acao: 'UPDATE',
+            tabela_afetada: 'condominium_settings',
+            registro_id: condo.id,
+            descricao: `Código de acesso da portaria regenerado para o condomínio ${condo.name}. Novo código: ${newCode}`,
+            metodo: 'FRONTEND_FALLBACK',
+            dados_antes: { portaria_access_code: oldCode },
+            dados_depois: { portaria_access_code: newCode }
+          });
+        } catch (auditErr) {
+          console.warn('[CondominiumList] Falha ao registrar auditoria de regeneração:', auditErr);
+        }
+
+        toast.success(`Novo código de acesso gerado com sucesso: ${newCode}`);
+        const updated = condos.map(c => c.id === condo.id ? { ...c, portaria_access_code: newCode, portaria_name: portariaName } : c);
+        setCondos(updated);
+        if (selectedCondo && selectedCondo.id === condo.id) {
+          setSelectedCondo({ ...selectedCondo, portaria_access_code: newCode, portaria_name: portariaName });
+        }
+      } catch (fallbackError: any) {
+        console.error('Erro ao regenerar código no Supabase:', fallbackError);
+        toast.error(fallbackError.message || 'Erro ao regenerar código da portaria.');
+      }
     } finally {
       setRegeneratingLoading(false);
       setRegenerateConfirmCondo(null);
@@ -200,27 +279,32 @@ export default function CondominiumList({ user }: CondominiumListProps) {
         }
 
         if (dbCondos) {
-          const [profilesRes, packagesRes, moradoresRes] = await Promise.all([
+          const [profilesRes, packagesRes, moradoresRes, settingsRes] = await Promise.all([
             supabase.from('profiles').select('id, condominium_id, active'),
             supabase.from('packages').select('id, condominium_id, status'),
-            supabase.from('moradores').select('id, condominium_id')
+            supabase.from('moradores').select('id, condominium_id'),
+            supabase.from('condominium_settings').select('condominium_id, portaria_access_code, portaria_name')
           ]);
 
           const allProfiles = profilesRes.data || [];
           const allPackages = packagesRes.data || [];
           const allMoradores = moradoresRes.data || [];
+          const allSettings = settingsRes.data || [];
 
           const enrichedCondos: Condominium[] = dbCondos.map((c: any) => {
             const condoProfiles = allProfiles.filter(p => p.condominium_id === c.id);
             const condoPackages = allPackages.filter(p => p.condominium_id === c.id);
             const condoMoradores = allMoradores.filter(m => m.condominium_id === c.id);
+            const condoSetting = allSettings.find(s => s.condominium_id === c.id);
 
             return {
               ...c,
               active: c.active !== false,
               user_count: condoProfiles.length,
               unit_count: condoMoradores.length,
-              package_count: condoPackages.length
+              package_count: condoPackages.length,
+              portaria_access_code: condoSetting?.portaria_access_code || c.portaria_access_code,
+              portaria_name: condoSetting?.portaria_name || c.portaria_name || c.name
             };
           });
 
