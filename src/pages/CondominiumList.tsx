@@ -179,16 +179,69 @@ export default function CondominiumList({ user }: CondominiumListProps) {
     setLoading(true);
     try {
       const res = await api.get('/api/admin/condominiums');
-      if (!res.ok) {
-        throw new Error(res.error || 'Erro ao carregar condomínios');
+      if (res && res.ok && res.data?.condominiums && Array.isArray(res.data.condominiums)) {
+        setCondos(res.data.condominiums);
+        if (res.data.summary) {
+          setSummary(res.data.summary);
+        }
+        return;
       }
-      setCondos(res.data?.condominiums || []);
-      if (res.data?.summary) {
-        setSummary(res.data.summary);
+      throw new Error(res?.error || 'Falha na resposta da API Express');
+    } catch (apiError: any) {
+      console.warn('[CondominiumList] API indisponível, executando fallback direto no Supabase:', apiError);
+      try {
+        const { data: dbCondos, error: condoError } = await supabase
+          .from('condominiums')
+          .select('*')
+          .order('created_at', { ascending: false });
+
+        if (condoError) {
+          throw condoError;
+        }
+
+        if (dbCondos) {
+          const [profilesRes, packagesRes, moradoresRes] = await Promise.all([
+            supabase.from('profiles').select('id, condominium_id, active'),
+            supabase.from('packages').select('id, condominium_id, status'),
+            supabase.from('moradores').select('id, condominium_id')
+          ]);
+
+          const allProfiles = profilesRes.data || [];
+          const allPackages = packagesRes.data || [];
+          const allMoradores = moradoresRes.data || [];
+
+          const enrichedCondos: Condominium[] = dbCondos.map((c: any) => {
+            const condoProfiles = allProfiles.filter(p => p.condominium_id === c.id);
+            const condoPackages = allPackages.filter(p => p.condominium_id === c.id);
+            const condoMoradores = allMoradores.filter(m => m.condominium_id === c.id);
+
+            return {
+              ...c,
+              active: c.active !== false,
+              user_count: condoProfiles.length,
+              unit_count: condoMoradores.length,
+              package_count: condoPackages.length
+            };
+          });
+
+          setCondos(enrichedCondos);
+
+          const totalCondos = enrichedCondos.length;
+          const activeCondos = enrichedCondos.filter(c => c.active !== false).length;
+          const inactiveCondos = totalCondos - activeCondos;
+
+          setSummary({
+            total_condos: totalCondos,
+            active_condos: activeCondos,
+            inactive_condos: inactiveCondos,
+            total_users: allProfiles.length,
+            total_packages: allPackages.length
+          });
+        }
+      } catch (fallbackError: any) {
+        console.error('Erro ao buscar condomínios no Supabase:', fallbackError);
+        toast.error(fallbackError.message || 'Erro ao carregar condomínios');
       }
-    } catch (error: any) {
-      console.error('Erro ao buscar condomínios:', error);
-      toast.error(error.message || 'Erro ao carregar condomínios');
     } finally {
       setLoading(false);
     }
@@ -198,13 +251,26 @@ export default function CondominiumList({ user }: CondominiumListProps) {
     setUsersLoading(true);
     try {
       const res = await api.get(`/api/admin/condominiums/${condoId}/users`);
-      if (!res.ok) {
-        throw new Error(res.error || 'Erro ao carregar usuários do condomínio');
+      if (res && res.ok && res.data?.profiles && Array.isArray(res.data.profiles)) {
+        setCondoUsers(res.data.profiles);
+        return;
       }
-      setCondoUsers(res.data?.profiles || []);
-    } catch (error: any) {
-      console.error("Erro ao buscar usuários do condomínio:", error);
-      toast.error(error.message || 'Erro ao carregar usuários');
+      throw new Error(res?.error || 'API de usuários indisponível');
+    } catch (apiError: any) {
+      console.warn('[CondominiumList] API /users indisponível, buscando perfis no Supabase:', apiError);
+      try {
+        const { data: dbUsers, error: userError } = await supabase
+          .from('profiles')
+          .select('*')
+          .eq('condominium_id', condoId)
+          .order('created_at', { ascending: false });
+
+        if (userError) throw userError;
+        setCondoUsers(dbUsers || []);
+      } catch (fallbackError: any) {
+        console.error("Erro ao buscar usuários do condomínio:", fallbackError);
+        toast.error(fallbackError.message || 'Erro ao carregar usuários');
+      }
     } finally {
       setUsersLoading(false);
     }
