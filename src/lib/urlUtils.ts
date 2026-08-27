@@ -9,23 +9,19 @@ export function getAppPublicOrigin(): string {
   // 1. In browser runtime (Window exists)
   if (typeof window !== 'undefined' && window.location && window.location.origin) {
     const origin = window.location.origin;
-    if (!origin.includes('localhost') && !origin.includes('127.0.0.1')) {
+    if (!origin.includes('localhost') && !origin.includes('127.0.0.1') && !origin.includes('capacitor://') && !origin.includes('0.0.0.0')) {
       return origin.replace(/\/+$/, '');
     }
   }
 
   // 2. Check environment variable
   const envUrl = (import.meta as any).env?.VITE_APP_URL || (import.meta as any).env?.VITE_PUBLIC_URL;
-  if (envUrl && typeof envUrl === 'string' && envUrl.trim() && !envUrl.includes('localhost')) {
+  if (envUrl && typeof envUrl === 'string' && envUrl.trim() && !envUrl.includes('localhost') && !envUrl.includes('127.0.0.1')) {
     return envUrl.trim().replace(/\/+$/, '');
   }
 
-  // 3. Fallback to current window.location.origin (e.g. in local dev)
-  if (typeof window !== 'undefined' && window.location?.origin) {
-    return window.location.origin.replace(/\/+$/, '');
-  }
-
-  return 'http://localhost:3000';
+  // 3. Canonical Production Fallback (Ensures links generated on any machine/WhatsApp point to production)
+  return 'https://encomendas-inteligentes-v2.vercel.app';
 }
 
 /**

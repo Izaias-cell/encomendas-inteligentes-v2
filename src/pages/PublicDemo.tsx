@@ -1,14 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { 
-  Package, CheckCircle2, Shield, QrCode, Smartphone, 
+  Package, CheckCircle2, Shield, Smartphone, 
   ArrowRight, Users, Bell, Sparkles, Building2, 
   Check, Phone, User, Clock, Gift, Lock, MessageSquare,
-  ChevronRight, Play, RefreshCw, Send, Eye
+  ChevronRight, Play, RefreshCw, Send, Eye, KeyRound
 } from 'lucide-react';
-import { QRCodeSVG } from 'qrcode.react';
 import { toast, Toaster } from 'react-hot-toast';
 import { api } from '../lib/apiClient';
+import { supabase } from '../lib/supabase';
 
 export default function PublicDemo() {
   const [searchParams] = useSearchParams();
@@ -22,6 +22,8 @@ export default function PublicDemo() {
     origin_title: string;
     referrer_name: string;
     condo_name: string;
+    referrer_condo_id?: string | null;
+    referrer_user_id?: string | null;
     token: string | null;
     ref: string | null;
   }>({
@@ -87,38 +89,112 @@ export default function PublicDemo() {
     e.preventDefault();
     if (submitting || submittedSuccess) return;
 
-    if (!form.name.trim()) {
+    const cleanName = form.name.trim();
+    const cleanPhone = form.phone.trim();
+    const cleanCondo = form.condo_name.trim();
+    const activeToken = originData.token || token || '';
+    const activeRef = originData.ref || ref || '';
+
+    if (!cleanName) {
       toast.error('Por favor, informe seu nome completo.');
       return;
     }
-    if (!form.phone.trim() || form.phone.replace(/\D/g, '').length < 10) {
+    if (!cleanPhone || cleanPhone.replace(/\D/g, '').length < 10) {
       toast.error('Por favor, informe um WhatsApp válido com DDD.');
       return;
     }
-    if (!form.condo_name.trim()) {
+    if (!cleanCondo) {
       toast.error('Por favor, informe o nome do seu condomínio.');
       return;
     }
 
     setSubmitting(true);
-    try {
-      const res = await api.post('/api/public/demo-adhere', {
-        name: form.name.trim(),
-        phone: form.phone.trim(),
-        condo_name: form.condo_name.trim(),
-        token: originData.token || token || undefined,
-        ref: originData.ref || ref || undefined
-      });
 
-      if (res && res.data && res.data.success) {
-        setSubmittedSuccess(true);
-        toast.success('Solicitação de teste registrada com sucesso!');
-      } else {
-        toast.error(res?.data?.error || res?.error || 'Erro ao registrar adesão.');
-        setSubmitting(false);
+    try {
+      let saved = false;
+
+      // 1. Try server endpoint first
+      try {
+        const res = await api.post('/api/public/demo-adhere', {
+          name: cleanName,
+          phone: cleanPhone,
+          condo_name: cleanCondo,
+          token: activeToken || undefined,
+          ref: activeRef || undefined
+        });
+
+        if (res && res.data && res.data.success) {
+          saved = true;
+        }
+      } catch (apiErr) {
+        console.warn('API endpoint indisponível no ambiente de hospedagem (Vercel), acionando persistência direta no Supabase:', apiErr);
       }
+
+      // 2. Fallback to direct Supabase persistence if server endpoint failed or returned non-200 (production Vercel)
+      if (!saved) {
+        const leadRecord = {
+          id: `lead-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`,
+          name: cleanName,
+          phone: cleanPhone,
+          condo_name: cleanCondo,
+          origin_type: activeRef ? 'SINDICO' : 'ADMINISTRADOR',
+          referrer_condo_id: originData.referrer_condo_id || undefined,
+          referrer_condo_name: originData.condo_name || undefined,
+          referrer_user_id: originData.referrer_user_id || undefined,
+          referrer_user_name: originData.referrer_name || undefined,
+          token_or_ref: activeRef || activeToken || 'DEMO-OFICIAL',
+          status: 'TESTE_ADERIDO',
+          bonus_granted: false,
+          bonus_days_granted: 0,
+          created_at: new Date().toISOString()
+        };
+
+        // Log TESTE_ADERIDO in audit trail via RPC
+        await supabase.rpc('registrar_auditoria', {
+          p_condominio_id: originData.referrer_condo_id || null,
+          p_usuario_id: null,
+          p_usuario_nome: cleanName,
+          p_usuario_perfil: 'lead',
+          p_tipo_evento: 'TESTE_ADERIDO',
+          p_acao: 'CREATE',
+          p_tabela_afetada: 'referrals',
+          p_registro_id: null,
+          p_descricao: `Novo interesse registrado: ${cleanName} (${cleanCondo}, WhatsApp: ${cleanPhone}). Origem: ${activeRef ? `Indicação de ${originData.referrer_name || activeRef}` : (activeToken ? `Link Admin (${activeToken})` : 'Demonstração Direta')}.`,
+          p_metodo: 'DEMO_ADHERENCE',
+          p_dados_antes: null,
+          p_dados_depois: leadRecord
+        });
+
+        // Log ADMIN_NOTIFICADO in audit trail via RPC
+        await supabase.rpc('registrar_auditoria', {
+          p_condominio_id: originData.referrer_condo_id || null,
+          p_usuario_id: null,
+          p_usuario_nome: 'Sistema de Notificação',
+          p_usuario_perfil: 'sistema',
+          p_tipo_evento: 'ADMIN_NOTIFICADO',
+          p_acao: 'CREATE',
+          p_tabela_afetada: 'referrals',
+          p_registro_id: null,
+          p_descricao: `Notificação enviada ao Administrador: Síndico ${cleanName} do condomínio ${cleanCondo} aderiu ao teste de 15 dias. Contato: ${cleanPhone}.`,
+          p_metodo: 'SYSTEM_NOTIFICATION',
+          p_dados_antes: null,
+          p_dados_depois: {
+            sindico_nome: cleanName,
+            condominio_nome: cleanCondo,
+            contato_whatsapp: cleanPhone,
+            origem: activeRef ? `Indicação de ${originData.referrer_name || activeRef}` : 'Demonstração Direta',
+            status: 'TESTE_ADERIDO',
+            data_hora: new Date().toISOString()
+          }
+        });
+      }
+
+      setSubmittedSuccess(true);
+      toast.success('Solicitação de teste registrada com sucesso!');
     } catch (err: any) {
-      toast.error(err.message || 'Erro ao enviar dados.');
+      console.error('Erro ao registrar adesão:', err);
+      toast.error('Não foi possível registrar sua solicitação neste momento. Tente novamente em alguns instantes.');
+    } finally {
       setSubmitting(false);
     }
   };
@@ -144,10 +220,10 @@ export default function PublicDemo() {
 
           <a 
             href="#aderir"
-            className="hidden sm:inline-flex items-center gap-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs uppercase tracking-wider px-4 py-2.5 rounded-xl transition-all shadow-md shadow-emerald-500/20 hover:scale-105"
+            className="hidden sm:inline-flex items-center gap-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs uppercase tracking-wider px-4 py-2.5 rounded-xl transition-all shadow-md shadow-emerald-500/20 hover:scale-105"
           >
             <Gift className="w-4 h-4" />
-            QUERO TESTAR
+            QUERO TESTAR → 15 dias gratuitos!
           </a>
         </div>
       </header>
@@ -197,11 +273,11 @@ export default function PublicDemo() {
 
             <div className="bg-slate-900/80 border border-slate-800 p-5 rounded-2xl text-left hover:border-emerald-500/40 transition-colors">
               <div className="w-10 h-10 bg-teal-500/10 text-teal-400 rounded-xl flex items-center justify-center mb-3">
-                <QrCode className="w-5 h-5" />
+                <Lock className="w-5 h-5" />
               </div>
               <h3 className="font-bold text-white text-base mb-1">Retirada Segura</h3>
               <p className="text-xs text-slate-400 leading-relaxed">
-                Entrega confirmada por QR Code ou PIN de 4 dígitos. Registro com data, hora e porteiro responsável.
+                Entrega confirmada exclusivamente por PIN de 4 dígitos. Registro com data, hora e porteiro responsável.
               </p>
             </div>
 
@@ -238,7 +314,7 @@ export default function PublicDemo() {
           <div className="flex flex-wrap justify-center gap-2 mb-8">
             <button
               onClick={() => setSimulatedStep(1)}
-              className={`px-5 py-2.5 rounded-xl font-bold text-xs sm:text-sm transition-all flex items-center gap-2 ${
+              className={`px-5 py-2.5 rounded-xl font-bold text-xs sm:text-sm transition-all flex items-center gap-2 cursor-pointer ${
                 simulatedStep === 1
                   ? 'bg-emerald-500 text-slate-950 shadow-lg shadow-emerald-500/20 scale-105'
                   : 'bg-slate-800 text-slate-400 hover:text-white hover:bg-slate-700'
@@ -249,7 +325,7 @@ export default function PublicDemo() {
             </button>
             <button
               onClick={() => setSimulatedStep(2)}
-              className={`px-5 py-2.5 rounded-xl font-bold text-xs sm:text-sm transition-all flex items-center gap-2 ${
+              className={`px-5 py-2.5 rounded-xl font-bold text-xs sm:text-sm transition-all flex items-center gap-2 cursor-pointer ${
                 simulatedStep === 2
                   ? 'bg-emerald-500 text-slate-950 shadow-lg shadow-emerald-500/20 scale-105'
                   : 'bg-slate-800 text-slate-400 hover:text-white hover:bg-slate-700'
@@ -260,14 +336,14 @@ export default function PublicDemo() {
             </button>
             <button
               onClick={() => setSimulatedStep(3)}
-              className={`px-5 py-2.5 rounded-xl font-bold text-xs sm:text-sm transition-all flex items-center gap-2 ${
+              className={`px-5 py-2.5 rounded-xl font-bold text-xs sm:text-sm transition-all flex items-center gap-2 cursor-pointer ${
                 simulatedStep === 3
                   ? 'bg-emerald-500 text-slate-950 shadow-lg shadow-emerald-500/20 scale-105'
                   : 'bg-slate-800 text-slate-400 hover:text-white hover:bg-slate-700'
               }`}
             >
               <span className="w-5 h-5 rounded-full bg-black/20 flex items-center justify-center text-xs">3</span>
-              Retirada Segura
+              Retirada Segura (PIN)
             </button>
           </div>
 
@@ -335,7 +411,7 @@ export default function PublicDemo() {
                   </div>
                   <button
                     onClick={() => setSimulatedStep(2)}
-                    className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs px-4 py-2 rounded-xl transition-all flex items-center gap-1.5"
+                    className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs px-4 py-2 rounded-xl transition-all flex items-center gap-1.5 cursor-pointer"
                   >
                     Notificar Morador
                     <ArrowRight className="w-4 h-4" />
@@ -375,7 +451,7 @@ export default function PublicDemo() {
                     <br /><br />
                     🔑 Seu código seguro de retirada é: <strong className="text-emerald-400 text-base font-mono bg-emerald-950 px-2 py-0.5 rounded">{simulatedCode}</strong>
                     <br /><br />
-                    Basta apresentar este código ou escanear o QR Code no balcão da portaria para retirar sua encomenda.
+                    Basta apresentar este código PIN de 4 dígitos no balcão da portaria para retirar sua encomenda.
                   </p>
 
                   <div className="mt-4 pt-3 border-t border-emerald-500/20 flex items-center justify-between text-[10px] text-slate-400">
@@ -387,7 +463,7 @@ export default function PublicDemo() {
                 <div className="flex justify-end">
                   <button
                     onClick={() => setSimulatedStep(3)}
-                    className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs px-4 py-2.5 rounded-xl transition-all flex items-center gap-1.5"
+                    className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs px-4 py-2.5 rounded-xl transition-all flex items-center gap-1.5 cursor-pointer"
                   >
                     Simular Retirada do Pacote
                     <ArrowRight className="w-4 h-4" />
@@ -401,11 +477,11 @@ export default function PublicDemo() {
                 <div className="flex items-center justify-between border-b border-slate-800 pb-4">
                   <div className="flex items-center gap-3">
                     <div className="w-10 h-10 bg-emerald-500/20 text-emerald-400 rounded-xl flex items-center justify-center font-bold">
-                      <QrCode className="w-5 h-5" />
+                      <Lock className="w-5 h-5" />
                     </div>
                     <div>
-                      <h4 className="font-bold text-white">Passo 3: Baixa expressa com confirmação</h4>
-                      <p className="text-xs text-slate-400">Segurança total e auditoria instantânea</p>
+                      <h4 className="font-bold text-white">Passo 3: Baixa expressa com confirmação via PIN</h4>
+                      <p className="text-xs text-slate-400">Segurança total e auditoria instantânea por código numérico</p>
                     </div>
                   </div>
                   <span className="text-xs font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 px-3 py-1 rounded-full flex items-center gap-1">
@@ -414,12 +490,23 @@ export default function PublicDemo() {
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 items-center">
-                  <div className="bg-slate-950/80 border border-slate-800 p-4 rounded-2xl text-center flex flex-col items-center justify-center">
-                    <div className="p-3 bg-white rounded-xl shadow-inner mb-3">
-                      <QRCodeSVG value={`DEMO-PICKUP-${simulatedCode}`} size={110} />
+                  <div className="bg-slate-950/80 border border-emerald-500/30 p-6 rounded-2xl text-center flex flex-col items-center justify-center">
+                    <div className="inline-flex items-center gap-1.5 bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[11px] font-black uppercase tracking-wider px-3 py-1 rounded-full mb-3">
+                      <KeyRound className="w-3.5 h-3.5" />
+                      🔐 RETIRADA SEGURA
                     </div>
-                    <p className="text-xs font-bold text-slate-300">QR Code de Retirada</p>
-                    <p className="text-[11px] text-slate-500">Ou informe o PIN: <span className="font-mono text-emerald-400 font-bold">{simulatedCode}</span></p>
+                    
+                    <p className="text-xs font-semibold text-slate-300 mb-1">Código PIN:</p>
+                    <div className="font-mono text-3xl sm:text-4xl font-black text-emerald-400 bg-slate-900 border border-emerald-500/40 px-6 py-2.5 rounded-2xl tracking-widest shadow-inner my-2">
+                      {simulatedCode}
+                    </div>
+
+                    <p className="text-[11px] text-slate-400 mt-2 leading-tight">
+                      O morador apresenta o PIN na portaria.
+                    </p>
+                    <p className="text-[11px] text-emerald-400/90 font-medium">
+                      A portaria confirma a entrega utilizando o PIN.
+                    </p>
                   </div>
 
                   <div className="space-y-3">
@@ -431,7 +518,7 @@ export default function PublicDemo() {
                     <div className="bg-slate-950/80 border border-slate-800 p-3.5 rounded-xl">
                       <p className="text-[11px] text-slate-400 uppercase font-bold">Porteiro Responsável</p>
                       <p className="text-sm font-bold text-white">Portaria Central (Plantão Diurno)</p>
-                      <p className="text-xs text-emerald-400 font-mono">Retirado com sucesso!</p>
+                      <p className="text-xs text-emerald-400 font-mono">Retirado com sucesso via PIN!</p>
                     </div>
                   </div>
                 </div>
@@ -442,7 +529,7 @@ export default function PublicDemo() {
                       setSimulatedCode(Math.floor(1000 + Math.random() * 9000).toString());
                       setSimulatedStep(1);
                     }}
-                    className="text-xs text-slate-400 hover:text-white flex items-center gap-1"
+                    className="text-xs text-slate-400 hover:text-white flex items-center gap-1 cursor-pointer"
                   >
                     <RefreshCw className="w-3.5 h-3.5" />
                     Reiniciar Simulação
@@ -452,7 +539,7 @@ export default function PublicDemo() {
                     href="#aderir"
                     className="bg-gradient-to-r from-emerald-500 to-teal-400 hover:from-emerald-400 hover:to-teal-300 text-slate-950 font-black text-xs uppercase tracking-wider px-5 py-3 rounded-xl transition-all shadow-lg shadow-emerald-500/20"
                   >
-                    QUERO TESTAR
+                    QUERO TESTAR → 15 dias gratuitos!
                   </a>
                 </div>
               </div>
@@ -461,7 +548,7 @@ export default function PublicDemo() {
         </div>
       </section>
 
-      {/* Adherence Form Section ("QUERO TESTAR") */}
+      {/* Adherence Form Section ("QUERO TESTAR → 15 dias gratuitos!") */}
       <section id="aderir" className="py-20 px-4 sm:px-6 relative">
         <div className="max-w-xl mx-auto">
           <div className="bg-slate-900 border-2 border-emerald-500/40 rounded-3xl p-6 sm:p-10 shadow-2xl relative overflow-hidden">
@@ -476,7 +563,7 @@ export default function PublicDemo() {
                     15 Dias Grátis • Sem Compromisso
                   </div>
                   <h3 className="text-2xl sm:text-3xl font-black text-white tracking-tight">
-                    QUERO TESTAR
+                    QUERO TESTAR → 15 dias gratuitos!
                   </h3>
                   <p className="text-xs sm:text-sm text-slate-300 mt-2">
                     Preencha os dados abaixo para solicitar o período de teste grátis no seu condomínio.
@@ -551,7 +638,7 @@ export default function PublicDemo() {
                         </>
                       ) : (
                         <>
-                          QUERO TESTAR
+                          QUERO TESTAR → 15 dias gratuitos!
                           <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
                         </>
                       )}
@@ -593,17 +680,17 @@ export default function PublicDemo() {
                     <strong className="text-white">{form.condo_name}</strong>
                   </div>
                   <div className="flex items-center justify-between text-slate-300">
-                    <span className="text-slate-400">Síndico / Solicitante:</span>
+                    <span className="text-slate-400">Síndico:</span>
                     <strong className="text-white">{form.name}</strong>
                   </div>
                   <div className="flex items-center justify-between text-slate-300">
-                    <span className="text-slate-400">WhatsApp para Contato:</span>
+                    <span className="text-slate-400">WhatsApp:</span>
                     <strong className="text-emerald-400 font-mono">{form.phone}</strong>
                   </div>
                   <div className="flex items-center justify-between text-slate-300 pt-1.5 border-t border-slate-800">
                     <span className="text-slate-400">Status da Solicitação:</span>
                     <span className="font-extrabold text-amber-400 bg-amber-400/10 border border-amber-400/20 px-2.5 py-0.5 rounded-full text-[10px] uppercase">
-                      Aguardando Contato do Administrador
+                      AGUARDANDO CONTATO DO ADMINISTRADOR
                     </span>
                   </div>
                 </div>
