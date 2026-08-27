@@ -122,8 +122,14 @@ export default function UserManagement({ user }: UserManagementProps) {
   const getValidSession = async () => {
     try {
       // 1. Try to get current session from Supabase
-      const { data: { session } } = await supabase.auth.getSession();
-      if (session) return session;
+      const { data, error } = await supabase.auth.getSession();
+      if (error) {
+        const msg = error.message || '';
+        if (msg.includes('Invalid Refresh Token') || msg.includes('Refresh Token Not Found')) {
+          await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+        }
+      }
+      if (data?.session) return data.session;
 
       // 2. Check for Mock User (AI Studio Preview) fallback
       if (user && user.id) {
@@ -133,16 +139,14 @@ export default function UserManagement({ user }: UserManagementProps) {
         } as any;
       }
 
-      // 3. Fallback to getUser()
-      const { data: { user: authUser } } = await supabase.auth.getUser();
-      if (authUser) {
-        const { data: { session: refreshed } } = await supabase.auth.getSession();
-        if (refreshed) return refreshed;
-      }
-
       return null;
-    } catch (err) {
-      console.error('[DEBUG FRONTEND] Erro ao validar sessão:', err);
+    } catch (err: any) {
+      const msg = err?.message || String(err || '');
+      if (msg.includes('Invalid Refresh Token') || msg.includes('Refresh Token Not Found')) {
+        await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+      } else {
+        console.error('[DEBUG FRONTEND] Erro ao validar sessão:', err);
+      }
       return null;
     }
   };

@@ -1185,7 +1185,8 @@ export default function PackageNew({ user }: PackageNewProps) {
       }
 
       // 1. Obter o usuário logado e tratar UUIDs de forma segura
-      const { data: { user: authUser } } = await supabase.auth.getUser();
+      const { data: authData } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
+      const authUser = authData?.user;
       const condoId = sanitizeUuid(user?.condominium_id) || user?.condominium_id || '';
       const candidateUuid = (authUser?.id && isValidUuid(authUser.id)) 
         ? authUser.id 

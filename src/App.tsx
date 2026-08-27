@@ -500,7 +500,8 @@ const LoginPage = ({ onLogin }: any) => {
         if (!signupData.user) throw new Error("Erro ao criar conta");
 
         // Create initial profile via backend API to bypass RLS
-        const { data: { session } } = await supabase.auth.getSession();
+        const { data: sessionData } = await supabase.auth.getSession().catch(() => ({ data: { session: null } }));
+        const session = sessionData?.session;
         if (!session) throw new Error('Sessão não iniciada após signup');
 
         const profileResponse = await fetch('/api/auth/create-profile', {
@@ -1394,7 +1395,8 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
 
       if (targetResident?.phone) {
         try {
-          const { data: { session } } = await supabase.auth.getSession();
+          const { data: sessionData } = await supabase.auth.getSession().catch(() => ({ data: { session: null } }));
+          const session = sessionData?.session;
           const response = await fetch('/api/notify-resident', {
             method: 'POST',
             headers: { 
@@ -1453,7 +1455,8 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
     if (!pkg) return;
 
     // Obter o usuário logado para capturar o ID se disponível (opcional)
-    const { data: { user: authUser } } = await supabase.auth.getUser();
+    const { data: authData } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
+    const authUser = authData?.user;
     const validDeliveredBy = (authUser?.id && isValidUuid(authUser.id)) 
       ? authUser.id 
       : (user?.id && isValidUuid(user.id) ? user.id : null);
@@ -1503,7 +1506,8 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
         .maybeSingle();
 
       if (residentProfile?.phone) {
-        const { data: { session } } = await supabase.auth.getSession();
+        const { data: sessionData } = await supabase.auth.getSession().catch(() => ({ data: { session: null } }));
+        const session = sessionData?.session;
         const response = await fetch('/api/notify-resident', {
           method: 'POST',
           headers: { 
@@ -2532,8 +2536,23 @@ export default function App() {
   useEffect(() => {
     const checkUser = async () => {
       try {
-        const { data: { session } } = await supabase.auth.getSession();
-        if (session) {
+        const { data, error: sessionError } = await supabase.auth.getSession();
+        if (sessionError) {
+          const msg = sessionError.message || '';
+          if (
+            msg.includes('Invalid Refresh Token') ||
+            msg.includes('Refresh Token Not Found') ||
+            msg.includes('refresh_token_not_found')
+          ) {
+            console.warn('[App] Refresh token inválido na inicialização. Limpando sessão local.');
+            await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+          }
+          setUser(null);
+          return;
+        }
+
+        const session = data?.session;
+        if (session && session.user) {
           const { data: profile, error } = await supabase
             .from('profiles')
             .select('*')
@@ -2542,23 +2561,61 @@ export default function App() {
           
           if (profile) {
             if (profile.active === false) {
-              await supabase.auth.signOut();
+              await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
               setUser(null);
             } else {
               setUser(profile);
             }
           } else {
             // Sessão ativa mas sem perfil? Desloga por segurança
-            await supabase.auth.signOut();
+            await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+            setUser(null);
           }
+        } else {
+          setUser(null);
         }
-      } catch (err) {
-        console.error("Erro ao verificar sessão:", err);
+      } catch (err: any) {
+        const msg = err?.message || String(err || '');
+        if (
+          msg.includes('Invalid Refresh Token') ||
+          msg.includes('Refresh Token Not Found') ||
+          msg.includes('refresh_token_not_found')
+        ) {
+          console.warn('[App] Exceção de refresh token. Limpando sessão local.');
+          await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+        } else {
+          console.error("Erro ao verificar sessão:", err);
+        }
+        setUser(null);
       } finally {
         setLoading(false);
       }
     };
+
     checkUser();
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (event === 'SIGNED_OUT' || !session) {
+        setUser(null);
+      } else if (event === 'SIGNED_IN' || event === 'USER_UPDATED' || event === 'TOKEN_REFRESHED') {
+        if (session?.user) {
+          try {
+            const { data: profile } = await supabase
+              .from('profiles')
+              .select('*')
+              .eq('id', session.user.id)
+              .maybeSingle();
+            if (profile && profile.active !== false) {
+              setUser(profile);
+            }
+          } catch (_) {}
+        }
+      }
+    });
+
+    return () => {
+      subscription.unsubscribe();
+    };
   }, []);
 
   const handleLogout = async () => {

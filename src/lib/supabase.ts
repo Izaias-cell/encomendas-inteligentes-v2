@@ -22,3 +22,28 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
     autoRefreshToken: true,
   },
 });
+
+// Gracefully handle stale or invalid refresh tokens without breaking the UI
+if (typeof window !== 'undefined') {
+  // Listen for auth state changes to detect token refresh errors
+  supabase.auth.onAuthStateChange((event, session) => {
+    if (event === 'TOKEN_REFRESHED' && !session) {
+      supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+    }
+  });
+
+  // Catch unhandled promise rejections specifically for invalid refresh tokens
+  window.addEventListener('unhandledrejection', (event) => {
+    const reason = event.reason?.message || event.reason?.error_description || String(event.reason || '');
+    if (
+      reason.includes('Invalid Refresh Token') ||
+      reason.includes('Refresh Token Not Found') ||
+      reason.includes('refresh_token_not_found') ||
+      reason.includes('Invalid Refresh Token: Refresh Token Not Found')
+    ) {
+      console.warn('[Supabase Auth] Token de atualização inválido detectado. Limpando sessão local...');
+      event.preventDefault();
+      supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+    }
+  });
+}

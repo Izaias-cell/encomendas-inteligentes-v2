@@ -511,7 +511,8 @@ const isValidUuid = (id?: string | null): boolean => {
         finalMethod = 'CÓDIGO';
       }
 
-      const { data: { user: authUser } } = await supabase.auth.getUser();
+      const { data: authData } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
+      const authUser = authData?.user;
       const validDeliveredBy = (authUser?.id && isValidUuid(authUser.id)) 
         ? authUser.id 
         : (user?.id && isValidUuid(user.id) ? user.id : null);
@@ -641,7 +642,8 @@ const isValidUuid = (id?: string | null): boolean => {
         throw new Error("Morador não encontrado ou sem telefone cadastrado");
       }
 
-      const { data: { session } } = await supabase.auth.getSession();
+      const { data: sessionData } = await supabase.auth.getSession().catch(() => ({ data: { session: null } }));
+      const session = sessionData?.session;
       const response = await fetch('/api/notify-resident', {
         method: 'POST',
         headers: { 

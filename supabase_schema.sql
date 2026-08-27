@@ -112,10 +112,14 @@ $ LANGUAGE plpgsql;
 CREATE TABLE condominium_settings (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   condominium_id UUID REFERENCES condominiums(id) UNIQUE,
+  portaria_access_code TEXT,
+  portaria_name TEXT,
+  active_portaria_token TEXT,
   notification_template TEXT,
   reminder_48h_enabled BOOLEAN DEFAULT TRUE,
   reminder_72h_enabled BOOLEAN DEFAULT TRUE,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 -- Tabela de Logs de Mensagens

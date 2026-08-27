@@ -90,8 +90,14 @@ export default function UserFormModal({
 
   const getValidSession = async () => {
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (session) return session;
+      const { data, error } = await supabase.auth.getSession();
+      if (error) {
+        const msg = error.message || '';
+        if (msg.includes('Invalid Refresh Token') || msg.includes('Refresh Token Not Found')) {
+          await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+        }
+      }
+      if (data?.session) return data.session;
 
       if (currentUser && currentUser.id) {
         return {
@@ -100,15 +106,14 @@ export default function UserFormModal({
         } as any;
       }
 
-      const { data: { user: authUser } } = await supabase.auth.getUser();
-      if (authUser) {
-        const { data: { session: refreshed } } = await supabase.auth.getSession();
-        if (refreshed) return refreshed;
-      }
-
       return null;
-    } catch (err) {
-      console.error('[UserFormModal] Erro ao validar sessão:', err);
+    } catch (err: any) {
+      const msg = err?.message || String(err || '');
+      if (msg.includes('Invalid Refresh Token') || msg.includes('Refresh Token Not Found')) {
+        await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+      } else {
+        console.error('[UserFormModal] Erro ao validar sessão:', err);
+      }
       return null;
     }
   };

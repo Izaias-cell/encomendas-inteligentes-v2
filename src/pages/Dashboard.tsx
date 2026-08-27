@@ -97,7 +97,8 @@ export default function Dashboard({ user }: DashboardProps) {
 
     setCondoLoading(true);
     try {
-      const { data: { session } } = await supabase.auth.getSession();
+      const { data: sessionData } = await supabase.auth.getSession().catch(() => ({ data: { session: null } }));
+      const session = sessionData?.session;
       
       const response = await fetch('/api/condominiums/create', {
         method: 'POST',

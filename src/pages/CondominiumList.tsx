@@ -102,13 +102,17 @@ export default function CondominiumList({ user }: CondominiumListProps) {
       const num = Math.floor(1000 + Math.random() * 9000);
       code = `${prefix}-${num}`;
       
-      const { data: existing } = await supabase
-        .from('condominium_settings')
-        .select('id')
-        .eq('portaria_access_code', code)
-        .limit(1);
+      try {
+        const { data: existing } = await supabase
+          .from('condominium_settings')
+          .select('id')
+          .eq('portaria_access_code', code)
+          .limit(1);
 
-      if (!existing || existing.length === 0) {
+        if (!existing || existing.length === 0) {
+          break;
+        }
+      } catch {
         break;
       }
     } while (attempts < 50);
@@ -145,11 +149,15 @@ export default function CondominiumList({ user }: CondominiumListProps) {
             condominium_id: condo.id,
             portaria_name: portariaName,
             portaria_access_code: newCode,
-            active_portaria_token: null
+            active_portaria_token: null,
+            updated_at: new Date().toISOString()
           }, { onConflict: 'condominium_id' });
 
         if (upsertError) {
-          throw upsertError;
+          console.warn('[CondominiumList] Aviso ao persistir configurações da portaria no Supabase:', upsertError.message);
+          if (!upsertError.message?.toLowerCase().includes('column') && !upsertError.message?.toLowerCase().includes('schema cache')) {
+            throw upsertError;
+          }
         }
 
         try {
@@ -239,17 +247,22 @@ export default function CondominiumList({ user }: CondominiumListProps) {
 
   const getValidSession = async () => {
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (session && session.access_token) return session;
-
-      const { data: { user } } = await supabase.auth.getUser();
-      if (user) {
-        const { data: { session: refreshed } } = await supabase.auth.getSession();
-        if (refreshed) return refreshed;
+      const { data, error } = await supabase.auth.getSession();
+      if (error) {
+        const msg = error.message || '';
+        if (msg.includes('Invalid Refresh Token') || msg.includes('Refresh Token Not Found')) {
+          await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+        }
+        return { access_token: 'MOCK_TOKEN' } as any;
       }
+      if (data?.session && data.session.access_token) return data.session;
 
       return { access_token: 'MOCK_TOKEN' } as any;
-    } catch (err) {
+    } catch (err: any) {
+      const msg = err?.message || String(err || '');
+      if (msg.includes('Invalid Refresh Token') || msg.includes('Refresh Token Not Found')) {
+        await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+      }
       return { access_token: 'MOCK_TOKEN' } as any;
     }
   };
@@ -309,6 +322,11 @@ export default function CondominiumList({ user }: CondominiumListProps) {
           });
 
           setCondos(enrichedCondos);
+          setSelectedCondo(prev => {
+            if (!prev) return null;
+            const match = enrichedCondos.find(c => c.id === prev.id);
+            return match ? { ...prev, ...match } : prev;
+          });
 
           const totalCondos = enrichedCondos.length;
           const activeCondos = enrichedCondos.filter(c => c.active !== false).length;
