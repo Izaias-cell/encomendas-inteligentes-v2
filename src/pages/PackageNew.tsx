@@ -297,31 +297,67 @@ export default function PackageNew({ user }: PackageNewProps) {
     fetchData();
   }, [user?.condominium_id]);
 
-  // Auto-trigger camera on mount
+  // Cleanup camera on unmount or when leaving camera step
   useEffect(() => {
-    if (step === 'camera' && !photoUrl && !cameraActive && !blockAutoCamera) {
-      startCamera();
+    if (step !== 'camera') {
+      stopCamera();
     }
     return () => stopCamera();
-  }, [step, photoUrl, blockAutoCamera]);
+  }, [step]);
+
+  // Inicialização automática da câmera ao entrar na etapa 'camera'
+  useEffect(() => {
+    if (step === 'camera' && !cameraActive && !cameraError && !isStartingCameraRef.current) {
+      console.log('[CAMERA-CYCLE-DEBUG] START_CAMERA (AUTO)');
+      startCamera();
+    }
+  }, [step, cameraActive, cameraError]);
 
   // Fetch condominium name on mount
   useEffect(() => {
     const fetchCondoName = async () => {
       if (!user?.condominium_id) return;
-      const { data, error } = await supabase
-        .from('condominiums')
-        .select('name')
-        .eq('id', user.condominium_id)
-        .single();
-      
-      if (!error && data) {
-        setCondoName(data.name);
+      try {
+        const { data, error } = await supabase
+          .from('condominiums')
+          .select('name')
+          .eq('id', user.condominium_id)
+          .maybeSingle();
+        
+        if (!error && data) {
+          setCondoName(data.name);
+        }
+      } catch (err: any) {
+        console.warn("Aviso ao buscar nome do condomínio:", err?.message || err);
       }
     };
 
     fetchCondoName();
   }, [user?.condominium_id]);
+
+  const getUserMediaWithTimeout = (constraints: MediaStreamConstraints, timeoutMs = 3500): Promise<MediaStream> => {
+    let timer: any;
+    const timeoutPromise = new Promise<MediaStream>((_, reject) => {
+      timer = setTimeout(() => {
+        const timeoutError = new Error("Tempo limite para acesso à câmera excedido.");
+        timeoutError.name = "TimeoutError";
+        reject(timeoutError);
+      }, timeoutMs);
+    });
+
+    return Promise.race([
+      navigator.mediaDevices.getUserMedia(constraints)
+        .then((stream) => {
+          clearTimeout(timer);
+          return stream;
+        })
+        .catch((err) => {
+          clearTimeout(timer);
+          throw err;
+        }),
+      timeoutPromise
+    ]);
+  };
 
   const startCamera = async () => {
     // 1. Verificar suporte
@@ -344,76 +380,162 @@ export default function PackageNew({ user }: PackageNewProps) {
     }
 
     isStartingCameraRef.current = true;
-
-    // 2. Parar qualquer stream existente antes de abrir uma nova
-    stopCamera();
     setIsCameraStabilizing(true);
     setBlockAutoCamera(false);
     setCameraError(null);
     
+    console.log('[CAMERA-CYCLE-DEBUG] START_CAMERA');
+
     try {
-      let stream: MediaStream;
+      let stream: MediaStream | null = null;
       
+      const tryGetMedia = async (constraints: MediaStreamConstraints, timeout = 3500) => {
+        return await getUserMediaWithTimeout(constraints, timeout);
+      };
+
       // 3. Tentar preferencialmente a câmera traseira
       try {
-        stream = await navigator.mediaDevices.getUserMedia({
+        console.log('[CAMERA-CYCLE-DEBUG] GET_USER_MEDIA_START (rear)');
+        stream = await tryGetMedia({
           video: { facingMode: { ideal: "environment" } },
           audio: false
-        });
-      } catch (err1) {
-        console.warn("Falha ao abrir câmera traseira, tentando frontal...", err1);
-        // 4. Fallback para câmera frontal
-        try {
-          stream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: "user" },
-            audio: false
-          });
-        } catch (err2) {
-          console.warn("Falha ao abrir câmera frontal, tentando qualquer vídeo...", err2);
-          // 5. Fallback final: qualquer vídeo disponível
-          stream = await navigator.mediaDevices.getUserMedia({ 
-            video: true, 
-            audio: false 
-          });
+        }, 3500);
+      } catch (err1: any) {
+        console.log('[CAMERA-CYCLE-DEBUG] ERROR rear:', err1?.name || err1?.message);
+        
+        // Se for erro definitivo de permissão/segurança, propaga imediatamente
+        const isPermission = 
+          err1?.name === 'NotAllowedError' || 
+          err1?.name === 'PermissionDeniedError' || 
+          err1?.name === 'SecurityError' ||
+          err1?.message?.toLowerCase().includes('permission') || 
+          err1?.message?.toLowerCase().includes('denied');
+
+        if (isPermission) {
+          throw err1;
+        }
+
+        // Se for erro transitório de hardware ocupado/liberando entre registros consecutivos
+        const isTransient = 
+          err1?.name === 'NotReadableError' || 
+          err1?.name === 'TrackStartError' || 
+          err1?.name === 'AbortError' ||
+          err1?.message?.toLowerCase().includes('in use') ||
+          err1?.message?.toLowerCase().includes('could not start');
+
+        if (isTransient) {
+          console.log('[CAMERA-CYCLE-DEBUG] CAMERA_RESTART: Aguardando liberação do sensor de hardware (180ms)...');
+          await new Promise(res => setTimeout(res, 180));
+          
+          if (!isStartingCameraRef.current) return;
+          
+          try {
+            console.log('[CAMERA-CYCLE-DEBUG] GET_USER_MEDIA_RETRY (rear)');
+            stream = await tryGetMedia({
+              video: { facingMode: { ideal: "environment" } },
+              audio: false
+            }, 3000);
+          } catch (retryErr: any) {
+            console.warn("Retry de câmera traseira falhou, tentando fallback...", retryErr);
+          }
+        }
+
+        // Se ainda não obteve stream, tenta fallback para frontal ou qualquer câmera
+        if (!stream) {
+          try {
+            console.log('[CAMERA-CYCLE-DEBUG] GET_USER_MEDIA_START (fallback user)');
+            stream = await tryGetMedia({
+              video: { facingMode: "user" },
+              audio: false
+            }, 2500);
+          } catch (err2: any) {
+            if (
+              err2?.name === 'NotAllowedError' || 
+              err2?.name === 'PermissionDeniedError' || 
+              err2?.name === 'SecurityError' ||
+              err2?.message?.toLowerCase().includes('permission') || 
+              err2?.message?.toLowerCase().includes('denied')
+            ) {
+              throw err2;
+            }
+            console.log('[CAMERA-CYCLE-DEBUG] GET_USER_MEDIA_START (fallback any)');
+            stream = await tryGetMedia({ video: true, audio: false }, 2500);
+          }
         }
       }
-      
+
+      if (!stream) {
+        throw new Error("Não foi possível inicializar o dispositivo de vídeo.");
+      }
+
+      console.log('[CAMERA-CYCLE-DEBUG] GET_USER_MEDIA_SUCCESS');
+
+      // Se a câmera foi interrompida/desmontada durante a obtenção do stream
+      if (!isStartingCameraRef.current) {
+        stream.getTracks().forEach(t => { try { t.stop(); } catch(e) {} });
+        return;
+      }
+
+      // Limpar stream anterior caso ainda exista
+      if (streamRef.current && streamRef.current !== stream) {
+        streamRef.current.getTracks().forEach(t => { try { t.stop(); } catch(e) {} });
+      }
+
       streamRef.current = stream;
       
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         
-        // Android Chrome precisa de load() em alguns casos após atribuir srcObject
-        try { videoRef.current.load(); } catch(e) {}
+        try {
+          const playPromise = videoRef.current.play();
+          if (playPromise !== undefined) {
+            playPromise.catch(() => {});
+          }
+        } catch(e) {}
         
         setCameraActive(true);
+        setIsCameraStabilizing(false);
+        console.log('[CAMERA-CYCLE-DEBUG] STREAM_ATTACHED');
+        console.log('[CAMERA-CYCLE-DEBUG] VIDEO_READY');
 
-        // Aguarda estabilização (foco e exposição contínua se disponível)
-        setTimeout(() => {
-          setIsCameraStabilizing(false);
-          const track = stream.getVideoTracks()[0];
-          if (track && track.applyConstraints) {
-            track.applyConstraints({
-              advanced: [
-                { focusMode: 'continuous' } as any,
-                { exposureMode: 'continuous' } as any
-              ]
-            }).catch(() => {});
-          }
-        }, 800); // 800ms para estabilização térmica e de sensor
+        // Configuração adaptativa não-bloqueante de foco e exposição contínua
+        const track = stream.getVideoTracks()[0];
+        if (track && track.applyConstraints) {
+          track.applyConstraints({
+            advanced: [
+              { focusMode: 'continuous' } as any,
+              { exposureMode: 'continuous' } as any
+            ]
+          }).catch(() => {});
+        }
+      } else {
+        setCameraActive(true);
+        setIsCameraStabilizing(false);
+        console.log('[CAMERA-CYCLE-DEBUG] VIDEO_READY (no ref)');
       }
     } catch (err: any) {
-      console.error("Erro crítico ao acessar câmera:", err);
-      
-      // 6. Tratar erros específicos conforme solicitado
-      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        setCameraError("Permissão da câmera negada. Ative nas configurações do navegador ou abra o aplicativo em uma nova aba fora do chat.");
-      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
-        setCameraError("Nenhuma câmera encontrada no dispositivo.");
-      } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
-        setCameraError("A câmera está sendo usada por outro aplicativo ou falhou ao iniciar.");
+      console.log('[CAMERA-CYCLE-DEBUG] ERROR:', err?.name || err?.message || err);
+      const isPermissionDenied = 
+        err?.name === 'NotAllowedError' || 
+        err?.name === 'PermissionDeniedError' || 
+        err?.name === 'SecurityError' ||
+        err?.message?.toLowerCase().includes('permission') || 
+        err?.message?.toLowerCase().includes('denied');
+
+      if (isPermissionDenied) {
+        console.warn("Permissão de câmera não concedida pelo usuário/navegador:", err?.message || err);
+        setCameraError("Permissão da câmera necessária para captura automática. Você também pode tirar a foto diretamente pelo dispositivo ou usar o modo manual.");
       } else {
-        setCameraError("Erro ao abrir câmera. Tente novamente.");
+        console.error("Erro ao acessar câmera:", err);
+        if (err?.name === 'NotFoundError' || err?.name === 'DevicesNotFoundError') {
+          setCameraError("Nenhuma câmera encontrada no dispositivo.");
+        } else if (err?.name === 'NotReadableError' || err?.name === 'TrackStartError') {
+          setCameraError("A câmera está sendo usada por outro aplicativo ou falhou ao iniciar.");
+        } else if (err?.name === 'TimeoutError') {
+          setCameraError("Tempo limite para abrir a câmera esgotado. Verifique as permissões ou tente novamente.");
+        } else {
+          setCameraError("Erro ao abrir câmera. Tente novamente ou capture pelo dispositivo.");
+        }
       }
       
       setCameraActive(false);
@@ -426,15 +548,23 @@ export default function PackageNew({ user }: PackageNewProps) {
   const stopCamera = () => {
     isStartingCameraRef.current = false;
     if (streamRef.current) {
+      console.log('[CAMERA-CYCLE-DEBUG] STOP_CAMERA');
       streamRef.current.getTracks().forEach(track => {
-        try { track.stop(); } catch(e) {}
+        try { 
+          track.stop(); 
+          console.log('[CAMERA-CYCLE-DEBUG] TRACK_STOPPED');
+        } catch(e) {}
       });
       streamRef.current = null;
     }
     if (videoRef.current) {
+      try {
+        videoRef.current.pause();
+      } catch(e) {}
       videoRef.current.srcObject = null;
     }
     setCameraActive(false);
+    setIsCameraStabilizing(false);
     setFlashOn(false);
   };
 
@@ -468,7 +598,7 @@ export default function PackageNew({ user }: PackageNewProps) {
   };
 
   const capturePhoto = async () => {
-    if (!videoRef.current || !canvasRef.current || isCameraStabilizing || isCapturing) return;
+    if (!videoRef.current || !canvasRef.current || isCapturing) return;
     
     setIsCapturing(true);
     const requestId = ++activeRequestIdRef.current;
@@ -1586,6 +1716,15 @@ export default function PackageNew({ user }: PackageNewProps) {
                           </button>
                           <button
                             onClick={() => {
+                              fileInputRef.current?.click();
+                            }}
+                            className="w-full py-4 bg-emerald-600 text-white rounded-2xl font-bold flex items-center justify-center gap-2 shadow-lg shadow-emerald-100 transition-all active:scale-95 text-sm"
+                          >
+                            <Camera className="w-5 h-5" />
+                            TIRAR FOTO PELO DISPOSITIVO
+                          </button>
+                          <button
+                            onClick={() => {
                               setCameraError(null);
                               setStep('manual');
                             }}
@@ -1630,12 +1769,12 @@ export default function PackageNew({ user }: PackageNewProps) {
                       onClick={cameraActive ? capturePhoto : startCamera}
                       animate={isHighlighting ? { scale: [1, 1.1, 1], boxShadow: ["0 0 0px rgba(79,70,229,0)", "0 0 20px rgba(79,70,229,0.5)", "0 0 0px rgba(79,70,229,0)"] } : {}}
                       transition={{ duration: 0.5, repeat: 1 }}
-                      disabled={(cameraActive && (isCameraStabilizing || isOcrLoading)) || isSaving}
+                      disabled={isCapturing || isSaving}
                       className={`w-28 h-28 bg-white rounded-full flex flex-col items-center justify-center shadow-2xl active:scale-95 transition-all border-8 border-gray-100 ${
-                        (cameraActive && (isCameraStabilizing || isOcrLoading)) || isSaving ? 'opacity-50' : 'opacity-100'
+                        isCapturing || isSaving ? 'opacity-50' : 'opacity-100'
                       } ${isHighlighting ? 'ring-4 ring-indigo-500 ring-offset-4' : ''}`}
                     >
-                      {(cameraActive && (isCameraStabilizing || isOcrLoading)) ? (
+                      {(isCapturing || isSaving) ? (
                          <div className="w-10 h-10 border-4 border-gray-100 rounded-full border-t-indigo-600 animate-spin" />
                       ) : (
                          <>
@@ -1649,6 +1788,14 @@ export default function PackageNew({ user }: PackageNewProps) {
                   </div>
 
                   <canvas ref={canvasRef} className="hidden" />
+                  <input
+                    type="file"
+                    ref={fileInputRef}
+                    onChange={handleFileUpload}
+                    accept="image/*"
+                    capture="environment"
+                    className="hidden"
+                  />
                 </div>
                 
                   <div className="p-6 bg-gray-50 flex items-center justify-between">

@@ -501,10 +501,13 @@ export default function Portaria({ user }: PortariaProps) {
         .eq('id', user.condominium_id)
         .maybeSingle();
       
-      if (error) throw error;
+      if (error) {
+        console.warn('Aviso ao buscar nome do condomínio:', error?.message || error);
+        return;
+      }
       if (data) setCondoName(data.name);
-    } catch (error) {
-      console.error('Erro ao buscar nome do condomínio:', error);
+    } catch (error: any) {
+      console.warn('Aviso ao buscar nome do condomínio (rede indisponível):', error?.message || error);
     }
   };
 
