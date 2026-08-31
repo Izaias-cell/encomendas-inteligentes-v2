@@ -30,7 +30,6 @@ import PackageNew from './pages/PackageNew';
 import Portaria from './pages/Portaria';
 import Settings from './pages/Settings';
 import ChangePassword from './pages/ChangePassword';
-import PublicDemo from './pages/PublicDemo';
 
 // --- Types ---
 import { Role, Profile, Package as PackageType, ScoredResident } from './types';
@@ -2747,8 +2746,6 @@ export default function App() {
 
   return (
     <Routes>
-      <Route path="/demonstracao" element={<PublicDemo />} />
-      <Route path="/demonstracao/:token" element={<PublicDemo />} />
       <Route path="/portal/:token" element={<ResidentPortal />} />
       <Route path="/retirada" element={<Retirada />} />
       <Route path="/retirada/:token" element={<Retirada />} />

@@ -1,5 +1,4 @@
 import { supabase } from './supabase';
-import { getAppPublicOrigin } from './urlUtils';
 
 export interface ApiFetchOptions extends RequestInit {
   timeoutMs?: number;
@@ -103,7 +102,7 @@ export async function apiFetch<T = any>(
 
       console.log(`[ApiClient] [Tentativa ${attempt}/${retries + 1}] ${fetchOptions.method || 'GET'} ${endpoint}`);
 
-      const baseUrl = getAppPublicOrigin();
+      const baseUrl = typeof window !== 'undefined' ? window.location.origin : '';
       const fullUrl = (endpoint.startsWith('http://') || endpoint.startsWith('https://'))
         ? endpoint
         : `${baseUrl}${endpoint.startsWith('/') ? '' : '/'}${endpoint}`;

@@ -25,19 +25,16 @@ import {
   AlertTriangle,
   X,
   QrCode,
-  Gift,
-  Link2
+  Gift
 } from 'lucide-react';
 
 import { normalizeRole } from '../lib/authUtils';
-import AdminDemoQrModal from '../components/AdminDemoQrModal';
 
 interface DashboardProps {
   user: Profile;
 }
 
 export default function Dashboard({ user }: DashboardProps) {
-  const [showDemoQrModal, setShowDemoQrModal] = useState(false);
   const [stats, setStats] = useState({
     total: 0,
     pending: 0,
@@ -512,13 +509,6 @@ export default function Dashboard({ user }: DashboardProps) {
                     onClick={() => navigate('/condominiums')}
                     color="bg-indigo-100 text-indigo-600"
                   />
-                  <ActionCard 
-                    title="Link de Demonstração" 
-                    description="Gere Links de Demonstração para envio direto no WhatsApp e acompanhe adesões (QR Code opcional)." 
-                    icon={Link2} 
-                    onClick={() => setShowDemoQrModal(true)}
-                    color="bg-emerald-100 text-emerald-600"
-                  />
                 </>
               )}
             </>
@@ -908,12 +898,6 @@ export default function Dashboard({ user }: DashboardProps) {
             </div>
           </div>
         </div>
-      )}
-      {showDemoQrModal && (
-        <AdminDemoQrModal
-          isOpen={showDemoQrModal}
-          onClose={() => setShowDemoQrModal(false)}
-        />
       )}
     </div>
   );
