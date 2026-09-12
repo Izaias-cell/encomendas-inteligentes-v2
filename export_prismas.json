@@ -1,0 +1,165 @@
+{
+  "metadata": {
+    "exportadoEm": "2026-09-04T07:49:10.449Z",
+    "origemPrincipal": "data/db_store.json",
+    "origemBackup": "data/db_store.backup.json",
+    "totalPrismasPrincipal": 10,
+    "totalPrismasBackup": 9,
+    "condominioIdOriginal": "condo-1",
+    "condominioNomeOriginal": "Condomínio Belle Ville"
+  },
+  "prismas": [
+    {
+      "id": "PR-000001",
+      "numero": "11",
+      "corId": "amarelo",
+      "corNome": "Amarelo",
+      "estado": "DISPONIVEL",
+      "condominioId": "condo-1",
+      "ativo": true,
+      "excluido": false,
+      "createdAt": "2026-08-21T01:08:54.677Z",
+      "updatedAt": "2026-08-28T20:03:31.035Z"
+    },
+    {
+      "id": "PR-000002",
+      "numero": "20",
+      "corId": "verde",
+      "corNome": "Verde",
+      "estado": "DISPONIVEL",
+      "condominioId": "condo-1",
+      "ativo": true,
+      "excluido": false,
+      "createdAt": "2026-08-21T01:09:21.484Z",
+      "updatedAt": "2026-08-28T19:51:57.806Z"
+    },
+    {
+      "id": "PR-000003",
+      "numero": "22",
+      "corId": "verde",
+      "corNome": "Verde",
+      "estado": "DISPONIVEL",
+      "condominioId": "condo-1",
+      "ativo": true,
+      "excluido": false,
+      "createdAt": "2026-08-21T01:10:54.342Z",
+      "updatedAt": "2026-08-21T01:10:54.342Z"
+    },
+    {
+      "id": "PR-000004",
+      "numero": "11",
+      "corId": "vermelho",
+      "corNome": "Vermelho",
+      "estado": "DISPONIVEL",
+      "condominioId": "condo-1",
+      "ativo": true,
+      "excluido": false,
+      "createdAt": "2026-08-21T01:11:13.165Z",
+      "updatedAt": "2026-08-28T20:03:21.037Z"
+    },
+    {
+      "id": "PR-000005",
+      "numero": "08",
+      "corId": "verde",
+      "corNome": "Verde",
+      "estado": "DISPONIVEL",
+      "condominioId": "condo-1",
+      "ativo": true,
+      "excluido": false,
+      "createdAt": "2026-08-21T01:13:04.228Z",
+      "updatedAt": "2026-08-21T01:13:04.228Z"
+    },
+    {
+      "id": "PR-000006",
+      "numero": "77",
+      "corId": "azul",
+      "corNome": "Azul",
+      "estado": "DISPONIVEL",
+      "condominioId": "condo-1",
+      "ativo": false,
+      "excluido": true,
+      "createdAt": "2026-08-21T01:23:23.889Z",
+      "updatedAt": "2026-08-21T01:23:27.532Z",
+      "dataExclusao": "2026-08-21T01:23:27.532Z",
+      "usuarioExclusaoId": "usr-admin",
+      "usuarioExclusaoNome": "Administrador do Sistema"
+    },
+    {
+      "id": "PR-000007",
+      "numero": "88",
+      "corId": "vermelho",
+      "corNome": "Vermelho",
+      "estado": "DISPONIVEL",
+      "condominioId": "condo-1",
+      "ativo": false,
+      "excluido": true,
+      "createdAt": "2026-08-21T01:23:33.249Z",
+      "updatedAt": "2026-08-21T01:23:33.268Z",
+      "dataExclusao": "2026-08-21T01:23:33.268Z",
+      "usuarioExclusaoId": "usr-3",
+      "usuarioExclusaoNome": "Dra. Helena Síndica"
+    },
+    {
+      "id": "prism-1787944782958-sul5",
+      "condominioId": "condo-1",
+      "numero": "26",
+      "corId": "verde",
+      "corNome": "Verde",
+      "estado": "DISPONIVEL",
+      "ativo": true,
+      "excluido": false,
+      "createdAt": "2026-08-28T19:19:42.958Z",
+      "updatedAt": "2026-08-28T20:03:27.179Z"
+    },
+    {
+      "id": "prism-1788492057891-ddz8",
+      "condominioId": "condo-1",
+      "numero": "04",
+      "corId": "amarelo",
+      "corNome": "Amarelo",
+      "estado": "DISPONIVEL",
+      "ativo": true,
+      "excluido": false,
+      "createdAt": "2026-09-04T03:20:57.891Z",
+      "updatedAt": "2026-09-04T06:40:21.092Z"
+    },
+    {
+      "id": "prism-1788492183283-7ccl",
+      "condominioId": "condo-1",
+      "numero": "02",
+      "corId": "verde",
+      "corNome": "Verde",
+      "estado": "DISPONIVEL",
+      "ativo": true,
+      "excluido": false,
+      "createdAt": "2026-09-04T03:23:03.283Z",
+      "updatedAt": "2026-09-04T03:23:03.283Z"
+    }
+  ],
+  "prismasLegadosBackupApenas": [
+    {
+      "id": "PR-000008",
+      "numero": "11",
+      "corId": "vermelho",
+      "corNome": "Vermelho",
+      "estado": "DISPONIVEL",
+      "condominioId": "condo-1",
+      "ativo": true,
+      "excluido": false,
+      "createdAt": "2026-08-21T01:47:41.584Z",
+      "updatedAt": "2026-08-21T01:47:41.584Z"
+    },
+    {
+      "id": "PR-000009",
+      "numero": "11",
+      "corId": "amarelo",
+      "corNome": "Amarelo",
+      "estado": "DISPONIVEL",
+      "condominioId": "condo-1",
+      "ativo": true,
+      "excluido": false,
+      "createdAt": "2026-08-21T01:48:08.077Z",
+      "updatedAt": "2026-08-21T02:27:16.072Z"
+    }
+  ]
+}

@@ -1,412 +1,250 @@
--- SQL para o Banco de Dados Supabase (PostgreSQL)
+-- ============================================================================
+-- PROJETO PRISMAS — ESQUEMA COMPLETO SUPABASE POSTGRESQL
+-- MODO DE PERSISTÊNCIA OFICIAL E DEFINITIVO
+-- ============================================================================
 
--- Habilitar extensões necessárias
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+-- 1. TIPOS ENUMERADOS
+DO $$ BEGIN
+    CREATE TYPE prisma_estado AS ENUM ('DISPONIVEL', 'EM_USO', 'PENDENTE', 'INDISPONIVEL');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
 
--- Tabela de Condomínios
-CREATE TABLE condominiums (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name TEXT NOT NULL,
-  address TEXT,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+DO $$ BEGIN
+    CREATE TYPE movimentacao_tipo AS ENUM ('ENTREGA', 'DEVOLUCAO', 'PENDENCIA_ABERTA', 'PENDENCIA_RESOLVIDA', 'INDISPONIBILIDADE', 'CORRECAO');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+    CREATE TYPE user_role AS ENUM ('PORTEIRO', 'SINDICO', 'ADMIN');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+    CREATE TYPE tipo_turno AS ENUM ('12X36', 'COMERCIAL', 'PERSONALIZADO');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+    CREATE TYPE paridade_12x36 AS ENUM ('IMPAR', 'PAR');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+    CREATE TYPE categoria_contato AS ENUM ('SINDICO', 'PORTARIA', 'GRUPO_PORTARIA', 'OUTRO');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+    CREATE TYPE tipo_acesso AS ENUM ('PORTARIA', 'ADMIN', 'SINDICO');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+
+-- 2. TABELA: CONDOMINIOS
+CREATE TABLE IF NOT EXISTS condominios (
+    id VARCHAR(64) PRIMARY KEY,
+    nome VARCHAR(255) NOT NULL,
+    endereco VARCHAR(255) NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Tabela de Perfis (Moradores, Porteiros, Síndicos)
-CREATE TABLE profiles (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(), -- Removido REFERENCES auth.users(id) para permitir login de demonstração
-  full_name TEXT NOT NULL,
-  phone TEXT,
-  condominium_id UUID REFERENCES condominiums(id),
-  role TEXT CHECK (role IN ('resident', 'concierge', 'manager', 'admin', 'porteiro', 'sindico')) DEFAULT 'resident',
-  unit_number TEXT, -- Apartamento/Casa (Legacy/Full string)
-  unit_type TEXT, -- casa, lote, ap, etc
-  unit_number_val TEXT, -- apenas o número
-  block TEXT,
-  tower TEXT,
-  complement TEXT,
-  active BOOLEAN DEFAULT TRUE,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+-- 3. TABELA: USUARIOS
+CREATE TABLE IF NOT EXISTS usuarios (
+    id VARCHAR(64) PRIMARY KEY,
+    condominio_id VARCHAR(64) NOT NULL REFERENCES condominios(id) ON DELETE RESTRICT,
+    nome VARCHAR(255) NOT NULL,
+    role user_role NOT NULL DEFAULT 'PORTEIRO',
+    cargo VARCHAR(255) NOT NULL,
+    ativo BOOLEAN NOT NULL DEFAULT TRUE,
+    matricula VARCHAR(64),
+    tipo_turno tipo_turno DEFAULT '12X36',
+    opcao_turno_12x36 VARCHAR(32),
+    paridade_12x36 paridade_12x36,
+    hora_inicio VARCHAR(10),
+    hora_fim VARCHAR(10),
+    excluido BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Tabela de Encomendas
-CREATE TABLE packages (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  condominium_id UUID REFERENCES condominiums(id) NOT NULL,
-  recipient_id UUID REFERENCES profiles(id),
-  recipient_name_raw TEXT,
-  unit_number_raw TEXT, -- Legacy/Full string
-  unit_type TEXT,
-  unit_number_val TEXT,
-  block TEXT,
-  tower TEXT,
-  complement TEXT,
-  carrier TEXT,
-  tracking_code TEXT,
-  status TEXT CHECK (status IN ('received', 'notified', 'delivered')) DEFAULT 'received',
-  photo_url TEXT,
-  received_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  delivered_at TIMESTAMP WITH TIME ZONE,
-  received_by UUID REFERENCES profiles(id),
-  delivered_to_name TEXT,
-  notes TEXT,
-  pickup_token TEXT,
-  pickup_qr_code TEXT DEFAULT 'active',
-  qr_code_generated_at TIMESTAMP WITH TIME ZONE,
-  pickup_code TEXT,
-  whatsapp_status TEXT DEFAULT 'pending',
-  last_notification_at TIMESTAMP WITH TIME ZONE,
-  delivery_method TEXT,
-  retrieved_at TIMESTAMP WITH TIME ZONE,
-  retrieved_by_user_id UUID REFERENCES profiles(id)
+-- 4. TABELA: PRISMAS
+CREATE TABLE IF NOT EXISTS prismas (
+    id VARCHAR(64) PRIMARY KEY,
+    condominio_id VARCHAR(64) NOT NULL REFERENCES condominios(id) ON DELETE RESTRICT,
+    numero VARCHAR(32) NOT NULL,
+    cor_id VARCHAR(32) NOT NULL,
+    cor_nome VARCHAR(64) NOT NULL,
+    estado prisma_estado NOT NULL DEFAULT 'DISPONIVEL',
+    ativo BOOLEAN NOT NULL DEFAULT TRUE,
+    excluido BOOLEAN NOT NULL DEFAULT FALSE,
+    data_exclusao TIMESTAMPTZ,
+    usuario_exclusao_id VARCHAR(64) REFERENCES usuarios(id),
+    usuario_exclusao_nome VARCHAR(255),
+    motivo_inativacao TEXT,
+    observacao TEXT,
+    movimentacao_atual_id VARCHAR(64),
+    casa_atual VARCHAR(64),
+    horario_entrega_atual TIMESTAMPTZ,
+    porteiro_entrega_atual VARCHAR(255),
+    foto_entrega_atual TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Função para gerar código de retirada aleatório (6 dígitos)
-CREATE OR REPLACE FUNCTION generate_pickup_code() RETURNS TEXT AS $
-DECLARE
-  chars TEXT := '0123456789';
-  result TEXT := '';
-  i INTEGER := 0;
-BEGIN
-  FOR i IN 1..6 LOOP
-    result := result || substr(chars, floor(random() * length(chars) + 1)::integer, 1);
-  END LOOP;
-  RETURN result;
-END;
-$ LANGUAGE plpgsql;
-
--- Trigger para preencher campos automáticos na inserção de encomendas
-CREATE OR REPLACE FUNCTION before_package_insert() RETURNS TRIGGER AS $
-BEGIN
-  IF NEW.pickup_code IS NULL THEN
-    NEW.pickup_code := generate_pickup_code();
-  END IF;
-  IF NEW.pickup_token IS NULL THEN
-    NEW.pickup_token := encode(gen_random_bytes(16), 'hex');
-  END IF;
-  IF NEW.qr_code_generated_at IS NULL THEN
-    NEW.qr_code_generated_at := NOW();
-  END IF;
-  RETURN NEW;
-END;
-$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS trg_before_package_insert ON packages;
-CREATE TRIGGER trg_before_package_insert
-BEFORE INSERT ON packages
-FOR EACH ROW
-EXECUTE FUNCTION before_package_insert();
-
--- Função RPC para enfileirar notificação WhatsApp
-CREATE OR REPLACE FUNCTION enfileirar_notificacao_whatsapp(p_encomenda_id UUID)
-RETURNS VOID AS $
-BEGIN
-  -- Atualiza o status para pendente e registra o momento da solicitação
-  UPDATE packages 
-  SET whatsapp_status = 'pending', 
-      last_notification_at = NOW()
-  WHERE id = p_encomenda_id;
-END;
-$ LANGUAGE plpgsql;
-
--- Tabela de Configurações do Condomínio
-CREATE TABLE condominium_settings (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  condominium_id UUID REFERENCES condominiums(id) UNIQUE,
-  portaria_access_code TEXT,
-  portaria_name TEXT,
-  active_portaria_token TEXT,
-  notification_template TEXT,
-  reminder_48h_enabled BOOLEAN DEFAULT TRUE,
-  reminder_72h_enabled BOOLEAN DEFAULT TRUE,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+-- 5. TABELA: MOVIMENTACOES
+CREATE TABLE IF NOT EXISTS movimentacoes (
+    id VARCHAR(64) PRIMARY KEY,
+    condominio_id VARCHAR(64) NOT NULL REFERENCES condominios(id) ON DELETE RESTRICT,
+    prisma_id VARCHAR(64) NOT NULL REFERENCES prismas(id) ON DELETE RESTRICT,
+    prisma_numero VARCHAR(32) NOT NULL,
+    prisma_cor_nome VARCHAR(64) NOT NULL,
+    tipo movimentacao_tipo NOT NULL,
+    casa VARCHAR(64) NOT NULL,
+    usuario_id VARCHAR(64) NOT NULL REFERENCES usuarios(id),
+    usuario_nome VARCHAR(255) NOT NULL,
+    turno_id VARCHAR(64),
+    turno_nome VARCHAR(255),
+    data_hora TIMESTAMPTZ NOT NULL,
+    foto_evidencia_url TEXT,
+    estado_anterior prisma_estado NOT NULL,
+    estado_posterior prisma_estado NOT NULL,
+    movimentacao_anterior_id VARCHAR(64) REFERENCES movimentacoes(id),
+    encerrada BOOLEAN NOT NULL DEFAULT FALSE,
+    data_hora_encerramento TIMESTAMPTZ,
+    usuario_encerramento_id VARCHAR(64) REFERENCES usuarios(id),
+    usuario_encerramento_nome VARCHAR(255),
+    motivo_correcao TEXT,
+    motivo_pendencia TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Tabela de Logs de Mensagens
-CREATE TABLE message_logs (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  telefone TEXT,
-  status TEXT,
-  erro_api TEXT,
-  data_envio TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+-- 6. TABELA: AUDITORIA
+CREATE TABLE IF NOT EXISTS auditoria (
+    id VARCHAR(64) PRIMARY KEY,
+    condominio_id VARCHAR(64) NOT NULL REFERENCES condominios(id) ON DELETE RESTRICT,
+    acao VARCHAR(128) NOT NULL,
+    prisma_id VARCHAR(64),
+    prisma_numero VARCHAR(32),
+    prisma_cor_nome VARCHAR(64),
+    usuario_id VARCHAR(64) NOT NULL,
+    usuario_nome VARCHAR(255) NOT NULL,
+    usuario_cargo VARCHAR(255),
+    turno_id VARCHAR(64),
+    turno_nome VARCHAR(255),
+    data_hora TIMESTAMPTZ NOT NULL,
+    detalhes TEXT NOT NULL,
+    dados_anteriores JSONB,
+    dados_novos JSONB,
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Tabela de Notificações
-CREATE TABLE notifications (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID REFERENCES profiles(id),
-  message TEXT,
-  status TEXT,
-  delivery_channel TEXT,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+-- 7. TABELA: CONTATOS
+CREATE TABLE IF NOT EXISTS contatos (
+    id VARCHAR(64) PRIMARY KEY,
+    condominio_id VARCHAR(64) NOT NULL REFERENCES condominios(id) ON DELETE RESTRICT,
+    nome VARCHAR(255) NOT NULL,
+    categoria categoria_contato NOT NULL DEFAULT 'PORTARIA',
+    telefone_ou_whatsapp VARCHAR(64) NOT NULL,
+    identificador VARCHAR(128),
+    ativo BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Tabela de Conversas WhatsApp
-CREATE TABLE whatsapp_conversations (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  phone TEXT,
-  message TEXT,
-  direction TEXT, -- 'inbound' ou 'outbound'
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+-- 8. TABELA: CREDENCIAIS_ACESSO (Camada de Autenticação / PVA-6)
+CREATE TABLE IF NOT EXISTS credenciais_acesso (
+    id VARCHAR(64) PRIMARY KEY,
+    usuario_id VARCHAR(64) NOT NULL REFERENCES usuarios(id) ON DELETE RESTRICT,
+    condominio_id VARCHAR(64) NOT NULL REFERENCES condominios(id) ON DELETE RESTRICT,
+    tipo_acesso tipo_acesso NOT NULL,
+    identificador VARCHAR(255) NOT NULL UNIQUE,
+    senha_hash TEXT,
+    pin_hash TEXT,
+    ativo BOOLEAN NOT NULL DEFAULT TRUE,
+    bloqueado BOOLEAN NOT NULL DEFAULT FALSE,
+    tentativas_invalidas INTEGER NOT NULL DEFAULT 0,
+    ultimo_login TIMESTAMPTZ,
+    ultimo_bloqueio TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Tabela de Logs de Retirada
-CREATE TABLE retrieval_logs (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  package_id UUID REFERENCES packages(id),
-  porter_id UUID REFERENCES profiles(id),
-  delivery_method TEXT, -- 'qr_code' ou 'manual'
-  status TEXT,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
+-- 9. ÍNDICES DE ALTA PERFORMANCE
+CREATE INDEX IF NOT EXISTS idx_prismas_condo_estado ON prismas(condominio_id, estado, excluido);
+CREATE INDEX IF NOT EXISTS idx_movimentacoes_prisma ON movimentacoes(prisma_id, data_hora DESC);
+CREATE INDEX IF NOT EXISTS idx_movimentacoes_condo ON movimentacoes(condominio_id, data_hora DESC);
+CREATE INDEX IF NOT EXISTS idx_auditoria_condo ON auditoria(condominio_id, data_hora DESC);
+CREATE INDEX IF NOT EXISTS idx_credenciais_usuario ON credenciais_acesso(usuario_id);
+CREATE INDEX IF NOT EXISTS idx_credenciais_identificador ON credenciais_acesso(identificador);
+CREATE INDEX IF NOT EXISTS idx_credenciais_condo ON credenciais_acesso(condominio_id);
+CREATE INDEX IF NOT EXISTS idx_credenciais_tipo_acesso ON credenciais_acesso(tipo_acesso);
 
--- Tabela de Tokens de Acesso do Morador
-CREATE TABLE resident_access_tokens (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  resident_id UUID REFERENCES profiles(id) NOT NULL,
-  condominium_id UUID REFERENCES condominiums(id) NOT NULL,
-  token TEXT UNIQUE NOT NULL,
-  expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
-  active BOOLEAN DEFAULT TRUE,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
+-- 10. HABILITAR ROW LEVEL SECURITY (RLS)
+ALTER TABLE condominios ENABLE ROW LEVEL SECURITY;
+ALTER TABLE usuarios ENABLE ROW LEVEL SECURITY;
+ALTER TABLE prismas ENABLE ROW LEVEL SECURITY;
+ALTER TABLE movimentacoes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE auditoria ENABLE ROW LEVEL SECURITY;
+ALTER TABLE contatos ENABLE ROW LEVEL SECURITY;
+ALTER TABLE credenciais_acesso ENABLE ROW LEVEL SECURITY;
 
--- Habilitar RLS (Row Level Security)
-ALTER TABLE condominiums ENABLE ROW LEVEL SECURITY;
-ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
-ALTER TABLE packages ENABLE ROW LEVEL SECURITY;
-ALTER TABLE condominium_settings ENABLE ROW LEVEL SECURITY;
-ALTER TABLE message_logs ENABLE ROW LEVEL SECURITY;
+-- 11. POLÍTICAS DE ACESSO (Permitir acesso completo via Service Role no Backend)
+DROP POLICY IF EXISTS "Service role acesso irrestrito condominios" ON condominios;
+CREATE POLICY "Service role acesso irrestrito condominios" ON condominios FOR ALL USING (true);
 
-CREATE POLICY "Authenticated users can insert message logs" ON message_logs
-  FOR INSERT TO authenticated WITH CHECK (true);
+DROP POLICY IF EXISTS "Service role acesso irrestrito usuarios" ON usuarios;
+CREATE POLICY "Service role acesso irrestrito usuarios" ON usuarios FOR ALL USING (true);
 
-CREATE POLICY "Staff can view message logs" ON message_logs
-  FOR SELECT TO authenticated USING (
-    EXISTS (
-      SELECT 1 FROM profiles
-      WHERE profiles.id = auth.uid()
-      AND profiles.role IN ('concierge', 'manager', 'admin', 'porteiro', 'sindico')
-    )
-  );
-ALTER TABLE notifications ENABLE ROW LEVEL SECURITY;
-ALTER TABLE whatsapp_conversations ENABLE ROW LEVEL SECURITY;
-ALTER TABLE retrieval_logs ENABLE ROW LEVEL SECURITY;
-ALTER TABLE resident_access_tokens ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Service role acesso irrestrito prismas" ON prismas;
+CREATE POLICY "Service role acesso irrestrito prismas" ON prismas FOR ALL USING (true);
 
--- POLÍTICAS DE SEGURANÇA (RLS)
+DROP POLICY IF EXISTS "Service role acesso irrestrito movimentacoes" ON movimentacoes;
+CREATE POLICY "Service role acesso irrestrito movimentacoes" ON movimentacoes FOR ALL USING (true);
 
--- Condomínios: Usuários podem ver o condomínio ao qual pertencem
-CREATE POLICY "Users can view their own condominium" ON condominiums
-  FOR SELECT USING (
-    EXISTS (
-      SELECT 1 FROM profiles
-      WHERE profiles.id = auth.uid()
-      AND profiles.condominium_id = condominiums.id
-    )
-  );
+DROP POLICY IF EXISTS "Service role acesso irrestrito auditoria" ON auditoria;
+CREATE POLICY "Service role acesso irrestrito auditoria" ON auditoria FOR ALL USING (true);
 
--- Perfis: Usuários podem ver perfis do mesmo condomínio
-CREATE POLICY "Profiles are viewable by members of the same condominium" ON profiles
-  FOR SELECT USING (
-    id = auth.uid() OR
-    condominium_id = (
-      SELECT p.condominium_id 
-      FROM profiles p 
-      WHERE p.id = auth.uid()
-      LIMIT 1
-    )
-  );
+DROP POLICY IF EXISTS "Service role acesso irrestrito contatos" ON contatos;
+CREATE POLICY "Service role acesso irrestrito contatos" ON contatos FOR ALL USING (true);
 
--- Perfis: Porteiros, Síndicos e Admins podem cadastrar moradores
-CREATE POLICY "Staff can insert resident profiles" ON profiles
-  FOR INSERT WITH CHECK (
-    EXISTS (
-      SELECT 1 FROM profiles p
-      WHERE p.id = auth.uid()
-      AND p.condominium_id = profiles.condominium_id
-      AND p.role IN ('concierge', 'manager', 'admin')
-    )
-    AND role = 'resident'
-  );
+DROP POLICY IF EXISTS "Service role acesso irrestrito credenciais_acesso" ON credenciais_acesso;
+CREATE POLICY "Service role acesso irrestrito credenciais_acesso" ON credenciais_acesso FOR ALL USING (true);
 
--- Perfis: Porteiros, Síndicos e Admins podem editar moradores
-CREATE POLICY "Staff can update resident profiles" ON profiles
-  FOR UPDATE USING (
-    EXISTS (
-      SELECT 1 FROM profiles p
-      WHERE p.id = auth.uid()
-      AND p.condominium_id = profiles.condominium_id
-      AND p.role IN ('concierge', 'manager', 'admin')
-    )
-    AND role = 'resident'
-  );
 
--- Encomendas: Porteiros, Síndicos e Admins podem gerenciar tudo no seu condomínio
-CREATE POLICY "Staff can manage packages in their condo" ON packages
-  FOR ALL TO authenticated
-  USING (
-    EXISTS (
-      SELECT 1 FROM profiles
-      WHERE profiles.id = auth.uid()
-      AND (profiles.role = 'admin' OR profiles.condominium_id = packages.condominium_id)
-      AND profiles.role IN ('concierge', 'manager', 'admin', 'porteiro', 'sindico')
-    )
-  );
-
--- Encomendas: Moradores podem ver suas próprias encomendas
-CREATE POLICY "Residents can view their own packages" ON packages
-  FOR SELECT USING (
-    recipient_id = auth.uid() OR
-    unit_number_raw = (
-      SELECT p.unit_number 
-      FROM profiles p 
-      WHERE p.id = auth.uid()
-      LIMIT 1
-    )
-  );
-
--- INSERIR DADOS DE DEMONSTRAÇÃO (Opcional, para testar sem criar contas reais)
-INSERT INTO condominiums (id, name, address) 
-VALUES ('00000000-0000-0000-0000-000000000000', 'Condomínio de Demonstração', 'Rua Exemplo, 123')
+-- 11. STORAGE BUCKET: EVIDENCIAS-PRISMAS (Armazenamento Privado de Fotos)
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES (
+    'evidencias-prismas',
+    'evidencias-prismas',
+    false,
+    10485760, -- Limite de 10MB por foto
+    ARRAY['image/jpeg', 'image/png', 'image/webp']
+)
 ON CONFLICT (id) DO NOTHING;
 
-INSERT INTO profiles (id, full_name, role, condominium_id, unit_number)
-VALUES ('00000000-0000-0000-0000-000000000001', 'Porteiro Silva (Demo)', 'concierge', '00000000-0000-0000-0000-000000000000', 'Portaria')
-ON CONFLICT (id) DO NOTHING;
+-- Políticas de Storage para Service Role / Backend
+DROP POLICY IF EXISTS "Service role acesso irrestrito evidencias-prismas" ON storage.objects;
+CREATE POLICY "Service role acesso irrestrito evidencias-prismas" ON storage.objects
+FOR ALL USING (bucket_id = 'evidencias-prismas');
 
--- POLÍTICA ADICIONAL PARA DEMONSTRAÇÃO (Permitir que o usuário de demo gerencie encomendas)
-CREATE POLICY "Demo concierge access" ON packages
-  FOR ALL USING (condominium_id = '00000000-0000-0000-0000-000000000000');
-
-CREATE POLICY "Demo profiles access" ON profiles
-  FOR SELECT USING (condominium_id = '00000000-0000-0000-0000-000000000000');
-
--- ==========================================
--- CONFIGURAÇÃO DE STORAGE (SUPABASE)
--- ==========================================
-
--- 1. Criar o bucket 'packages' se não existir
--- Nota: Em alguns ambientes Supabase, isso deve ser feito via Dashboard ou API de Admin
--- Mas incluímos aqui para referência e automação se possível via SQL
-INSERT INTO storage.buckets (id, name, public)
-VALUES ('packages', 'packages', true)
-ON CONFLICT (id) DO NOTHING;
-
--- 2. Políticas para o bucket 'packages' na tabela storage.objects
-
--- Permitir acesso público para leitura (SELECT)
--- Isso permite que qualquer pessoa veja as fotos das encomendas se tiver o link
-CREATE POLICY "Public Access" ON storage.objects
-  FOR SELECT USING (bucket_id = 'packages');
-
--- Permitir que usuários autenticados façam upload (INSERT)
-CREATE POLICY "Authenticated Upload" ON storage.objects
-  FOR INSERT WITH CHECK (
-    bucket_id = 'packages' AND
-    (auth.role() = 'authenticated' OR auth.role() = 'anon') -- Permitir anon para facilitar demo se necessário
-  );
-
--- Permitir que usuários autenticados atualizem (UPDATE)
--- Necessário se 'upsert: true' for usado
-CREATE POLICY "Authenticated Update" ON storage.objects
-  FOR UPDATE USING (
-    bucket_id = 'packages' AND
-    (auth.role() = 'authenticated' OR auth.role() = 'anon')
-  );
-
--- Permitir que usuários autenticados excluam (DELETE)
--- Permitir que usuários autenticados excluam (DELETE)
-CREATE POLICY "Authenticated Delete" ON storage.objects
-  FOR DELETE USING (
-    bucket_id = 'packages' AND
-    (auth.role() = 'authenticated' OR auth.role() = 'anon')
-  );
-
--- ==========================================
--- AUDITORIA
--- ==========================================
-
-CREATE TABLE auditoria_eventos (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  condominio_id UUID REFERENCES condominiums(id),
-  usuario_id UUID REFERENCES profiles(id),
-  usuario_nome TEXT,
-  usuario_perfil TEXT,
-  tipo_evento TEXT, -- e.g. 'ENCOMENDA_CADASTRADA'
-  acao TEXT, -- 'CREATE', 'UPDATE', 'DELETE'
-  tabela_afetada TEXT,
-  registro_id UUID,
-  descricao TEXT,
-  metodo TEXT, -- 'MANUAL', 'OCR', 'QR', 'CODIGO', 'FOTO'
-  dados_antes JSONB,
-  dados_depois JSONB,
-  criado_em TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+-- 12. TABELA: SCHEMA_VERSION (Controle de Versão Estrutural do Banco)
+CREATE TABLE IF NOT EXISTS schema_version (
+    version VARCHAR(32) PRIMARY KEY,
+    description TEXT NOT NULL,
+    applied_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-ALTER TABLE auditoria_eventos ENABLE ROW LEVEL SECURITY;
+ALTER TABLE schema_version ENABLE ROW LEVEL SECURITY;
 
--- Admins e Síndicos podem ver todos os logs do condomínio
-CREATE POLICY "Staff can view audit logs" ON auditoria_eventos
-  FOR SELECT TO authenticated USING (
-    EXISTS (
-      SELECT 1 FROM profiles
-      WHERE profiles.id = auth.uid()
-      AND profiles.condominium_id = auditoria_eventos.condominio_id
-      AND profiles.role IN ('admin', 'sindico')
-    )
-  );
+DROP POLICY IF EXISTS "Service role acesso irrestrito schema_version" ON schema_version;
+CREATE POLICY "Service role acesso irrestrito schema_version" ON schema_version FOR ALL USING (true);
 
--- Permitir inserção de logs por qualquer usuário autenticado (via app ou RPC)
-CREATE POLICY "Authenticated can insert audit logs" ON auditoria_eventos
-  FOR INSERT TO authenticated WITH CHECK (true);
 
--- Função RPC para registro centralizado de auditoria
-CREATE OR REPLACE FUNCTION registrar_auditoria(
-  p_condominio_id UUID,
-  p_usuario_id UUID,
-  p_usuario_nome TEXT,
-  p_usuario_perfil TEXT,
-  p_tipo_evento TEXT,
-  p_acao TEXT,
-  p_tabela_afetada TEXT,
-  p_registro_id UUID,
-  p_descricao TEXT,
-  p_metodo TEXT DEFAULT 'MANUAL',
-  p_dados_antes JSONB DEFAULT NULL,
-  p_dados_depois JSONB DEFAULT NULL
-) RETURNS UUID AS $
-DECLARE
-  v_audit_id UUID;
-BEGIN
-  INSERT INTO auditoria_eventos (
-    condominio_id,
-    usuario_id,
-    usuario_nome,
-    usuario_perfil,
-    tipo_evento,
-    acao,
-    tabela_afetada,
-    registro_id,
-    descricao,
-    metodo,
-    dados_antes,
-    dados_depois
-  ) VALUES (
-    p_condominio_id,
-    p_usuario_id,
-    p_usuario_nome,
-    p_usuario_perfil,
-    p_tipo_evento,
-    p_acao,
-    p_tabela_afetada,
-    p_registro_id,
-    p_descricao,
-    p_metodo,
-    p_dados_antes,
-    p_dados_depois
-  ) RETURNING id INTO v_audit_id;
-
-  RETURN v_audit_id;
-END;
-$ LANGUAGE plpgsql SECURITY DEFINER;

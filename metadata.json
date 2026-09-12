@@ -1,8 +1,6 @@
 {
-  "name": "Encomendas Inteligentes",
-  "description": "SaaS para gestão de encomendas em condomínios com leitura de etiquetas por IA e notificações via WhatsApp.",
-  "requestFramePermissions": [],
-  "majorCapabilities": [
-    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
-  ]
+  "name": "Controle de Prismas",
+  "description": "Sistema de Controle de Prismas para Condomínios com entrega rápida, devolução, troca de turno, auditoria e evidências fotográficas.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

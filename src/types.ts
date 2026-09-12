@@ -1,282 +1,310 @@
-export type Role = 'resident' | 'porteiro' | 'sindico' | 'admin';
-
-export interface Profile {
-  id: string;
-  full_name: string;
-  phone: string;
-  condominium_id: string;
-  role: Role;
-  email?: string;
-  unit?: string;
-  unit_type?: string;
-  unidade?: string;
-  block?: string;
-  tower?: string;
-  street?: string;
-  complement?: string;
-  active: boolean;
-  is_teste?: boolean;
-  must_change_password?: boolean;
-  horario_inicio?: string;
-  horario_fim?: string;
-  created_by?: string;
-  updated_by?: string;
-  created_at: string;
-  updated_at?: string;
+export enum PrismaEstado {
+  DISPONIVEL = 'DISPONIVEL',
+  EM_USO = 'EM_USO',
+  PENDENTE = 'PENDENTE',
+  INDISPONIVEL = 'INDISPONIVEL',
 }
 
-export interface AuditLog {
-  id: string;
-  condominio_id: string;
-  usuario_id: string;
-  usuario_nome: string;
-  usuario_perfil: string;
-  tipo_evento: string;
-  acao: string;
-  tabela_afetada: string;
-  registro_id: string;
-  descricao: string;
-  metodo: string;
-  dados_antes?: any;
-  dados_depois?: any;
-  criado_em: string;
+export enum MovimentacaoTipo {
+  ENTREGA = 'ENTREGA',
+  DEVOLUCAO = 'DEVOLUCAO',
+  PENDENCIA_ABERTA = 'PENDENCIA_ABERTA',
+  PENDENCIA_RESOLVIDA = 'PENDENCIA_RESOLVIDA',
+  INDISPONIBILIDADE = 'INDISPONIBILIDADE',
+  CORRECAO = 'CORRECAO',
 }
 
-export interface Morador {
+export enum UserRole {
+  PORTEIRO = 'PORTEIRO',
+  SINDICO = 'SINDICO',
+  ADMIN = 'ADMIN',
+}
+
+export enum TipoTurno {
+  TURNO_12X36 = '12X36',
+  COMERCIAL = 'COMERCIAL',
+  PERSONALIZADO = 'PERSONALIZADO',
+}
+
+export enum TipoAcesso {
+  PORTARIA = 'PORTARIA',
+  ADMIN = 'ADMIN',
+  SINDICO = 'SINDICO',
+}
+
+export enum TipoSessao {
+  PORTARIA = 'PORTARIA',
+  ADMIN = 'ADMIN',
+  SINDICO = 'SINDICO',
+}
+
+export const DEFAULT_PORTARIA_STATION_ID = 'PORTARIA-01';
+
+export enum Paridade12x36 {
+  IMPAR = 'IMPAR', // DIAS ÍMPARES (ex: 19, 21, 23, 25...)
+  PAR = 'PAR',     // DIAS PARES (ex: 20, 22, 24, 26...)
+}
+
+export enum CategoriaContato {
+  SINDICO = 'SINDICO',
+  PORTARIA = 'PORTARIA',
+  GRUPO_PORTARIA = 'GRUPO_PORTARIA',
+  OUTRO = 'OUTRO',
+}
+
+export interface ContatoEvidencia {
+  id: string;
+  condominioId: string;
+  nome: string;
+  categoria: CategoriaContato;
+  telefoneOuWhatsapp: string;
+  identificador?: string;
+  ativo: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export type OperadorStatus = 'OK' | 'SEM_PORTEIRO' | 'CONFLITO';
+
+export interface OperadorIdentificado {
+  status: OperadorStatus;
+  operador?: Usuario;
+  conflitoUsuarios?: Usuario[];
+  mensagem?: string;
+  horarioAtual: string; // "HH:MM"
+}
+
+export interface CorConfig {
   id: string;
   nome: string;
-  unidade: string;
-  unit_type?: string;
-  block?: string;
-  bloco?: string;
-  lote?: string;
-  street?: string;
-  telefone: string;
+  hex: string;
+  bgClass: string;
+  textClass: string;
+  borderClass: string;
+  badgeBg: string;
+}
+
+export interface Prisma {
+  id: string; // Ex: PR-000001 (técnico único)
+  numero: string; // Ex: "08", "11", "15" (pode repetir com cor diferente)
+  corId: string; // Ex: "azul", "vermelho", "amarelo", "verde"
+  corNome: string; // Ex: "Azul", "Vermelho", "Amarelo", "Verde"
+  estado: PrismaEstado;
+  condominioId: string;
+  ativo: boolean; // ATIVO / INATIVO (ex: extraviado/desativado)
+  excluido?: boolean; // Exclusão lógica para preservação de histórico
+  dataExclusao?: string;
+  usuarioExclusaoId?: string;
+  usuarioExclusaoNome?: string;
+  motivoInativacao?: string;
+  observacao?: string;
+  movimentacaoAtualId?: string;
+  casaAtual?: string;
+  horarioEntregaAtual?: string;
+  porteiroEntregaAtual?: string;
+  fotoEntregaAtual?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Movimentacao {
+  id: string;
+  condominioId: string;
+  prismaId: string;
+  prismaNumero: string;
+  prismaCorNome: string;
+  tipo: MovimentacaoTipo;
+  casa: string;
+  usuarioId: string;
+  usuarioNome: string;
+  turnoId: string;
+  turnoNome: string;
+  dataHora: string;
+  fotoEvidenciaUrl?: string;
+  estadoAnterior: PrismaEstado;
+  estadoPosterior: PrismaEstado;
+  movimentacaoAnteriorId?: string;
+  encerrada: boolean;
+  dataHoraEncerramento?: string;
+  usuarioEncerramentoId?: string;
+  usuarioEncerramentoNome?: string;
+  motivoCorrecao?: string;
+  motivoPendencia?: string;
+}
+
+export interface AuditoriaLog {
+  id: string;
+  condominioId: string;
+  acao: string;
+  prismaId?: string;
+  prismaNumero?: string;
+  prismaCorNome?: string;
+  usuarioId: string;
+  usuarioNome: string;
+  usuarioCargo: string;
+  turnoId: string;
+  turnoNome: string;
+  dataHora: string;
+  detalhes: string;
+  dadosAnteriores?: any;
+  dadosNovos?: any;
+}
+
+export interface Turno {
+  id: string;
+  condominioId: string;
+  nome: string; // Ex: "Turno Diurno (06h - 18h)"
+  porteiroId: string;
+  porteiroNome: string;
+  inicio: string;
+  fim?: string;
   ativo: boolean;
-  is_teste?: boolean;
-  observacoes?: string;
-  created_at: string;
-  condominium_id?: string;
+  prismasEmUsoNaAssuncao: number;
+  notasPassagem?: string;
 }
 
-export interface ScoredResident {
-  resident: Morador;
-  score: number;
-}
-
-export interface Condominium {
+export interface Usuario {
   id: string;
-  name: string;
-  address: string;
-  city?: string;
-  state?: string;
-  city_state?: string;
-  cnpj?: string;
-  zip_code?: string;
-  phone?: string;
-  email?: string;
-  manager_name?: string;
-  manager_phone?: string;
-  manager_email?: string;
-  rules?: string;
-  internal_notes?: string;
-  active?: boolean;
-  portaria_name?: string;
-  portaria_access_code?: string;
-  created_at: string;
-  user_count?: number;
-  unit_count?: number;
-  package_count?: number;
+  condominioId: string;
+  nome: string;
+  role: UserRole;
+  cargo: string;
+  ativo: boolean;
+  matricula?: string;
+  tipoTurno?: TipoTurno;
+  opcaoTurno12x36?: string; // Ex: "07:00-19:00", "08:00-20:00", "19:00-07:00", "06:00-18:00", "18:00-06:00"
+  paridade12x36?: Paridade12x36; // 'IMPAR' | 'PAR'
+  horaInicio?: string; // "HH:MM", ex: "07:00"
+  horaFim?: string; // "HH:MM", ex: "19:00"
+  excluido?: boolean; // Exclusão lógica / arquivamento com preservação do histórico
+  createdAt?: string;
+  updatedAt?: string;
 }
 
-export interface Package {
+export interface Condominio {
   id: string;
-  condominium_id: string;
-  recipient_id?: string;
-  unit_number?: string;
-  unit?: string;
-  unit_type?: string;
-  block?: string;
-  tower?: string;
-  complement?: string;
-  carrier: string;
-  tracking_code?: string;
-  status: 'received' | 'notified' | 'delivered';
-  photo_url?: string;
-  received_at: string;
-  delivered_at?: string;
-  received_by: string;
-  porter_name?: string;
-  recebido_por?: string;
-  entregue_por?: string;
-  registered_by?: string;
-  created_by?: string;
-  delivered_by?: string;
-  delivered_to_name?: string;
-  notes?: string;
-  is_teste?: boolean;
-  whatsapp_status?: 'pending' | 'pendente' | 'sent' | 'enviado' | 'failed' | 'error' | 'delivered' | 'read' | 'not_configured' | 'pending_configuration' | 'no_recipient';
-  whatsapp_notified?: boolean;
-  whatsapp_sent?: boolean;
-  notified_at?: string;
-  last_notification_at?: string;
-  whatsapp_sent_at?: string;
-  notification_fallback?: boolean;
-  pickup_token?: string;
-  pickup_qr_code?: 'active' | 'used' | 'expired';
-  qr_code_generated_at?: string;
-  pickup_code?: string;
-  retrieved_at?: string;
-  retrieved_by_user_id?: string;
-  delivery_method?: 'qr_code' | 'manual' | 'photo' | 'code' | 'CÓDIGO';
-  delivery_photo_url?: string;
-  whatsapp_message?: string;
-  created_at: string;
-  unit_label?: string;
-  porter?: { full_name: string }; // Joined data
-  deliverer?: { full_name: string }; // Joined data
-  registrar?: { full_name: string }; // Joined data
-  moradores?: { 
-    nome: string; 
-    unidade: string;
-    unit_type?: string;
-    unit_number?: string;
-    block?: string;
-    street?: string;
-  }; // Joined data
+  nome: string;
+  endereco: string;
+  codigoPortariaAtual?: string | null;
+  mostrarMensagem?: boolean;
+  ativo?: boolean;
 }
 
-export interface RetrievalLog {
+export interface DashboardStats {
+  disponiveis: number;
+  emUso: number;
+  pendentes: number;
+  indisponiveis: number;
+  totalPrismas: number;
+}
+
+export interface CredencialAcesso {
   id: string;
-  package_id: string;
-  porter_id: string;
-  condominium_id: string;
-  delivery_method: 'qr_code' | 'manual' | 'CÓDIGO';
-  token_used?: string;
-  status: 'success' | 'failed';
-  error_message?: string;
-  created_at: string;
+  usuarioId: string;
+  condominioId: string;
+  tipoAcesso: TipoAcesso;
+  identificador: string;
+  senhaHash?: string | null;
+  pinHash?: string | null;
+  ativo: boolean;
+  bloqueado: boolean;
+  tentativasInvalidas: number;
+  ultimoLogin?: string | null;
+  ultimoBloqueio?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
-export interface Notification {
+export interface CredencialAcessoSanitizada {
   id: string;
-  user_id: string;
-  condominium_id: string;
-  message: string;
-  status: 'sent' | 'failed';
-  created_at: string;
-  delivery_channel: 'whatsapp';
-  recipient_phone?: string;
+  usuarioId: string;
+  condominioId: string;
+  tipoAcesso: TipoAcesso;
+  identificador: string;
+  ativo: boolean;
+  bloqueado: boolean;
+  tentativasInvalidas: number;
+  ultimoLogin?: string | null;
+  ultimoBloqueio?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
-export interface MessageLog {
-  id: string;
-  condominium_id: string;
-  telefone: string;
-  status: string;
-  erro_api?: string;
-  data_envio: string;
+export interface JwtSessionPayload {
+  sub: string; // usuarioId
+  condominioId: string;
+  role: UserRole;
+  tipoSessao: TipoSessao;
+  stationId?: string;
+  nome: string;
+  iat?: number;
+  exp?: number;
 }
 
-export interface WhatsAppConversation {
-  id: string;
-  condominium_id: string;
-  phone: string;
-  message: string;
-  direction: 'inbound' | 'outbound';
-  created_at: string;
+export interface SubstituicaoPlantao {
+  condominioId: string;
+  usuarioId: string;
+  usuarioNome: string;
+  substituidoPorId?: string;
+  substituidoPorNome?: string;
+  motivo?: string;
+  inicio: string;
 }
 
-export interface CondominiumSettings {
-  id: string;
-  condominium_id: string;
-  notification_template: string;
-  reminder_48h_enabled: boolean;
-  reminder_72h_enabled: boolean;
-  contact_phone?: string;
-  whatsapp_mode?: 'manual_assistido' | 'api_automatica';
-  whatsapp_provider?: string;
-  api_url?: string;
-  api_token?: string;
-  instance_id?: string;
-  sender_phone?: string;
+export interface PlantaoStatusResponse {
+  status: OperadorStatus;
+  operadorEscala?: Usuario;
+  operadorAtivo?: {
+    id: string;
+    nome: string;
+    cargo?: string;
+    horaInicio?: string;
+    horaFim?: string;
+    isSubstituicao: boolean;
+    motivoSubstituicao?: string;
+  };
+  substituicaoAtiva?: SubstituicaoPlantao | null;
+  horarioAtual: string;
+  mensagem?: string;
 }
 
-export interface ResidentAccessToken {
-  id: string;
-  resident_id: string;
-  condominium_id: string;
-  token: string;
-  expires_at: string;
-  created_at: string;
-  last_accessed_at?: string;
-  active: boolean;
+export interface AuthUserContext {
+  usuarioId: string;
+  condominioId: string;
+  role: UserRole;
+  nome: string;
+  tipoSessao: TipoSessao;
+  stationId?: string;
 }
 
-export interface SecurityDevice {
-  id: string;
-  user_id: string;
-  user_name: string;
-  user_role: Role;
-  device_id: string;
-  model: string;
-  system_os: string;
-  status: 'authorized' | 'pending' | 'blocked' | 'temporary';
-  ip: string;
-  city: string;
-  country: string;
-  last_accessed_at: string;
-  authorized_at?: string;
-  expires_at?: string;
+export interface PortariaStatusResponse {
+  success: boolean;
+  codigo: string;
+  ativo: boolean;
+  bloqueado: boolean;
+  tentativasInvalidas: number;
+  ultimoLogin?: string | null;
+  condominioId: string;
 }
 
-export interface SecurityAccessAttempt {
-  id: string;
-  login_used: string;
-  ip: string;
-  city: string;
-  country: string;
-  device: string;
-  created_at: string;
-  status: 'permitido' | 'bloqueado' | 'pendente';
+export interface DocumentPictureInPictureOptions {
+  width?: number;
+  height?: number;
+  disallowReturnToOpener?: boolean;
 }
 
-export interface SecurityAccessLog {
-  id: string;
-  user_name: string;
-  user_role: Role;
-  ip: string;
-  city: string;
-  country: string;
-  device: string;
-  created_at: string;
+export interface DocumentPictureInPicture {
+  requestWindow(options?: DocumentPictureInPictureOptions): Promise<Window>;
+  readonly window: Window | null;
+  onenter: ((this: DocumentPictureInPicture, ev: Event) => any) | null;
+  addEventListener(type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions): void;
+  removeEventListener(type: string, listener: EventListenerOrEventListenerObject, options?: boolean | EventListenerOptions): void;
 }
 
-export interface SecurityAlert {
-  id: string;
-  event_type: 'novo_dispositivo' | 'login_dispositivo_novo' | 'tentativa_bloqueada' | 'bloqueio_internacional' | 'login_admin_suspeito' | 'sessao_encerrada' | 'alerta_critico';
-  title: string;
-  description: string;
-  device_name: string;
-  user_name: string;
-  city: string;
-  ip: string;
-  created_at: string;
-  read: boolean;
-  critical: boolean;
+declare global {
+  interface Window {
+    documentPictureInPicture?: DocumentPictureInPicture;
+  }
 }
 
-export interface SecuritySettingsConfig {
-  alerts_push_enabled: boolean;
-  alerts_email_enabled: boolean;
-  alerts_critical_enabled: boolean;
-  primary_email: string;
-  secondary_email?: string;
-  whatsapp_admin?: string;
-  primary_device_id?: string;
-  primary_device_name?: string;
-  max_simultaneous_sessions: number;
-  session_timeout_minutes: number;
-  critical_alert_mode_active: boolean;
-}
 
