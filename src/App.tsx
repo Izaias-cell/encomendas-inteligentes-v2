@@ -1,1208 +1,3071 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { createPortal } from 'react-dom';
-import {
-  Prisma,
-  PrismaEstado,
-  Movimentacao,
-  Turno,
-  Usuario,
-  Condominio,
-  DashboardStats,
-  UserRole,
-  TipoSessao,
-} from './types';
-import { api, DashboardResponse, getStoredStationSession } from './services/api';
-import { AuthProvider, useAuth } from './context/AuthContext';
-import { LoginScreen } from './components/LoginScreen';
-import { Header } from './components/Header';
-import { ActionSelector, MainActionTab } from './components/ActionSelector';
-import { PrismaCard } from './components/PrismaCard';
-import { EntregaModal } from './components/EntregaModal';
-import { ReceberView } from './components/ReceberView';
-import { PrismasEmAbertoView } from './components/PrismasEmAbertoView';
-import { BuscaView } from './components/BuscaView';
-import { UltimasMovimentacoes } from './components/UltimasMovimentacoes';
-import { PassagemTurnoModal } from './components/PassagemTurnoModal';
-import { PrismaHistoricoModal } from './components/PrismaHistoricoModal';
-import { GerenciarPrismasModal } from './components/GerenciarPrismasModal';
-import { AuditoriaModal } from './components/AuditoriaModal';
-import { ConcorrenciaModal } from './components/ConcorrenciaModal';
-import { ConfiguracoesModal } from './components/ConfiguracoesModal';
-import { AlterarSenhaModal } from './components/AlterarSenhaModal';
-import { EditarCondominioModal } from './components/EditarCondominioModal';
-import { FloatingPortariaWindow } from './components/FloatingPortariaWindow';
-import { EscolhaModoDispositivoModal, DeviceUsageMode } from './components/EscolhaModoDispositivoModal';
-import { playSuccessSound } from './utils/sound';
-import { identificarOperadorEmOperacao } from './utils/turnoUtils';
-import { copyToClipboard, formatMensagemEntrega, formatMensagemRecolhimento, extrairNumeroCasaValido, formatarCasaExibicao } from './utils/clipboardUtils';
-import {
-  AlertCircle,
-  CheckCircle2,
-  Loader2,
-} from 'lucide-react';
+import React, { useState, useRef, useEffect, useCallback, memo } from 'react';
+import { Camera, Package, User, LayoutDashboard, LogOut, Bell, CheckCircle, Search, Loader2, Plus, Phone, Home, History, QrCode, X, RefreshCw, AlertTriangle, Check, ArrowLeft, Keyboard, XCircle, Users, UserPlus, Edit2, Shield, Building2, FileSpreadsheet } from 'lucide-react';
+import { Toaster, toast } from 'react-hot-toast';
+import { supabase, clearSupabaseStorage } from './lib/supabase';
+import { ptBR } from 'date-fns/locale';
+import { formatDate, formatSafeDateTime } from './lib/dateUtils';
+import { formatPackageUnit } from './lib/residentUtils';
+import { motion, AnimatePresence } from 'motion/react';
 
-function AppContent() {
-  const { user: authUser, isAuthenticated, isLoading: isAuthLoading, logout } = useAuth();
+import { QRCodeSVG } from 'qrcode.react';
+import { Html5Qrcode } from 'html5-qrcode';
 
-  // State
-  const [condominios, setCondominios] = useState<Condominio[]>([]);
-  const [condominioAtualId, setCondominioAtualId] = useState<string>(() => {
-    return authUser?.condominioId || getStoredStationSession()?.condominioId || 'condo-1';
-  });
-  const [condominioAtual, setCondominioAtual] = useState<Condominio | undefined>();
-  const [usuarios, setUsuarios] = useState<Usuario[]>([]);
-  const [turnoAtivo, setTurnoAtivo] = useState<Turno | undefined>();
-  const [stats, setStats] = useState<DashboardStats>({
-    disponiveis: 0,
-    emUso: 0,
-    pendentes: 0,
-    indisponiveis: 0,
-    totalPrismas: 0,
-  });
-  const [prismas, setPrismas] = useState<Prisma[]>([]);
-  const [ultimasMovimentacoes, setUltimasMovimentacoes] = useState<Movimentacao[]>([]);
+import { Routes, Route, useNavigate, Navigate, useLocation } from 'react-router-dom';
+import { api } from './lib/apiClient';
+import ResidentPortal from './components/ResidentPortal';
+import Retirada from './pages/Retirada';
+import { analyzePackageLabel } from './services/geminiService';
+import { findMatchingResidents } from './services/residentMatcher';
 
-  // Navigation & UI state
-  const [activeTab, setActiveTab] = useState<MainActionTab>('ENTREGAR');
-  const [searchTerm, setSearchTerm] = useState<string>('');
-  const [selectedFilter, setSelectedFilter] = useState<string | undefined>();
-  const [isOnline, setIsOnline] = useState<boolean>(true);
-  const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [successToast, setSuccessToast] = useState<string | null>(null);
+// --- Pages ---
+import Dashboard from './pages/Dashboard';
+import CondominiumList from './pages/CondominiumList';
+import CondominiumNew from './pages/CondominiumNew';
+import SelectCondominium from './pages/SelectCondominium';
+import ProfileList from './pages/ProfileList';
+import ProfileNew from './pages/ProfileNew';
+import UserManagement from './pages/UserManagement';
+import PackageList from './pages/PackageList';
+import PackageNew from './pages/PackageNew';
+import Portaria from './pages/Portaria';
+import Settings from './pages/Settings';
+import ChangePassword from './pages/ChangePassword';
 
-  // Toast Helper
-  const showToast = useCallback((msg: string) => {
-    setSuccessToast(msg);
-    setTimeout(() => {
-      setSuccessToast(null);
-    }, 3500);
-  }, []);
+// --- Types ---
+import { Role, Profile, Package as PackageType, ScoredResident } from './types';
+import SyndicPanel from './components/SyndicPanel';
+import ResidentImporterModal from './components/ResidentImporterModal';
 
-  // Modals state
-  const [selectedPrismaEntrega, setSelectedPrismaEntrega] = useState<Prisma | null>(null);
-  const [isSubmittingEntrega, setIsSubmittingEntrega] = useState<boolean>(false);
-  const [rankingCasas, setRankingCasas] = useState<string[]>(['12', '17', '31', '42', '105', '208']);
-  const [isReceberLoading, setIsReceberLoading] = useState<boolean>(false);
-  const [historicoPrismaId, setHistoricoPrismaId] = useState<string | null>(null);
-  const [isPassagemTurnoOpen, setIsPassagemTurnoOpen] = useState<boolean>(false);
-  const [isGerenciamentoOpen, setIsGerenciamentoOpen] = useState<boolean>(false);
-  const [isAuditoriaOpen, setIsAuditoriaOpen] = useState<boolean>(false);
-  const [isConcorrenciaOpen, setIsConcorrenciaOpen] = useState<boolean>(false);
-  const [isConfiguracoesOpen, setIsConfiguracoesOpen] = useState<boolean>(false);
-  const [isAlterarSenhaOpen, setIsAlterarSenhaOpen] = useState<boolean>(false);
-  const [isEditarCondominioOpen, setIsEditarCondominioOpen] = useState<boolean>(false);
 
-  // Synchronize condominioAtualId with authUser if user is authenticated
-  useEffect(() => {
-    if (authUser?.condominioId) {
-      setCondominioAtualId(authUser.condominioId);
-    }
-  }, [authUser]);
 
-  // Device usage mode ('PORTARIA' | 'NORMAL') with localStorage persistence
-  const [deviceMode, setDeviceMode] = useState<DeviceUsageMode>(() => {
-    try {
-      const saved = localStorage.getItem('prismas_device_mode');
-      if (saved === 'PORTARIA' || saved === 'NORMAL') return saved as DeviceUsageMode;
-    } catch {}
-    return 'NORMAL';
-  });
+import { normalizeRole } from './lib/authUtils';
+import { getCurrentPorter, clearManualPorter } from './lib/porterUtils';
+import { clearActivePlantao } from './lib/plantaoUtils';
 
-  // Modal de escolha de modo de uso do dispositivo (acionado no login da Portaria ou pelo Header)
-  const [isEscolhaModoOpen, setIsEscolhaModoOpen] = useState<boolean>(false);
+// --- Components ---
 
-  // Modo Portaria inicializa como fechado para garantir que o Document PiP dependa sempre de ação explícita do usuário
-  const [isModoPortariaOpen, setIsModoPortariaOpen] = useState<boolean>(false);
-
-  // Rastreamento seguro do ciclo de vida da autenticação pós-login
-  const initialAuthCheckedRef = useRef<boolean>(false);
-  const prevUserRef = useRef<typeof authUser>(authUser);
-
-  useEffect(() => {
-    // Aguarda validação inicial do contexto de autenticação
-    if (isAuthLoading) {
-      return;
-    }
-
-    // Inicialização da sessão já existente (ex: recarregamento de página / cache restaurado)
-    if (!initialAuthCheckedRef.current) {
-      initialAuthCheckedRef.current = true;
-      prevUserRef.current = authUser;
-
-      if (authUser) {
-        const isAdminOrSindico =
-          authUser.role === UserRole.ADMIN ||
-          authUser.role === UserRole.SINDICO ||
-          authUser.tipoSessao === TipoSessao.ADMIN ||
-          authUser.tipoSessao === TipoSessao.SINDICO;
-
-        if (isAdminOrSindico) {
-          // REGRA 1: ADMIN/SÍNDICO entra diretamente no Dashboard, sem modal ou pop-up
-          setIsEscolhaModoOpen(false);
-          setIsModoPortariaOpen(false);
-        }
-        // Para PORTARIA já restaurada: não abre o modal novamente (REGRA 6)
-      }
-      return;
-    }
-
-    // Caso o usuário deslogue
-    if (!isAuthenticated || !authUser) {
-      prevUserRef.current = null;
-      setIsEscolhaModoOpen(false);
-      return;
-    }
-
-    // Detecta se ocorreu um novo login explícito nesta sessão
-    const isNovoLogin = !prevUserRef.current || prevUserRef.current.usuarioId !== authUser.usuarioId;
-    prevUserRef.current = authUser;
-
-    const isAdminOrSindico =
-      authUser.role === UserRole.ADMIN ||
-      authUser.role === UserRole.SINDICO ||
-      authUser.tipoSessao === TipoSessao.ADMIN ||
-      authUser.tipoSessao === TipoSessao.SINDICO;
-
-    const isPortaria =
-      authUser.role === UserRole.PORTEIRO ||
-      authUser.tipoSessao === TipoSessao.PORTARIA;
-
-    if (isAdminOrSindico) {
-      // REGRA 1: ADMIN/SÍNDICO entra diretamente no Dashboard
-      setIsEscolhaModoOpen(false);
-      setIsModoPortariaOpen(false);
-    } else if (isPortaria && isNovoLogin) {
-      // REGRA 2: PORTARIA acabou de autenticar -> abre automaticamente a escolha "Como deseja utilizar?"
-      setIsEscolhaModoOpen(true);
-      setIsModoPortariaOpen(false);
-    }
-  }, [isAuthLoading, isAuthenticated, authUser]);
-
-  // Estado da janela Document Picture-in-Picture (Always on Top)
-  const [pipWindow, setPipWindow] = useState<Window | null>(null);
-
-  // Cópia e sincronização segura de estilos para o documento PiP
-  const copyStylesToPip = (targetWindow: Window) => {
-    try {
-      const targetDoc = targetWindow.document;
-
-      // 1. Copiar regras CSS e links de folhas de estilo
-      Array.from(document.styleSheets).forEach((sheet) => {
-        try {
-          if (sheet.href) {
-            const link = targetDoc.createElement('link');
-            link.rel = 'stylesheet';
-            link.href = sheet.href;
-            targetDoc.head.appendChild(link);
-          } else if (sheet.cssRules) {
-            const style = targetDoc.createElement('style');
-            Array.from(sheet.cssRules).forEach((rule) => {
-              style.appendChild(targetDoc.createTextNode(rule.cssText));
-            });
-            targetDoc.head.appendChild(style);
-          }
-        } catch (sheetErr) {
-          // Proteção contra restrições de CORS em cssRules: clonar nó dono como fallback
-          try {
-            if (sheet.ownerNode) {
-              targetDoc.head.appendChild(sheet.ownerNode.cloneNode(true));
-            }
-          } catch {}
-        }
-      });
-
-      // 2. Clonar tags <style> e <link rel="stylesheet"> explícitas do <head>
-      document.head.querySelectorAll('style, link[rel="stylesheet"]').forEach((node) => {
-        try {
-          if (node.tagName === 'LINK') {
-            const href = (node as HTMLLinkElement).href;
-            if (!targetDoc.querySelector(`link[href="${href}"]`)) {
-              targetDoc.head.appendChild(node.cloneNode(true));
-            }
-          } else if (node.tagName === 'STYLE') {
-            targetDoc.head.appendChild(node.cloneNode(true));
-          }
-        } catch {}
-      });
-    } catch (globalErr) {
-      console.warn('Erro ao transferir estilos para a janela PiP:', globalErr);
-    }
+const Button = ({ children, onClick, variant = 'primary', loading = false, className = '', disabled = false, ...props }: any) => {
+  const variants: any = {
+    primary: 'bg-emerald-600 text-white hover:bg-emerald-700',
+    secondary: 'bg-zinc-100 text-zinc-900 hover:bg-zinc-200',
+    outline: 'border border-zinc-200 text-zinc-600 hover:bg-zinc-50',
+    danger: 'bg-red-500 text-white hover:bg-red-600',
+    ghost: 'text-zinc-500 hover:bg-zinc-100'
   };
-
-  // Fechamento limpo do Modo Portaria e da janela PiP
-  const handleCloseModoPortaria = useCallback(() => {
-    if (pipWindow && !pipWindow.closed) {
-      try {
-        pipWindow.close();
-      } catch {}
-    }
-    setPipWindow(null);
-    setIsModoPortariaOpen(false);
-    try {
-      localStorage.setItem('prismas_device_mode', 'NORMAL');
-    } catch {}
-  }, [pipWindow]);
-
-  // Abertura explícita do Modo Portaria via Document Picture-in-Picture (com fallback)
-  const handleAbrirModoPortaria = useCallback(async () => {
-    try {
-      localStorage.setItem('prismas_portaria_minimized', 'true');
-    } catch {}
-
-    // 1. Mecanismo prioritário: Document Picture-in-Picture se suportado pelo navegador
-    if (typeof window !== 'undefined' && 'documentPictureInPicture' in window && window.documentPictureInPicture) {
-      try {
-        if (pipWindow && !pipWindow.closed) {
-          pipWindow.focus();
-          return;
-        }
-
-        const pip = await window.documentPictureInPicture.requestWindow({
-          width: 380,
-          height: 130,
-        });
-
-        copyStylesToPip(pip);
-
-        pip.document.title = 'CONTROL PRISMA • Modo Portaria';
-        pip.document.body.className = 'bg-slate-950 text-slate-100 font-sans antialiased m-0 p-0 overflow-hidden';
-
-        const handlePiPClose = () => {
-          setPipWindow(null);
-          setIsModoPortariaOpen(false);
-        };
-
-        pip.addEventListener('pagehide', handlePiPClose, { once: true });
-
-        setPipWindow(pip);
-        setIsModoPortariaOpen(true);
-        showToast('🛡️ Modo Portaria sobreposto ativado (Document PiP)');
-        return;
-      } catch (err) {
-        console.warn('Document Picture-in-Picture não pôde ser iniciado, utilizando modo flutuante interno:', err);
-      }
-    }
-
-    // 2. Fallback seguro: abre o Modo Portaria na tela da aplicação
-    setIsModoPortariaOpen(true);
-    showToast('🛡️ Modo Portaria ativado');
-  }, [pipWindow, showToast]);
-
-  // Redimensionamento nativo entre minimizado (380x130) e expandido (420x700) no Document PiP
-  const handlePipResize = useCallback((minimized: boolean) => {
-    if (!pipWindow || pipWindow.closed) return;
-
-    try {
-      if (minimized) {
-        pipWindow.resizeTo(380, 130);
-      } else {
-        pipWindow.resizeTo(420, 700);
-      }
-    } catch (error) {
-      console.warn('[PiP] Falha ao redimensionar janela:', error);
-    }
-  }, [pipWindow]);
-
-  // Limpeza de janelas órfãs na desmontagem ou fechamento da aba principal
-  useEffect(() => {
-    const handleBeforeUnload = () => {
-      if (pipWindow && !pipWindow.closed) {
-        try {
-          pipWindow.close();
-        } catch {}
-      }
-    };
-
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => {
-      window.removeEventListener('beforeunload', handleBeforeUnload);
-      if (pipWindow && !pipWindow.closed) {
-        try {
-          pipWindow.close();
-        } catch {}
-      }
-    };
-  }, [pipWindow]);
-
-  // Fechamento automático da janela PiP em caso de logout
-  useEffect(() => {
-    if (!isAuthenticated && pipWindow && !pipWindow.closed) {
-      try {
-        pipWindow.close();
-      } catch {}
-      setPipWindow(null);
-      setIsModoPortariaOpen(false);
-    }
-  }, [isAuthenticated, pipWindow]);
-
-  const handleSelectDeviceMode = (mode: DeviceUsageMode) => {
-    try {
-      localStorage.setItem('prismas_device_mode', mode);
-      if (mode === 'PORTARIA') {
-        localStorage.setItem('prismas_portaria_minimized', 'true');
-      }
-    } catch {}
-    setDeviceMode(mode);
-    setIsEscolhaModoOpen(false);
-    if (mode === 'PORTARIA') {
-      handleAbrirModoPortaria();
-    } else {
-      handleCloseModoPortaria();
-      showToast('💻 Modo Normal ativado');
-    }
-  };
-
-  const handleChangeDeviceMode = (mode: DeviceUsageMode) => {
-    try {
-      localStorage.setItem('prismas_device_mode', mode);
-      if (mode === 'PORTARIA') {
-        localStorage.setItem('prismas_portaria_minimized', 'true');
-      }
-    } catch {}
-    setDeviceMode(mode);
-    if (mode === 'PORTARIA') {
-      handleAbrirModoPortaria();
-    } else {
-      handleCloseModoPortaria();
-      showToast('💻 Modo Normal ativado');
-    }
-  };
-
-  // Check URL params for standalone pop-up mode (?mode=portaria-popup)
-  const isPopUpUrlMode = useMemo(() => {
-    if (typeof window !== 'undefined') {
-      const params = new URLSearchParams(window.location.search);
-      return params.get('mode') === 'portaria-popup';
-    }
-    return false;
-  }, []);
-
-  const handleAbrirEmJanelaDesktop = () => {
-    handleAbrirModoPortaria();
-  };
-
-  // Current Time Tick to automatically refresh identified operator every 30s
-  const [currentTimeTick, setCurrentTimeTick] = useState<Date>(new Date());
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setCurrentTimeTick(new Date());
-    }, 30000);
-    return () => clearInterval(timer);
-  }, []);
-
-  // Environment Check (Settings area is enabled in development or for Admin/Síndico)
-  const isDevEnvironment =
-    Boolean((import.meta as any).env?.DEV) ||
-    (import.meta as any).env?.MODE === 'development' ||
-    (typeof window !== 'undefined' &&
-      (window.location.hostname === 'localhost' ||
-        window.location.hostname.includes('127.0.0.1') ||
-        window.location.hostname.includes('ais-dev')));
-
-  const isAdminOrSindico = Boolean(
-    authUser && (
-      authUser.role === UserRole.ADMIN ||
-      authUser.role === UserRole.SINDICO ||
-      authUser.tipoSessao === TipoSessao.ADMIN ||
-      authUser.tipoSessao === TipoSessao.SINDICO
-    )
-  );
-
-  const canAccessConfig = isAdminOrSindico;
-
-  // Automatically identify the operator on duty based on current date, time, shift and parity
-  const operadorIdentificado = useMemo(() => {
-    return identificarOperadorEmOperacao(usuarios, currentTimeTick);
-  }, [usuarios, currentTimeTick]);
-
-  // Operational User: prefers authenticated user context if available, falls back to identified operator
-  const usuarioAtual: Usuario = useMemo(() => {
-    if (authUser) {
-      const found = usuarios.find((u) => u.id === authUser.usuarioId);
-      if (found) return found;
-      return {
-        id: authUser.usuarioId,
-        condominioId: authUser.condominioId,
-        nome: authUser.nome,
-        role: authUser.role,
-        cargo: authUser.role === UserRole.PORTEIRO ? 'Portaria' : authUser.role,
-        ativo: true,
-      };
-    }
-
-    if (operadorIdentificado.status === 'OK' && operadorIdentificado.operador) {
-      return operadorIdentificado.operador;
-    }
-    
-    if (operadorIdentificado.status === 'CONFLITO') {
-      return {
-        id: 'usr-conflito-escala',
-        condominioId: condominioAtualId,
-        nome: 'Conflito de Escala',
-        role: UserRole.PORTEIRO,
-        cargo: 'Conflito de Escala',
-        ativo: false,
-      };
-    }
-
-    return {
-      id: 'usr-nao-identificado',
-      condominioId: condominioAtualId,
-      nome: 'Porteiro Não Identificado',
-      role: UserRole.PORTEIRO,
-      cargo: 'Plantão Não Definido',
-      ativo: false,
-    };
-  }, [authUser, usuarios, operadorIdentificado, condominioAtualId]);
-
-  // Fetch Dashboard Data
-  const loadDashboard = useCallback(
-    async (showLoading = false) => {
-      if (showLoading) setIsRefreshing(true);
-      try {
-        const data: DashboardResponse = await api.getStatus(condominioAtualId);
-        
-        try {
-          if (data.condominio) {
-            if (data.condominio.nome) {
-              localStorage.setItem(`condo_nome_${condominioAtualId}`, data.condominio.nome);
-            }
-            if (data.condominio.endereco) {
-              localStorage.setItem(`condo_endereco_${condominioAtualId}`, data.condominio.endereco);
-            }
-          }
-        } catch {
-          // Ignore localStorage errors
-        }
-
-        setCondominios(data.condominios);
-        setCondominioAtual(data.condominio);
-        setUsuarios(data.usuarios);
-        setTurnoAtivo(data.turnoAtivo);
-        setStats(data.stats);
-        setPrismas(data.prismas);
-        setUltimasMovimentacoes(data.ultimasMovimentacoes);
-        if (data.rankingCasas && data.rankingCasas.length > 0) {
-          setRankingCasas(data.rankingCasas);
-        }
-        setIsOnline(true);
-        setErrorMessage(null);
-        return data;
-      } catch (err: any) {
-        console.warn('Dashboard sync temporary notice:', err?.message || err);
-        setIsOnline(false);
-        if (showLoading) {
-          setErrorMessage(
-            err.message || '⚠️ Não foi possível conectar ao servidor. Verifique a conexão com a internet.'
-          );
-        }
-        return null;
-      } finally {
-        if (showLoading) setIsRefreshing(false);
-      }
-    },
-    [condominioAtualId]
-  );
-
-  // Initial load and periodic poll
-  useEffect(() => {
-    loadDashboard(true);
-    const interval = setInterval(() => {
-      loadDashboard(false);
-    }, 4000); // 4-second gentle sync
-
-    const handleOnline = () => {
-      setIsOnline(true);
-      loadDashboard(true);
-    };
-
-    const handleFocus = () => {
-      loadDashboard(false);
-    };
-
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('focus', handleFocus);
-
-    return () => {
-      clearInterval(interval);
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('focus', handleFocus);
-    };
-  }, [loadDashboard]);
-
-  // FLUXO ENTREGAR PRISMA (ENTREGA + CÓPIA AUTOMÁTICA CONDICIONAL)
-  const handleConfirmEntrega = async (params: {
-    prismaId: string;
-    casa: string;
-    fotoEvidenciaUrl?: string;
-  }) => {
-    setIsSubmittingEntrega(true);
-    try {
-      const res = await api.entregarPrisma({
-        prismaId: params.prismaId,
-        casa: params.casa,
-        fotoEvidenciaUrl: params.fotoEvidenciaUrl,
-      });
-
-      setSelectedPrismaEntrega(null);
-      playSuccessSound();
-
-      // Cópia automática se habilitado para o condomínio
-      const deveCopiar = condominioAtual?.mostrarMensagem !== false;
-      let msgCopiada: string | null = null;
-      if (deveCopiar && res.prisma) {
-        const msgWhatsapp = formatMensagemEntrega(res.prisma.numero, res.prisma.corNome, params.casa);
-        const copied = await copyToClipboard(msgWhatsapp);
-        if (copied) {
-          msgCopiada = msgWhatsapp;
-        }
-      }
-
-      if (msgCopiada) {
-        showToast(`✅ Entrega registrada • Mensagem copiada ("${msgCopiada}")`);
-      } else {
-        showToast(`✅ Prisma ${res.prisma.numero} (${res.prisma.corNome}) entregue para ${params.casa}!`);
-      }
-
-      // Atualização imediata local do ranking inteligente
-      const numValido = extrairNumeroCasaValido(params.casa);
-      if (numValido !== null) {
-        const casaFmt = formatarCasaExibicao(numValido);
-        setRankingCasas((prev) => {
-          const semAtual = prev.filter((c) => c !== casaFmt);
-          return [casaFmt, ...semAtual].slice(0, 6);
-        });
-      }
-
-      await loadDashboard(false);
-    } catch (err: any) {
-      if (err.status === 409) {
-        await loadDashboard(false);
-        throw new Error(
-          err.message || '⚠️ Prisma não está mais disponível. A lista foi atualizada.'
-        );
-      }
-      throw err;
-    } finally {
-      setIsSubmittingEntrega(false);
-    }
-  };
-
-  // FLUXO RECEBER PRISMA (RECOLHIMENTO: MODO CONTÍNUO PELO CARD vs FLUXO INDIVIDUAL PELO BOTÃO)
-  const handleReceberPrisma = async (
-    prismaId: string,
-    options?: { origin?: 'CARD' | 'BUTTON' }
-  ) => {
-    const origin = options?.origin || 'BUTTON';
-    setIsReceberLoading(true);
-    try {
-      const prismaAntes = prismas.find((p) => p.id === prismaId);
-      const res = await api.receberPrisma({
-        prismaId,
-      });
-
-      // 1. Som de sucesso leve
-      playSuccessSound();
-
-      // 2. Cópia automática da mensagem se habilitado para o condomínio
-      const casaRecolhida =
-        res.movimentacao?.casa ||
-        prismaAntes?.casaAtual ||
-        res.prisma?.casaAtual ||
-        '';
-
-      const deveCopiar = condominioAtual?.mostrarMensagem !== false;
-      let msgCopiada: string | null = null;
-      if (deveCopiar && res.prisma) {
-        const msgWhatsapp = formatMensagemRecolhimento(res.prisma.numero, res.prisma.corNome, casaRecolhida);
-        const copied = await copyToClipboard(msgWhatsapp);
-        if (copied) {
-          msgCopiada = msgWhatsapp;
-        }
-      }
-
-      // 3. Confirmação visual discreta
-      if (msgCopiada) {
-        showToast(`✓ Recolhimento registrado • Mensagem copiada ("${msgCopiada}")`);
-      } else {
-        showToast(`✓ Recolhimento registrado (Prisma ${res.prisma.numero} ${res.prisma.corNome})`);
-      }
-
-      const freshData = await loadDashboard(false);
-
-      // 4. Distinção determinística:
-      // CARD -> BAIXA -> RECOLHER (permanece em 'RECEBER' se ainda houver prismas em uso; se for 0 prismas, retorna para 'ENTREGAR')
-      // BOTÃO -> BAIXA -> DISPONÍVEIS (retorna para 'ENTREGAR')
-      if (origin === 'CARD') {
-        const remainingInUse = freshData
-          ? freshData.prismas.filter((p) => p.estado === PrismaEstado.EM_USO).length
-          : prismas.filter((p) => p.estado === PrismaEstado.EM_USO && p.id !== prismaId).length;
-
-        if (remainingInUse === 0) {
-          setActiveTab('ENTREGAR');
-        } else {
-          setActiveTab('RECEBER');
-        }
-      } else {
-        setActiveTab('ENTREGAR');
-      }
-    } catch (err: any) {
-      if (err.status === 409) {
-        await loadDashboard(false);
-        alert(err.message || '⚠️ Prisma já foi devolvido ou não está em uso.');
-      } else {
-        alert(err.message || 'Erro ao receber prisma.');
-      }
-      throw err;
-    } finally {
-      setIsReceberLoading(false);
-    }
-  };
-
-  // REGISTRAR PENDÊNCIA
-  const handleRegistrarPendencia = async (prismaId: string, motivo: string) => {
-    try {
-      await api.registrarPendencia({
-        prismaId,
-        motivo,
-      });
-      showToast('⚠️ Pendência registrada com sucesso.');
-      await loadDashboard(false);
-    } catch (err: any) {
-      alert(err.message || 'Erro ao registrar pendência.');
-    }
-  };
-
-  // RESOLVER PENDÊNCIA
-  const handleResolverPendencia = async (
-    prismaId: string,
-    novoEstado: string,
-    justificativa: string
-  ) => {
-    try {
-      await api.resolverPendencia({
-        prismaId,
-        novoEstado,
-        justificativa,
-      });
-      showToast('✅ Pendência resolvida e registrada na auditoria.');
-      await loadDashboard(false);
-    } catch (err: any) {
-      alert(err.message || 'Erro ao resolver pendência.');
-    }
-  };
-
-  // ASSUMIR TURNO
-  const handleConfirmAssumirTurno = async (params: {
-    porteiroId: string;
-    porteiroNome: string;
-    nomeTurno: string;
-    notasPassagem?: string;
-  }) => {
-    try {
-      const res = await api.assumirTurno({
-        ...params,
-      });
-      showToast(`🟢 Turno assumido por ${params.porteiroNome} (${res.prismasEmUso} em uso)!`);
-      await loadDashboard(false);
-    } catch (err: any) {
-      alert(err.message || 'Erro ao assumir turno.');
-    }
-  };
-
-  // List calculations
-  const prismasDisponiveis = prismas.filter((p) => p.estado === PrismaEstado.DISPONIVEL);
-  const prismasEmUso = prismas.filter((p) => p.estado === PrismaEstado.EM_USO);
-
-  // While validating initial session state from HttpOnly cookie
-  if (isAuthLoading) {
-    return (
-      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center text-slate-400 gap-3 font-sans">
-        <Loader2 className="w-8 h-8 text-blue-500 animate-spin" />
-        <span className="text-xs font-bold uppercase tracking-wider text-slate-300">Carregando Controle de Prismas...</span>
-      </div>
-    );
-  }
-
-  // If user is not authenticated, render LoginScreen
-  if (!isAuthenticated) {
-    return (
-      <LoginScreen
-        usuarios={usuarios}
-        condominioNome={condominioAtual?.nome || 'Condomínio'}
-        condominioId={condominioAtualId}
-      />
-    );
-  }
-
-  // If opened directly as a pop-up window in desktop browser (?mode=portaria-popup)
-  if (isPopUpUrlMode) {
-    return (
-      <div className="min-h-screen bg-slate-950 p-2 flex items-center justify-center font-sans antialiased selection:bg-blue-600 selection:text-white">
-        <FloatingPortariaWindow
-          condominioAtual={condominioAtual}
-          operadorIdentificado={operadorIdentificado}
-          usuarioAtual={usuarioAtual}
-          stats={stats}
-          prismas={prismas}
-          activeTab={activeTab}
-          onSelectTab={(tab) => {
-            setActiveTab(tab);
-            setSelectedFilter(undefined);
-            if (tab !== 'BUSCAR') setSearchTerm('');
-          }}
-          searchTerm={searchTerm}
-          onSearchChange={(term) => setSearchTerm(term)}
-          onCloseSearch={() => {
-            setSearchTerm('');
-            setActiveTab('ENTREGAR');
-          }}
-          onSelectPrismaEntrega={(p) => setSelectedPrismaEntrega(p)}
-          onReceberPrisma={handleReceberPrisma}
-          isReceberLoading={isReceberLoading}
-          onRegistrarPendencia={handleRegistrarPendencia}
-          onResolverPendencia={handleResolverPendencia}
-          onOpenHistoricoById={(id) => setHistoricoPrismaId(id)}
-          isOnline={isOnline}
-          isRefreshing={isRefreshing}
-          onRefresh={() => loadDashboard(true)}
-          onClose={() => {
-            if (window.opener) {
-              window.close();
-            } else {
-              window.location.search = '';
-            }
-          }}
-          ultimasMovimentacoes={ultimasMovimentacoes}
-          isStandalonePopup={true}
-        />
-
-        {/* Entrega Modal inside Popup */}
-        <EntregaModal
-          prisma={selectedPrismaEntrega}
-          onClose={() => setSelectedPrismaEntrega(null)}
-          onConfirmEntrega={handleConfirmEntrega}
-          isLoading={isSubmittingEntrega}
-          quickHouses={rankingCasas}
-        />
-
-        {/* Prisma Histórico Modal inside Popup */}
-        <PrismaHistoricoModal
-          prismaId={historicoPrismaId}
-          onClose={() => setHistoricoPrismaId(null)}
-          usuarioAtual={usuarioAtual}
-          condominioId={condominioAtualId}
-          onUpdateSuccess={() => loadDashboard(false)}
-        />
-      </div>
-    );
-  }
-
-  // AMBIENTE DO MODO PORTARIA (Com Document PiP quando ativo ou tela exclusiva como fallback)
-  if (isModoPortariaOpen) {
-    const portariaContent = (
-      <div className="w-full h-full min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans antialiased selection:bg-blue-600 selection:text-white relative overflow-hidden">
-        <FloatingPortariaWindow
-          condominioAtual={condominioAtual}
-          operadorIdentificado={operadorIdentificado}
-          usuarioAtual={usuarioAtual}
-          stats={stats}
-          prismas={prismas}
-          activeTab={activeTab}
-          onSelectTab={(tab) => {
-            setActiveTab(tab);
-            setSelectedFilter(undefined);
-            if (tab !== 'BUSCAR') setSearchTerm('');
-          }}
-          searchTerm={searchTerm}
-          onSearchChange={(term) => setSearchTerm(term)}
-          onCloseSearch={() => {
-            setSearchTerm('');
-            setActiveTab('ENTREGAR');
-          }}
-          onSelectPrismaEntrega={(p) => setSelectedPrismaEntrega(p)}
-          onReceberPrisma={handleReceberPrisma}
-          isReceberLoading={isReceberLoading}
-          onRegistrarPendencia={handleRegistrarPendencia}
-          onResolverPendencia={handleResolverPendencia}
-          onOpenHistoricoById={(id) => setHistoricoPrismaId(id)}
-          isOnline={isOnline}
-          isRefreshing={isRefreshing}
-          onRefresh={() => loadDashboard(true)}
-          onClose={handleCloseModoPortaria}
-          onAbrirEmJanelaDesktop={undefined}
-          onToggleMinimize={handlePipResize}
-          onOpenGerenciamento={() => setIsGerenciamentoOpen(true)}
-          ultimasMovimentacoes={ultimasMovimentacoes}
-          isStandalonePopup={Boolean(pipWindow)}
-        />
-
-        {/* Modal de Entrega */}
-        <EntregaModal
-          prisma={selectedPrismaEntrega}
-          onClose={() => setSelectedPrismaEntrega(null)}
-          onConfirmEntrega={handleConfirmEntrega}
-          isLoading={isSubmittingEntrega}
-          quickHouses={rankingCasas}
-        />
-
-        {/* Modal de Histórico do Prisma */}
-        <PrismaHistoricoModal
-          prismaId={historicoPrismaId}
-          onClose={() => setHistoricoPrismaId(null)}
-          usuarioAtual={usuarioAtual}
-          condominioId={condominioAtualId}
-          onUpdateSuccess={() => loadDashboard(false)}
-        />
-
-        {/* Gerenciamento de Prismas no Modo Portaria */}
-        <GerenciarPrismasModal
-          isOpen={isGerenciamentoOpen}
-          onClose={() => setIsGerenciamentoOpen(false)}
-          prismas={prismas}
-          condominioId={condominioAtualId}
-          usuarioAtual={usuarioAtual}
-          onUpdateSuccess={() => loadDashboard(false)}
-        />
-
-        {/* Toast Notificação de Sucesso */}
-        {successToast && (
-          <div
-            id="global-success-toast-portaria"
-            className="fixed bottom-4 right-4 z-50 p-3.5 bg-slate-900 text-white rounded-xl shadow-xl border border-slate-700 text-xs sm:text-sm font-bold flex items-center gap-2 animate-in slide-in-from-bottom-5"
-          >
-            <CheckCircle2 className="w-4 h-4 text-emerald-400 flex-shrink-0" />
-            <span>{successToast}</span>
-          </div>
-        )}
-      </div>
-    );
-
-    // Se o Document Picture-in-Picture estiver ativo com janela aberta, transporta o conteúdo para a janela PiP
-    if (pipWindow && !pipWindow.closed) {
-      return (
-        <>
-          {createPortal(portariaContent, pipWindow.document.body)}
-          {/* Interface de apoio na aba principal */}
-          <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center p-6 font-sans antialiased text-center select-none">
-            <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-3xl shadow-xl shadow-blue-500/30 mb-4 border border-blue-400/40">
-              🛡️
-            </div>
-            <h1 className="text-xl sm:text-2xl font-black text-white tracking-wide uppercase mb-2">
-              MODO PORTARIA EM JANELA SOBREPOSTA
-            </h1>
-            <p className="text-sm text-blue-200 max-w-md mb-6 leading-relaxed">
-              A interface da Portaria está aberta e sempre visível sobre outros programas (Document Picture-in-Picture). Você pode operar entregas e gerenciar prismas diretamente nela.
-            </p>
-            <div className="flex flex-wrap items-center justify-center gap-3">
-              <button
-                type="button"
-                id="btn-focar-janela-pip"
-                onClick={() => {
-                  if (pipWindow && !pipWindow.closed) {
-                    pipWindow.focus();
-                  }
-                }}
-                className="px-4 py-2.5 bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white rounded-xl text-xs font-black tracking-wide uppercase transition-all shadow-md shadow-blue-600/30 cursor-pointer"
-              >
-                Focar Janela Sobreposta
-              </button>
-              <button
-                type="button"
-                id="btn-fechar-pip-voltar-normal"
-                onClick={handleCloseModoPortaria}
-                className="px-4 py-2.5 bg-slate-800 hover:bg-rose-900/60 active:bg-rose-900 border border-slate-700 hover:border-rose-500 text-slate-300 hover:text-white rounded-xl text-xs font-bold transition-all cursor-pointer"
-              >
-                Fechar e Retornar ao Modo Normal
-              </button>
-            </div>
-          </div>
-        </>
-      );
-    }
-
-    // Fallback: caso PiP não esteja ativo, renderiza na janela principal normalmente
-    return portariaContent;
-  }
 
   return (
-    <div className="min-h-screen bg-slate-100 text-slate-900 flex flex-col font-sans antialiased selection:bg-blue-600 selection:text-white">
-      {/* Top Header */}
-      <Header
-        condominioAtual={condominioAtual}
-        condominios={condominios}
-        onSelectCondominio={(id) => setCondominioAtualId(id)}
-        onOpenEditarCondominio={() => setIsEditarCondominioOpen(true)}
-        turnoAtivo={turnoAtivo}
-        operadorIdentificado={operadorIdentificado}
-        authUser={authUser}
-        onLogout={logout}
-        onOpenPassagemTurno={() => setIsPassagemTurnoOpen(true)}
-        onOpenAuditoria={() => setIsAuditoriaOpen(true)}
-        onOpenGerenciamento={() => setIsGerenciamentoOpen(true)}
-        onOpenConcorrenciaSim={() => setIsConcorrenciaOpen(true)}
-        onOpenConfiguracoes={canAccessConfig ? () => setIsConfiguracoesOpen(true) : undefined}
-        onOpenAlterarSenha={() => setIsAlterarSenhaOpen(true)}
-        isDevEnvironment={isDevEnvironment}
-        isOnline={isOnline}
-        onRefresh={() => loadDashboard(true)}
-        isRefreshing={isRefreshing}
-        isModoPortariaActive={isModoPortariaOpen}
-        onToggleModoPortaria={() => {
-          if (isModoPortariaOpen) {
-            handleCloseModoPortaria();
-          } else {
-            handleAbrirModoPortaria();
+    <button
+      onClick={onClick}
+      disabled={loading || disabled}
+      className={`px-4 py-2 rounded-xl font-medium transition-all flex items-center justify-center gap-2 disabled:opacity-50 ${variants[variant]} ${className}`}
+      {...props}
+    >
+      {loading && <Loader2 className="w-4 h-4 animate-spin" />}
+      {children}
+    </button>
+  );
+};
+
+const Card = ({ children, className = '' }: any) => (
+  <div className={`bg-white rounded-2xl border border-zinc-100 shadow-sm p-6 ${className}`}>
+    {children}
+  </div>
+);
+
+const Badge = ({ children, variant = 'gray' }: any) => {
+  const variants: any = {
+    gray: 'bg-zinc-100 text-zinc-600',
+    emerald: 'bg-emerald-100 text-emerald-700',
+    amber: 'bg-amber-100 text-amber-700',
+    blue: 'bg-blue-100 text-blue-700'
+  };
+  return (
+    <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider ${variants[variant]}`}>
+      {children}
+    </span>
+  );
+};
+
+const Modal = ({ isOpen, onClose, title, children }: any) => {
+  if (!isOpen) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
+      <div className="bg-white rounded-3xl w-full max-w-lg shadow-2xl animate-in zoom-in-95 duration-200">
+        <div className="flex justify-between items-center p-6 border-b border-zinc-100">
+          <h3 className="text-xl font-bold text-zinc-900">{title}</h3>
+          <button onClick={onClose} className="p-2 hover:bg-zinc-100 rounded-xl transition-colors">
+            <XCircle className="w-6 h-6 text-zinc-400" />
+          </button>
+        </div>
+        <div className="p-6">
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// --- Pages ---
+
+// --- Subcomponents for Login (Optimized for instant, zero-jank typing) ---
+
+const LoginSelectionScreen = memo(({
+  onSelectAdmin,
+  onSelectPortaria
+}: {
+  onSelectAdmin: () => void;
+  onSelectPortaria: () => void;
+}) => (
+  <div className="space-y-4">
+    <button
+      type="button"
+      onClick={onSelectAdmin}
+      className="w-full p-4 bg-white hover:bg-emerald-50/50 border-2 border-zinc-200 hover:border-emerald-500 rounded-2xl text-left transition-colors duration-150 group flex items-center gap-4 shadow-sm hover:shadow-md"
+    >
+      <div className="w-12 h-12 bg-zinc-100 group-hover:bg-emerald-500 text-zinc-600 group-hover:text-white rounded-xl flex items-center justify-center transition-colors shrink-0">
+        <Shield className="w-6 h-6" />
+      </div>
+      <div className="flex-1">
+        <span className="text-base font-extrabold text-zinc-900 group-hover:text-emerald-950 block">
+          Administrador / Síndico
+        </span>
+        <span className="text-xs text-zinc-500 font-medium block mt-0.5">
+          Acesso com e-mail e senha para gestão do sistema
+        </span>
+      </div>
+    </button>
+
+    <button
+      type="button"
+      onClick={onSelectPortaria}
+      className="w-full p-4 bg-white hover:bg-emerald-50/50 border-2 border-zinc-200 hover:border-emerald-500 rounded-2xl text-left transition-colors duration-150 group flex items-center gap-4 shadow-sm hover:shadow-md"
+    >
+      <div className="w-12 h-12 bg-zinc-100 group-hover:bg-emerald-500 text-zinc-600 group-hover:text-white rounded-xl flex items-center justify-center transition-colors shrink-0">
+        <Building2 className="w-6 h-6" />
+      </div>
+      <div className="flex-1">
+        <span className="text-base font-extrabold text-zinc-900 group-hover:text-emerald-950 block">
+          Acesso da Portaria
+        </span>
+        <span className="text-xs text-zinc-500 font-medium block mt-0.5">
+          Acesso operacional por Código da Portaria
+        </span>
+      </div>
+    </button>
+  </div>
+));
+
+const AdminLoginForm = memo(({
+  onBack,
+  onAuth,
+  loading
+}: {
+  onBack: () => void;
+  onAuth: (email: string, pass: string, name: string, isSignup: boolean) => Promise<void>;
+  loading: boolean;
+}) => {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [fullName, setFullName] = useState('');
+  const [isSignup, setIsSignup] = useState(false);
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    onAuth(email, password, fullName, isSignup);
+  };
+
+  return (
+    <div className="space-y-4">
+      <button
+        type="button"
+        onClick={onBack}
+        className="inline-flex items-center gap-1.5 text-xs font-bold text-zinc-500 hover:text-zinc-900 transition-colors mb-1"
+      >
+        <ArrowLeft className="w-4 h-4" />
+        <span>Voltar ao início</span>
+      </button>
+
+      <form onSubmit={handleSubmit} className="space-y-4">
+        {isSignup && (
+          <div>
+            <label className="block text-xs font-bold text-zinc-700 uppercase tracking-wider mb-1">Nome Completo</label>
+            <input 
+              type="text" 
+              value={fullName}
+              onChange={(e) => setFullName(e.target.value)}
+              className="w-full px-4 py-2.5 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-emerald-500 outline-none text-sm transition-colors" 
+              placeholder="Seu nome completo" 
+              required={isSignup}
+            />
+          </div>
+        )}
+        <div>
+          <label className="block text-xs font-bold text-zinc-700 uppercase tracking-wider mb-1">E-mail</label>
+          <input 
+            type="email" 
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            className="w-full px-4 py-2.5 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-emerald-500 outline-none text-sm transition-colors" 
+            placeholder="seu@email.com" 
+            required
+          />
+        </div>
+        <div>
+          <label className="block text-xs font-bold text-zinc-700 uppercase tracking-wider mb-1">Senha</label>
+          <input 
+            type="password" 
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            className="w-full px-4 py-2.5 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-emerald-500 outline-none text-sm transition-colors" 
+            placeholder="••••••••" 
+            required
+          />
+        </div>
+        <Button type="submit" className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold rounded-xl shadow-md text-sm" loading={loading}>
+          {loading ? (isSignup ? 'Criando conta...' : 'Entrando...') : (isSignup ? 'Criar Conta' : 'Entrar')}
+        </Button>
+        
+        <div className="text-center pt-1">
+          <button 
+            type="button"
+            onClick={() => setIsSignup(!isSignup)}
+            className="text-xs text-emerald-600 hover:text-emerald-700 font-bold"
+          >
+            {isSignup ? 'Já tem uma conta? Entre aqui' : 'Não tem uma conta? Cadastre-se'}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+});
+
+const PortariaActivationForm = memo(({
+  onBack,
+  onActivate,
+  loading
+}: {
+  onBack: () => void;
+  onActivate: (code: string) => Promise<void>;
+  loading: boolean;
+}) => {
+  const [portariaCodeInput, setPortariaCodeInput] = useState('');
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    onActivate(portariaCodeInput);
+  };
+
+  return (
+    <div className="space-y-5">
+      <button
+        type="button"
+        onClick={onBack}
+        className="inline-flex items-center gap-1.5 text-xs font-bold text-zinc-500 hover:text-zinc-900 transition-colors mb-1"
+      >
+        <ArrowLeft className="w-4 h-4" />
+        <span>Voltar ao início</span>
+      </button>
+
+      <div className="bg-emerald-50 border border-emerald-200 p-4 rounded-2xl text-xs text-emerald-900 space-y-1">
+        <strong className="block text-emerald-950 font-extrabold text-sm uppercase tracking-wide">
+          ATIVAÇÃO DA PORTARIA
+        </strong>
+        <p className="leading-relaxed font-medium">
+          Informe o código exclusivo do condomínio fornecido pela administração para conectar este dispositivo à guarita.
+        </p>
+      </div>
+
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <div>
+          <label className="block text-xs font-bold text-zinc-700 uppercase tracking-wider mb-1.5">
+            Código da Portaria
+          </label>
+          <input
+            type="text"
+            value={portariaCodeInput}
+            onChange={(e) => setPortariaCodeInput(e.target.value.toUpperCase())}
+            placeholder="EX: CONDO-1234"
+            className="w-full px-4 py-3.5 rounded-2xl border-2 border-zinc-200 focus:border-emerald-500 focus:ring-0 outline-none font-mono font-black text-center tracking-widest text-lg uppercase bg-zinc-50 focus:bg-white transition-colors"
+            required
+          />
+        </div>
+
+        <Button type="submit" className="w-full py-3.5 bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold rounded-2xl shadow-md text-sm transition-colors" loading={loading}>
+          {loading ? 'Validando Código...' : 'ATIVAR'}
+        </Button>
+      </form>
+    </div>
+  );
+});
+
+const LoginPage = ({ onLogin }: any) => {
+  const [loginMode, setLoginMode] = useState<'select' | 'admin' | 'portaria'>('select');
+  const [activatingPortaria, setActivatingPortaria] = useState(false);
+  const [pendingPortariaActivation, setPendingPortariaActivation] = useState<{
+    condominium: any;
+    access_code: string;
+  } | null>(null);
+
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const navigate = useNavigate();
+
+  const handleSelectAdmin = useCallback(() => {
+    setLoginMode('admin');
+    setError(null);
+  }, []);
+
+  const handleSelectPortaria = useCallback(() => {
+    setLoginMode('portaria');
+    setError(null);
+  }, []);
+
+  const handleBackToSelect = useCallback(() => {
+    setLoginMode('select');
+    setError(null);
+  }, []);
+
+  const handleActivatePortaria = useCallback(async (code: string) => {
+    if (!code.trim()) {
+      toast.error("Informe o código de acesso da portaria.");
+      return;
+    }
+
+    setActivatingPortaria(true);
+    setError(null);
+    const cleanCode = code.trim().toUpperCase();
+
+    try {
+      const res = await api.post('/api/portaria/activate', { access_code: cleanCode });
+      if (res && res.data && res.data.success && res.data.condominium) {
+        setPendingPortariaActivation({
+          condominium: res.data.condominium,
+          access_code: cleanCode
+        });
+        return;
+      }
+
+      // If business error (e.g. inactive condo or explicit not found with json), handle it
+      if (res && (res.status === 404 || res.status === 403)) {
+        const errMsg = res?.data?.error || res?.error || "Código de acesso da portaria não encontrado.";
+        setError(errMsg);
+        toast.error(errMsg);
+        return;
+      }
+
+      // If server returned 405 (Method Not Allowed) or format error, fallback to RPC verification
+      const { data: rpcData } = await supabase.rpc('rpc_validate_portaria_code', {
+        p_access_code: cleanCode
+      });
+      const settingData = Array.isArray(rpcData) ? rpcData[0] : rpcData;
+
+      if (settingData && settingData.condominium_id) {
+        const { data: condoData } = await supabase
+          .from('condominiums')
+          .select('*')
+          .eq('id', settingData.condominium_id)
+          .single();
+
+        if (condoData) {
+          if (condoData.active === false) {
+            setError("Este condomínio encontra-se inativo/bloqueado pelo administrador.");
+            toast.error("Este condomínio encontra-se inativo/bloqueado pelo administrador.");
+            return;
           }
-        }}
-      />
 
-      {/* Main Single Operational Screen Container */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-2.5 sm:p-4 lg:p-5 space-y-2.5 sm:space-y-3.5">
-        {/* Error / Offline Alert */}
-        {errorMessage && (
-          <div
-            id="global-error-banner"
-            className="p-3 bg-rose-50 border-2 border-rose-300 rounded-xl text-rose-900 text-xs sm:text-sm font-semibold flex items-center justify-between gap-2 shadow-sm animate-in fade-in"
-          >
-            <div className="flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 text-rose-600 flex-shrink-0" />
-              <span>{errorMessage}</span>
-            </div>
-            <button
-              onClick={() => loadDashboard(true)}
-              className="px-2.5 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold cursor-pointer transition-colors"
-            >
-              Tentar Novamente
-            </button>
-          </div>
-        )}
+          setPendingPortariaActivation({
+            condominium: {
+              ...condoData,
+              portaria_name: settingData.portaria_name || condoData.name,
+              portaria_access_code: settingData.portaria_access_code
+            },
+            access_code: cleanCode
+          });
+          return;
+        }
+      }
 
-        {/* Success Toast */}
-        {successToast && (
-          <div
-            id="global-success-toast"
-            className="fixed bottom-4 right-4 z-50 p-3.5 bg-slate-900 text-white rounded-xl shadow-xl border border-slate-700 text-xs sm:text-sm font-bold flex items-center gap-2 animate-in slide-in-from-bottom-5"
-          >
-            <CheckCircle2 className="w-4 h-4 text-emerald-400 flex-shrink-0" />
-            <span>{successToast}</span>
-          </div>
-        )}
+      const errMsg = res?.data?.error || res?.error || "Código de acesso da portaria não encontrado.";
+      setError(errMsg);
+      toast.error(errMsg);
+    } catch (err: any) {
+      // Fallback to RPC on exception
+      try {
+        const { data: rpcData } = await supabase.rpc('rpc_validate_portaria_code', {
+          p_access_code: cleanCode
+        });
+        const settingData = Array.isArray(rpcData) ? rpcData[0] : rpcData;
 
-        {/* 1. GRADE OPERACIONAL 2x2 (EM USO, PENDENTES, DISPONÍVEL, RECOLHER) + BUSCAR */}
-        <ActionSelector
-          activeTab={activeTab}
-          onSelectTab={(tab) => {
-            setActiveTab(tab);
-            setSelectedFilter(undefined);
-            if (tab !== 'BUSCAR') {
-              setSearchTerm('');
+        if (settingData && settingData.condominium_id) {
+          const { data: condoData } = await supabase
+            .from('condominiums')
+            .select('*')
+            .eq('id', settingData.condominium_id)
+            .single();
+
+          if (condoData && condoData.active !== false) {
+            setPendingPortariaActivation({
+              condominium: {
+                ...condoData,
+                portaria_name: settingData.portaria_name || condoData.name,
+                portaria_access_code: settingData.portaria_access_code
+              },
+              access_code: cleanCode
+            });
+            return;
+          }
+        }
+      } catch {}
+
+      setError(err.message || "Erro ao conectar à portaria.");
+      toast.error(err.message || "Erro ao conectar à portaria.");
+    } finally {
+      setActivatingPortaria(false);
+    }
+  }, []);
+
+  const handleConfirmPortariaSession = useCallback(async (permanent: boolean) => {
+    if (!pendingPortariaActivation) return;
+    const { condominium, access_code } = pendingPortariaActivation;
+
+    setActivatingPortaria(true);
+    try {
+      const res = await api.post('/api/portaria/confirm-link', { access_code });
+      let portariaToken = res?.data?.portaria_token;
+
+      if (!portariaToken) {
+        // Direct local token fallback
+        portariaToken = `ptk_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
+        try {
+          await supabase.rpc('rpc_confirm_portaria_token', {
+            p_condominium_id: condominium.id,
+            p_access_code: access_code,
+            p_token: portariaToken
+          });
+        } catch {}
+      }
+
+      if (permanent) {
+        localStorage.setItem('encomendas_portaria_token', portariaToken);
+      } else {
+        localStorage.removeItem('encomendas_portaria_token');
+      }
+
+      const portariaProfile: Profile = {
+        id: `portaria-${condominium.id}`,
+        full_name: `Portaria ${condominium.portaria_name || condominium.name}`,
+        email: `portaria@${condominium.id}.local`,
+        phone: '',
+        role: 'porteiro',
+        condominium_id: condominium.id,
+        active: true,
+        created_at: new Date().toISOString()
+      };
+
+      clearActivePlantao();
+      clearManualPorter();
+      onLogin(portariaProfile);
+      toast.success(`Portaria ativada: ${condominium.name}`);
+      navigate('/portaria');
+    } catch (err: any) {
+      toast.error(err.message || "Erro ao conectar portaria.");
+    } finally {
+      setActivatingPortaria(false);
+      setPendingPortariaActivation(null);
+    }
+  }, [pendingPortariaActivation, navigate, onLogin]);
+
+  const handleAuth = useCallback(async (email: string, pass: string, name: string, isSignup: boolean) => {
+    setLoading(true);
+    setError(null);
+    
+    try {
+      if (!email || !pass || (isSignup && !name)) {
+        throw new Error("Preencha todos os campos");
+      }
+
+      if (isSignup) {
+        const { data: signupData, error: signupError } = await supabase.auth.signUp({ 
+          email, 
+          password: pass,
+          options: {
+            data: {
+              full_name: name
             }
-          }}
-          countDisponiveis={stats.disponiveis}
-          countEmUso={stats.emUso}
-          countPendentes={stats.pendentes}
-          prismasEmUso={prismasEmUso}
-          prismasPendentes={prismas.filter((p) => p.estado === PrismaEstado.PENDENTE)}
-          searchTerm={searchTerm}
-          onSearchChange={(term) => setSearchTerm(term)}
-          onCloseSearch={() => {
-            setSearchTerm('');
-            setActiveTab('ENTREGAR');
-          }}
-        />
+          }
+        });
+        if (signupError) throw signupError;
+        if (!signupData.user) throw new Error("Erro ao criar conta");
 
-        {/* 3. PRIMARY OPERATIONAL STAGE */}
-        <div id="main-operational-stage" className="min-h-[300px]">
-          {/* TAB 1: FLUXO ENTREGAR PRISMA */}
-          {activeTab === 'ENTREGAR' && (
-            <div id="view-entrega-prisma" className="space-y-2.5">
-              {prismasDisponiveis.length === 0 ? (
-                <div className="text-center py-10 bg-white rounded-xl border border-dashed border-slate-300 p-5">
-                  <AlertCircle className="w-10 h-10 text-amber-500 mx-auto mb-2 opacity-80" />
-                  <h3 className="text-sm sm:text-base font-bold text-slate-800">
-                    Nenhum prisma disponível no momento!
-                  </h3>
-                  <p className="text-xs text-slate-500 max-w-sm mx-auto mt-1">
-                    Todos os prismas estão em uso ou pendentes de devolução.
-                  </p>
-                </div>
-              ) : (
-                <div className="grid grid-cols-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-1.5 sm:gap-2 md:gap-2.5">
-                  {prismasDisponiveis.map((p) => (
-                    <PrismaCard
-                      key={p.id}
-                      prisma={p}
-                      variant="entrega"
-                      onClick={() => setSelectedPrismaEntrega(p)}
-                    />
-                  ))}
+        // Create initial profile via backend API to bypass RLS
+        const { data: sessionData } = await supabase.auth.getSession().catch(() => ({ data: { session: null } }));
+        const session = sessionData?.session;
+        if (!session) throw new Error('Sessão não iniciada após signup');
+
+        const profileResponse = await fetch('/api/auth/create-profile', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${session.access_token}`
+          },
+          body: JSON.stringify({
+            fullName: name,
+            role: 'admin' // First user is admin by default in this flow
+          })
+        });
+
+        const profileResult = await profileResponse.json();
+        if (!profileResponse.ok) throw new Error(profileResult.error || 'Erro ao criar perfil');
+        
+        if (profileResult.profile.active === false) {
+          await supabase.auth.signOut();
+          throw new Error("Sua conta está inativa. Entre em contato com o administrador.");
+        }
+
+        onLogin(profileResult.profile);
+        toast.success("Conta criada com sucesso!");
+      } else {
+        const { data, error: authError } = await supabase.auth.signInWithPassword({ email, password: pass });
+        
+        if (authError) {
+          if (authError.message === 'Invalid login credentials') {
+            throw new Error("E-mail ou senha incorretos");
+          }
+          throw authError;
+        }
+
+        if (!data.user) throw new Error("Usuário não encontrado");
+
+        const { data: profile, error: profileError } = await supabase
+          .from('profiles')
+          .select('*')
+          .eq('id', data.user.id)
+          .maybeSingle();
+        
+        if (profileError) throw profileError;
+
+        if (!profile) {
+          throw new Error("Sua conta não possui um perfil vinculado.");
+        }
+
+        if (profile.active === false) {
+          await supabase.auth.signOut();
+          throw new Error("Sua conta está inativa. Entre em contato com o administrador.");
+        }
+        
+        const role = normalizeRole(profile.role);
+        console.log("ROLE USUÁRIO:", role);
+
+        onLogin(profile);
+        toast.success(`Bem-vindo, ${profile.full_name.split(' ')[0]}!`);
+
+        // Redirecionamento imediato após login
+        if (role === 'porteiro') {
+          navigate('/portaria');
+        } else if (role === 'sindico') {
+          navigate('/dashboard');
+        } else if (role === 'admin') {
+          navigate('/dashboard');
+        }
+      }
+    } catch (err: any) {
+      const message = err.message || "Erro na autenticação";
+      setError(message);
+      toast.error(message);
+    } finally {
+      setLoading(false);
+    }
+  }, [navigate, onLogin]);
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-zinc-50 p-4">
+      <Card className="w-full max-w-md shadow-2xl border border-zinc-200 rounded-3xl overflow-hidden p-6 md:p-8">
+        <div className="text-center mb-8">
+          <div className="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-sm">
+            <Package className="w-8 h-8" />
+          </div>
+          <h1 className="text-2xl font-black text-zinc-900 tracking-tight">ENCOMENDAS INTELIGENTES</h1>
+          <p className="text-xs font-bold uppercase text-zinc-400 tracking-widest mt-1">
+            {loginMode === 'select' ? 'Como deseja acessar?' : loginMode === 'admin' ? 'Acesso Administrativo' : 'Ativação da Portaria'}
+          </p>
+        </div>
+
+        {error && (
+          <div className="mb-6 p-3.5 bg-red-50 border border-red-200 text-red-700 text-xs rounded-2xl flex items-center gap-2.5">
+            <AlertTriangle className="w-4 h-4 shrink-0 text-red-500" />
+            <span className="font-bold">{error}</span>
+          </div>
+        )}
+
+        {/* 1. SELECTION SCREEN */}
+        {loginMode === 'select' && (
+          <LoginSelectionScreen
+            onSelectAdmin={handleSelectAdmin}
+            onSelectPortaria={handleSelectPortaria}
+          />
+        )}
+
+        {/* 2. PORTARIA ACTIVATION MODE */}
+        {loginMode === 'portaria' && (
+          <PortariaActivationForm
+            onBack={handleBackToSelect}
+            onActivate={handleActivatePortaria}
+            loading={activatingPortaria}
+          />
+        )}
+
+        {/* 3. ADMIN / SÍNDICO LOGIN MODE */}
+        {loginMode === 'admin' && (
+          <AdminLoginForm
+            onBack={handleBackToSelect}
+            onAuth={handleAuth}
+            loading={loading}
+          />
+        )}
+      </Card>
+
+      {/* PERMANENT SESSION LINK CONFIRMATION MODAL */}
+      {pendingPortariaActivation && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl p-6 max-w-md w-full shadow-2xl space-y-4 border border-zinc-100 text-center">
+            <div className="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-2xl flex items-center justify-center mx-auto shadow-sm">
+              <Building2 className="w-8 h-8" />
+            </div>
+
+            <div>
+              <span className="text-xs font-extrabold uppercase tracking-widest text-emerald-600 block">
+                Portaria: {pendingPortariaActivation.condominium.portaria_name || pendingPortariaActivation.condominium.name}
+              </span>
+              <h3 className="text-xl font-black text-zinc-900 mt-1">Ativação da Portaria</h3>
+              <p className="text-xs text-zinc-600 mt-2 leading-relaxed">
+                Este dispositivo será vinculado permanentemente à Portaria do Condomínio <strong className="text-zinc-900">{pendingPortariaActivation.condominium.name}</strong>.
+              </p>
+              <p className="text-xs font-extrabold text-emerald-950 bg-emerald-50 p-3 rounded-2xl border border-emerald-200 mt-3">
+                Deseja manter este dispositivo conectado?
+              </p>
+            </div>
+
+            <div className="space-y-2 pt-2">
+              <button
+                type="button"
+                onClick={() => handleConfirmPortariaSession(true)}
+                disabled={activatingPortaria}
+                className="w-full py-3.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl text-xs font-extrabold transition-colors shadow-md flex items-center justify-center gap-2"
+              >
+                {activatingPortaria ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
+                <span>✓ SIM (Manter Conectado)</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleConfirmPortariaSession(false)}
+                disabled={activatingPortaria}
+                className="w-full py-3 bg-zinc-100 hover:bg-zinc-200 text-zinc-700 rounded-2xl text-xs font-bold transition-colors"
+              >
+                ✓ NÃO (Apenas nesta Sessão)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const PorteiroDashboard = ({ user }: { user: Profile }) => {
+  const [step, setStep] = useState<'list' | 'camera' | 'confirm' | 'qr_scan' | 'residents'>('list');
+  const [packages, setPackages] = useState<PackageType[]>([]);
+  const [residents, setResidents] = useState<Profile[]>([]);
+  const [capturedImage, setCapturedImage] = useState<string | null>(null);
+  const [analyzedData, setAnalyzedData] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
+  const [loadingMessage, setLoadingMessage] = useState('');
+  const [searchTerm, setSearchTerm] = useState('');
+  const [qrPackage, setQrPackage] = useState<PackageType | null>(null);
+  const [qrScanStatus, setQrScanStatus] = useState<'idle' | 'scanning' | 'validating' | 'success' | 'error'>('idle');
+  const [manualToken, setManualToken] = useState('');
+  const [showManualInput, setShowManualInput] = useState(false);
+  const [recentRetrievals, setRecentRetrievals] = useState<PackageType[]>([]);
+  const [systemStatus, setSystemStatus] = useState<any>(null);
+  const [notes, setNotes] = useState('');
+  const [showNotesOptions, setShowNotesOptions] = useState(false);
+  const [showAdvancedUnit, setShowAdvancedUnit] = useState(false);
+  const [matchingResidents, setMatchingResidents] = useState<ScoredResident[]>([]);
+  const [selectedResidentId, setSelectedResidentId] = useState<string | null>(null);
+  const [isResidentModalOpen, setIsResidentModalOpen] = useState(false);
+  const [isImporterOpen, setIsImporterOpen] = useState(false);
+  const [deliveryPhoto, setDeliveryPhoto] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [residentFormData, setResidentFormData] = useState({
+    full_name: '',
+    unit_number: '',
+    unit_type: '',
+    block: '',
+    tower: '',
+    complement: '',
+    phone: '',
+    role: 'resident' as const,
+    active: true
+  });
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const qrScannerRef = useRef<Html5Qrcode | null>(null);
+  const isTransitioningRef = useRef(false);
+  const stepRef = useRef(step);
+
+  useEffect(() => {
+    stepRef.current = step;
+  }, [step]);
+
+  const safeStopScanner = async () => {
+    if (isTransitioningRef.current) {
+      let attempts = 0;
+      while (isTransitioningRef.current && attempts < 10) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        attempts++;
+      }
+    }
+
+    if (qrScannerRef.current) {
+      try {
+        isTransitioningRef.current = true;
+        if (qrScannerRef.current.isScanning) {
+          await qrScannerRef.current.stop();
+        }
+        try {
+          qrScannerRef.current.clear();
+        } catch (e) {
+          // ignore
+        }
+        qrScannerRef.current = null;
+      } catch (err) {
+        console.error("Failed to stop scanner", err);
+      } finally {
+        isTransitioningRef.current = false;
+      }
+    }
+  };
+
+  useEffect(() => {
+    fetchPackages();
+    fetchRecentRetrievals();
+    checkSystemStatus();
+    fetchResidents();
+  }, []);
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setDeliveryPhoto(reader.result as string);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const fetchResidents = async () => {
+    let query = supabase
+      .from('profiles')
+      .select('*')
+      .eq('condominium_id', user.condominium_id)
+      .eq('role', 'resident');
+    
+    // Porteiro only sees active residents
+    if (user.role === 'porteiro') {
+      query = query.eq('active', true);
+    }
+    
+    const { data } = await query.order('full_name');
+    if (data) setResidents(data);
+  };
+
+  const UNIT_SYNONYMS: Record<string, string> = {
+    'APTO': 'AP',
+    'APARTAMENTO': 'AP',
+    'CS': 'CASA',
+    'BL': 'BLOCO',
+    'TR': 'TORRE'
+  };
+
+  const standardizeUnitText = (text: string) => {
+    if (!text) return '';
+    
+    let normalized = text.toUpperCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // Remove accents
+      .replace(/[^A-Z0-9\s]/g, ' '); // Replace special chars with space
+
+    // Insert spaces before/after keywords if joined
+    const keywords = ['LOTE', 'CASA', 'AP', 'BLOCO', 'TORRE', 'APTO', 'APARTAMENTO'];
+    keywords.forEach(kw => {
+      // Keyword preceded by something that isn't a space
+      const regex1 = new RegExp(`([^\\s])(${kw})`, 'gi');
+      normalized = normalized.replace(regex1, '$1 $2');
+      // Keyword followed by something that isn't a space or digit
+      const regex2 = new RegExp(`(${kw})([^\\s\\d])`, 'gi');
+      normalized = normalized.replace(regex2, '$1 $2');
+    });
+
+    normalized = normalized
+      .replace(/([A-Z])(\d)/g, '$1 $2') // Separate letters from numbers: LOTE4 -> LOTE 4
+      .replace(/(\d)([A-Z])/g, '$1 $2') // Separate numbers from letters: 101A -> 101 A
+      .replace(/\s+/g, ' ') // Remove duplicate spaces
+      .trim();
+
+    // Replace synonyms
+    Object.entries(UNIT_SYNONYMS).forEach(([syn, std]) => {
+      const regex = new RegExp(`\\b${syn}\\b`, 'g');
+      normalized = normalized.replace(regex, std);
+    });
+
+    return normalized;
+  };
+
+  const normalizeUnit = (unit: string) => {
+    if (!unit) return '';
+    return unit.toLowerCase()
+      .replace(/\s+/g, '')
+      .replace(/apartamento|apto|ap/g, 'ap')
+      .replace(/casa|cs/g, 'casa')
+      .replace(/lote/g, 'lote')
+      .replace(/bloco|bl/g, 'bloco')
+      .replace(/torre|tr/g, 'torre')
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  };
+
+  const normalizeName = (name: string) => {
+    if (!name) return '';
+    return name.toUpperCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // Remove accents
+      .replace(/[^A-Z\s]/g, ' ') // Remove non-letters
+      .replace(/\s+/g, ' ') // Single spaces
+      .trim();
+  };
+
+  const getLevenshteinDistance = (a: string, b: string): number => {
+    const matrix = Array.from({ length: a.length + 1 }, () =>
+      Array.from({ length: b.length + 1 }, () => 0)
+    );
+
+    for (let i = 0; i <= a.length; i++) matrix[i][0] = i;
+    for (let j = 0; j <= b.length; j++) matrix[0][j] = j;
+
+    for (let i = 1; i <= a.length; i++) {
+      for (let j = 1; j <= b.length; j++) {
+        const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j] + 1,
+          matrix[i][j - 1] + 1,
+          matrix[i - 1][j - 1] + cost
+        );
+      }
+    }
+    return matrix[a.length][b.length];
+  };
+
+  const findMatchingResidentsInternal = async (unit_number: string, name: string, details?: any) => {
+    if (!unit_number && !name && !details) {
+      setMatchingResidents([]);
+      setSelectedResidentId(null);
+      return;
+    }
+
+    const matches = await findMatchingResidents(user.condominium_id, unit_number, name, details);
+    
+    if (matches.length > 0) {
+      setMatchingResidents(matches);
+      
+      // Auto-select ONLY if high confidence (score >= 180)
+      if (matches[0].score >= 180) {
+        setSelectedResidentId(matches[0].resident.id);
+      } else {
+        setSelectedResidentId(null);
+      }
+    } else {
+      setMatchingResidents([]);
+      setSelectedResidentId(null);
+    }
+  };
+
+  useEffect(() => {
+    if (step === 'confirm' && (analyzedData?.unitNumber || analyzedData?.unitDetails)) {
+      findMatchingResidentsInternal(analyzedData.unitNumber, analyzedData.recipientName, analyzedData.unitDetails);
+    }
+  }, [step, analyzedData?.unitNumber, analyzedData?.recipientName, analyzedData?.unitDetails]);
+
+  const checkSystemStatus = async () => {
+    try {
+      const response = await fetch('/api/system-status');
+      const data = await response.json();
+      setSystemStatus(data);
+    } catch (err) {
+      console.warn("Erro ao verificar status do sistema:", err);
+    }
+  };
+
+  const handleSaveResident = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      const finalData = { ...residentFormData };
+      if (!finalData.unit_number) {
+        const parts = [];
+        if (finalData.block) parts.push(`BLOCO-${finalData.block}`);
+        if (finalData.tower) parts.push(`TORRE-${finalData.tower}`);
+        if (finalData.unit_type) parts.push(finalData.unit_type.toUpperCase());
+        finalData.unit_number = parts.join('-').toUpperCase();
+      }
+
+      if (editingResidentId) {
+        const { error } = await supabase
+          .from('profiles')
+          .update(finalData)
+          .eq('id', editingResidentId);
+        if (error) throw error;
+        toast.success("Morador atualizado!");
+      } else {
+        const { error } = await supabase
+          .from('profiles')
+          .insert([{ 
+            ...finalData, 
+            condominium_id: user.condominium_id 
+          }]);
+        if (error) throw error;
+        toast.success("Morador cadastrado com sucesso!");
+      }
+      fetchResidents();
+      setIsResidentModalOpen(false);
+      setEditingResidentId(null); 
+      setResidentFormData({ 
+        full_name: '', 
+        unit_number: '', 
+        unit_type: '',
+        block: '',
+        tower: '',
+        complement: '',
+        phone: '', 
+        role: 'resident',
+        active: true
+      });
+    } catch (err: any) {
+      toast.error(err.message || "Erro ao salvar");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const [editingResidentId, setEditingResidentId] = useState<string | null>(null);
+
+  // Auto-generate unit from structured fields
+  useEffect(() => {
+    const { unit_type, block, tower, complement } = residentFormData;
+    
+    // Only generate if at least one detail is present to avoid overwriting legacy data unnecessarily
+    if (unit_type || block || tower || complement) {
+      const parts = [];
+      if (block) parts.push(`BLOCO-${block.trim().toUpperCase()}`);
+      if (tower) parts.push(`TORRE-${tower.trim().toUpperCase()}`);
+      
+      if (unit_type) {
+        parts.push(unit_type.trim().toUpperCase());
+      }
+      
+      if (complement) parts.push(complement.trim().toUpperCase());
+      
+      const generated = parts.join('-').replace(/-+/g, '-');
+      
+      if (generated !== residentFormData.unit_number) {
+        setResidentFormData(prev => ({ ...prev, unit_number: generated }));
+      }
+    }
+  }, [
+    residentFormData.unit_type, 
+    residentFormData.block, 
+    residentFormData.tower, 
+    residentFormData.complement
+  ]);
+
+  useEffect(() => {
+    if (step === 'qr_scan') {
+      const startScanner = async () => {
+        if (isTransitioningRef.current || stepRef.current !== 'qr_scan') return;
+        try {
+          isTransitioningRef.current = true;
+          const html5QrCode = new Html5Qrcode("qr-reader");
+          const config = { fps: 10, qrbox: { width: 250, height: 250 } };
+
+          await html5QrCode.start(
+            { facingMode: "environment" }, 
+            config, 
+            onScanSuccess,
+            () => {} // Empty error callback
+          );
+          
+          if (stepRef.current !== 'qr_scan') {
+            try {
+              if (html5QrCode.isScanning) {
+                await html5QrCode.stop();
+              }
+              html5QrCode.clear();
+            } catch (e) {
+              // ignore
+            }
+            return;
+          }
+          
+          qrScannerRef.current = html5QrCode;
+        } catch (err) {
+          console.error("Failed to start scanner", err);
+          toast.error("Erro ao iniciar câmera");
+        } finally {
+          isTransitioningRef.current = false;
+        }
+      };
+
+      startScanner();
+
+      return () => {
+        safeStopScanner();
+      };
+    }
+  }, [step]);
+
+  const onScanSuccess = async (decodedText: string) => {
+    if (loading || qrScanStatus === 'validating') return;
+    setQrScanStatus('validating');
+    setLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from('packages')
+        .select('*, package_id:id, unit_label:unit_number')
+        .eq('condominium_id', user.condominium_id)
+        .or(`pickup_token.eq.${decodedText},pickup_code.eq.${decodedText},id.eq.${decodedText}`)
+        .maybeSingle();
+
+      if (error) throw error;
+      if (!data) {
+        setQrScanStatus('error');
+        toast.error("QR Code inválido ou de outro condomínio");
+        return;
+      }
+
+      if (data.status === 'delivered') {
+        setQrScanStatus('error');
+        toast.error("Esta encomenda já foi retirada");
+        return;
+      }
+
+      if (data.pickup_qr_code === 'used') {
+        setQrScanStatus('error');
+        toast.error("Este QR Code já foi utilizado");
+        return;
+      }
+
+      setQrPackage(data);
+      setQrScanStatus('success');
+      
+      await safeStopScanner();
+      
+      // Automatically confirm delivery after a short delay to show the found package
+      setTimeout(() => {
+        confirmQrRetrieved();
+      }, 1500);
+    } catch (err) {
+      setQrScanStatus('error');
+      toast.error("Erro ao validar QR Code");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleManualToken = async () => {
+    if (!manualToken.trim()) return;
+    onScanSuccess(manualToken.trim());
+  };
+
+  const fetchRecentRetrievals = async () => {
+    const { data } = await supabase
+      .from('packages')
+      .select('*')
+      .eq('condominium_id', user.condominium_id)
+      .eq('status', 'delivered')
+      .order('delivered_at', { ascending: false })
+      .limit(5);
+    if (data) setRecentRetrievals(data);
+  };
+
+  const onScanFailure = (error: any) => {
+    // Silently ignore scan failures
+  };
+
+  const confirmQrRetrieved = async () => {
+    if (!qrPackage) return;
+    setLoading(true);
+    try {
+      // Obter o usuário logado para capturar o ID se disponível (opcional)
+      const authUserRes = await supabase.auth.getUser().catch(() => ({ data: { user: null }, error: null }));
+      const authUser = authUserRes.data?.user || null;
+
+      const validDeliveredBy = (authUser?.id && isValidUuid(authUser.id)) 
+        ? authUser.id 
+        : (user?.id && isValidUuid(user.id) ? user.id : null);
+
+      const { error } = await supabase
+        .from('packages')
+        .update({ 
+          status: 'delivered', 
+          delivered_at: new Date().toISOString(),
+          delivered_by: validDeliveredBy,
+          entregue_por: (getCurrentPorter(user?.condominium_id) && getCurrentPorter(user?.condominium_id) !== 'Selecione o Porteiro') ? getCurrentPorter(user?.condominium_id) : user.full_name,
+          pickup_qr_code: 'used',
+          delivered_to_name: 'Morador (Confirmado)',
+          ...(deliveryPhoto ? { delivery_photo_url: deliveryPhoto } : {})
+        })
+        .eq('id', qrPackage.id);
+
+      if (error) throw error;
+
+      // Log retrieval
+      try {
+        await supabase.from('retrieval_logs').insert([{
+          package_id: qrPackage.id,
+          porter_id: validDeliveredBy,
+          condominium_id: user.condominium_id,
+          delivery_method: 'qr_code',
+          token_used: qrPackage.pickup_token,
+          status: 'success'
+        }]);
+      } catch (logErr) {
+        console.warn('Erro ao salvar retrieval_log:', logErr);
+      }
+
+      toast.success("Retirada confirmada com sucesso!");
+      setQrScanStatus('success');
+      setTimeout(() => {
+        setStep('list');
+        setQrPackage(null);
+        setQrScanStatus('idle');
+        setDeliveryPhoto(null);
+        fetchPackages();
+        fetchRecentRetrievals();
+      }, 2000);
+    } catch (err) {
+      toast.error("Erro ao confirmar retirada");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchPackages = async () => {
+    if (!user?.condominium_id) return;
+    const { data, error } = await supabase
+      .from('packages')
+      .select('*, registrar:received_by(full_name), package_id:id, unit_label:unit_number')
+      .eq('condominium_id', user.condominium_id)
+      .order('created_at', { ascending: false });
+    
+    if (data) setPackages(data);
+  };
+
+  const startCamera = async () => {
+    // Pré-carrega o stream antes de mudar o passo para evitar tela preta
+    try {
+      let stream: MediaStream;
+      
+      try {
+        // Tenta primeiro modo environment (traseira)
+        stream = await navigator.mediaDevices.getUserMedia({ 
+          video: { 
+            facingMode: 'environment',
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          } 
+        });
+      } catch (err) {
+        // Fallback para qualquer câmera
+        console.warn("Retrying with any camera...");
+        stream = await navigator.mediaDevices.getUserMedia({ 
+          video: true 
+        });
+      }
+
+      setStep('camera');
+      // Pequeno delay para garantir que o elemento video está montado
+      setTimeout(() => {
+        if (videoRef.current) videoRef.current.srcObject = stream;
+      }, 100);
+    } catch (err) {
+      console.error("Erro ao acessar câmera:", err);
+      toast.error("Não foi possível acessar a câmera. Ative as permissões ou se estiver no chat, clique para abrir o app em uma nova aba!");
+    }
+  };
+
+  const capture = async () => {
+    if (videoRef.current && canvasRef.current) {
+      const context = canvasRef.current.getContext('2d');
+      if (!context) return;
+
+      // Otimização: Redimensionar imagem para OCR (max 1100px)
+      const maxDim = 1100;
+      let width = videoRef.current.videoWidth;
+      let height = videoRef.current.videoHeight;
+
+      if (width > maxDim || height > maxDim) {
+        if (width > height) {
+          height = (maxDim / width) * height;
+          width = maxDim;
+        } else {
+          width = (maxDim / height) * width;
+          height = maxDim;
+        }
+      }
+
+      canvasRef.current.width = width;
+      canvasRef.current.height = height;
+      
+      // Feedback visual imediato
+      setLoading(true);
+      setLoadingMessage("Capturando...");
+
+      context.drawImage(videoRef.current, 0, 0, width, height);
+      
+      // Comprimir mais a imagem para envio rápido (qualidade 0.7)
+      const dataUrl = canvasRef.current.toDataURL('image/jpeg', 0.7);
+      setCapturedImage(dataUrl);
+      
+      const stream = videoRef.current.srcObject as MediaStream;
+      stream.getTracks().forEach(track => track.stop());
+      
+      analyze(dataUrl);
+    }
+  };
+
+  const analyze = async (image: string) => {
+    setLoading(true);
+    setLoadingMessage("Identificando morador...");
+    try {
+      // Otimização: analyzePackageLabel já foi importado no topo
+      const data = await analyzePackageLabel(image);
+      
+      if (!data) {
+        throw new Error("Não foi possível extrair dados da imagem");
+      }
+
+      setLoadingMessage("Processando dados...");
+      
+      // Se a confiança for muito baixa na unidade, deixa vazio para preenchimento manual
+      let unitNumber = (data.unitDetails?.confidence > 0.8) ? standardizeUnitText(data.unitDetails.full_string) : '';
+      
+      // Geração automática se o campo principal falhar mas houver detalhes estruturados
+      if (!unitNumber && data.unitDetails?.confidence > 0.6) {
+        const parts = [];
+        if (data.unitDetails.block) parts.push(`BLOCO-${data.unitDetails.block}`);
+        if (data.unitDetails.tower) parts.push(`TORRE-${data.unitDetails.tower}`);
+        if (data.unitDetails.type) parts.push(data.unitDetails.type.toUpperCase());
+        if (data.unitDetails.number) parts.push(data.unitDetails.number);
+        unitNumber = standardizeUnitText(parts.join(' '));
+      }
+
+      const processedData = {
+        recipientName: data.recipientName?.value || '',
+        recipientNameConfidence: data.recipientName?.confidence || 0,
+        unitNumber: unitNumber,
+        unitDetails: data.unitDetails || null,
+        carrier: data.carrier?.value || '',
+        carrierConfidence: data.carrier?.confidence || 0,
+        trackingNumber: data.trackingNumber?.value || '',
+        trackingNumberConfidence: data.trackingNumber?.confidence || 0,
+        street: data.street?.value || '',
+        streetConfidence: data.street?.confidence || 0
+      };
+      
+      setAnalyzedData(processedData);
+      setStep('confirm');
+    } catch (err) {
+      toast.error("Erro ao analisar etiqueta");
+    } finally {
+      setLoading(false);
+      setLoadingMessage('');
+    }
+  };
+
+  const savePackage = async () => {
+    setLoading(true);
+    try {
+      let photoUrl = null;
+
+      // 1. Upload da foto
+      if (capturedImage) {
+        try {
+          // Converter base64 para Blob de forma robusta
+          const res = await fetch(capturedImage);
+          const blob = await res.blob();
+          
+          // Nome de arquivo único para evitar colisões
+          const fileName = `package_${Date.now()}_${Math.random().toString(36).substring(7)}.jpg`;
+
+          const { data: uploadData, error: uploadError } = await supabase.storage
+            .from('packages')
+            .upload(fileName, blob, {
+              contentType: 'image/jpeg',
+              cacheControl: '3600',
+              upsert: false
+            });
+          
+          if (uploadError) {
+            console.error("Erro no upload Supabase:", uploadError);
+            // Não interrompe o fluxo se o storage falhar, apenas loga
+          } else {
+            const { data: { publicUrl } } = supabase.storage.from('packages').getPublicUrl(fileName);
+            photoUrl = publicUrl;
+          }
+        } catch (storageErr: any) {
+          console.warn("Storage não configurado ou erro no upload:", storageErr);
+          // Não interrompe o fluxo principal se a foto falhar
+        }
+      }
+
+      // 2. Salvar no Supabase (Sempre persiste primeiro)
+      const qrToken = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+      
+      // Obter o usuário logado para capturar o ID se disponível (opcional)
+      const authUserRes = await supabase.auth.getUser().catch(() => ({ data: { user: null }, error: null }));
+      const authUser = authUserRes.data?.user || null;
+
+      const basePackageData: any = {
+        condominium_id: user.condominium_id,
+        unit_number: analyzedData?.unitNumber || '',
+        unit_type: analyzedData?.unitDetails?.type || null,
+        block: analyzedData?.unitDetails?.block || null,
+        tower: analyzedData?.unitDetails?.tower || null,
+        complement: analyzedData?.unitDetails?.complement || null,
+        carrier: analyzedData?.carrier || '',
+        tracking_code: analyzedData?.trackingNumber || '',
+        photo_url: photoUrl,
+        status: 'received',
+        whatsapp_notified: true,
+        whatsapp_sent: true,
+        notified_at: new Date().toISOString(),
+        recebido_por: (getCurrentPorter(user?.condominium_id) && getCurrentPorter(user?.condominium_id) !== 'Selecione o Porteiro') ? getCurrentPorter(user?.condominium_id) : user.full_name,
+        porter_name: (getCurrentPorter(user?.condominium_id) && getCurrentPorter(user?.condominium_id) !== 'Selecione o Porteiro') ? getCurrentPorter(user?.condominium_id) : user.full_name,
+        notes: notes || null,
+        pickup_token: qrToken,
+        pickup_qr_code: 'active',
+        qr_code_generated_at: new Date().toISOString(),
+        whatsapp_status: 'pending'
+      };
+
+      if (user?.id) {
+        basePackageData.received_by = user.id;
+      }
+      if (authUser?.id) {
+        basePackageData.registered_by = authUser.id;
+      }
+
+      let insertPkgRes = await supabase
+        .from('packages')
+        .insert([basePackageData])
+        .select()
+        .single();
+
+      if (insertPkgRes.error && (insertPkgRes.error.code === '23503' || insertPkgRes.error.message?.includes('foreign key constraint'))) {
+        const fallbackData = { ...basePackageData };
+        delete fallbackData.received_by;
+        delete fallbackData.registered_by;
+        insertPkgRes = await supabase
+          .from('packages')
+          .insert([fallbackData])
+          .select()
+          .single();
+      }
+
+      const { data: pkg, error } = insertPkgRes;
+
+      if (error) throw error;
+
+      // 3. Notificar via WhatsApp
+      let whatsappNotConfigured = false;
+      
+      // Busca o perfil do morador selecionado ou tenta encontrar um se não houver seleção
+      let targetResident = matchingResidents.find(r => r.resident.id === selectedResidentId)?.resident;
+      
+      if (!targetResident && matchingResidents.length === 1) {
+        targetResident = matchingResidents[0].resident;
+      }
+
+      if (targetResident?.phone) {
+        try {
+          const { data: sessionData } = await supabase.auth.getSession().catch(() => ({ data: { session: null } }));
+          const session = sessionData?.session;
+          const response = await fetch('/api/notify-resident', {
+            method: 'POST',
+            headers: { 
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${session?.access_token}`
+            },
+            body: JSON.stringify({
+              phone: targetResident.phone, 
+              residentName: targetResident.full_name,
+              unitNumber: analyzedData.unitNumber,
+              carrier: analyzedData.carrier,
+              trackingNumber: analyzedData.trackingNumber,
+              packageId: pkg.id,
+              condominiumId: user.condominium_id
+            })
+          });
+          
+          const result = await response.json();
+          if (result.notConfigured) {
+            whatsappNotConfigured = true;
+            // Atualiza status para indicar que falta configuração
+            await supabase.from('packages').update({ 
+              whatsapp_status: 'pending_configuration' 
+            }).eq('id', pkg.id);
+          }
+        } catch (notifyErr) {
+          console.warn("Erro ao notificar:", notifyErr);
+        }
+      } else {
+        console.warn("Nenhum morador com telefone encontrado para notificação.");
+        // Se não houver telefone, marca como falha de notificação (sem destinatário)
+        await supabase.from('packages').update({ 
+          whatsapp_status: 'no_recipient' 
+        }).eq('id', pkg.id);
+      }
+
+      if (whatsappNotConfigured) {
+        toast.success("Encomenda salva. WhatsApp ainda não configurado.");
+      } else {
+        toast.success("Encomenda registrada com sucesso!");
+      }
+      
+      setStep('list');
+      setNotes('');
+      setShowNotesOptions(false);
+      fetchPackages();
+    } catch (err: any) {
+      toast.error(err.message || "Erro ao salvar");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const markAsDelivered = async (pkgId: string) => {
+    const pkg = packages.find(p => p.id === pkgId);
+    if (!pkg) return;
+
+    // Obter o usuário logado para capturar o ID se disponível (opcional)
+    const { data: authData } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
+    const authUser = authData?.user;
+    const validDeliveredBy = (authUser?.id && isValidUuid(authUser.id)) 
+      ? authUser.id 
+      : (user?.id && isValidUuid(user.id) ? user.id : null);
+
+    const { error } = await supabase
+      .from('packages')
+      .update({ 
+        status: 'delivered', 
+        delivered_at: new Date().toISOString(),
+        delivered_by: validDeliveredBy,
+        entregue_por: (getCurrentPorter(user?.condominium_id) && getCurrentPorter(user?.condominium_id) !== 'Selecione o Porteiro') ? getCurrentPorter(user?.condominium_id) : user.full_name,
+        delivered_to_name: 'Morador (Manual)'
+      })
+      .eq('id', pkgId);
+    
+    if (!error) {
+      // Log retrieval
+      try {
+        await supabase.from('retrieval_logs').insert([{
+          package_id: pkgId,
+          porter_id: validDeliveredBy,
+          condominium_id: user.condominium_id,
+          delivery_method: 'manual',
+          status: 'success'
+        }]);
+      } catch (logErr) {
+        console.warn('Erro ao salvar retrieval_log:', logErr);
+      }
+
+      toast.success("Entrega confirmada!");
+      fetchPackages();
+    } else {
+      console.error("Erro ao confirmar entrega:", error);
+      toast.error(`Erro ao confirmar entrega: ${error.message}`);
+    }
+  };
+
+  const resendNotification = async (pkg: PackageType) => {
+    setLoading(true);
+    try {
+      const { data: residentProfile } = await supabase
+        .from('profiles')
+        .select('phone, full_name')
+        .eq('unit_number', pkg.unit_number)
+        .eq('condominium_id', user.condominium_id)
+        .eq('role', 'resident')
+        .maybeSingle();
+
+      if (residentProfile?.phone) {
+        const { data: sessionData } = await supabase.auth.getSession().catch(() => ({ data: { session: null } }));
+        const session = sessionData?.session;
+        const response = await fetch('/api/notify-resident', {
+          method: 'POST',
+          headers: { 
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${session?.access_token}`
+          },
+          body: JSON.stringify({
+            phone: residentProfile.phone, 
+            residentName: residentProfile.full_name,
+            unitNumber: pkg.unit_number,
+            carrier: pkg.carrier,
+            trackingNumber: pkg.tracking_code,
+            packageId: pkg.id
+          })
+        });
+
+        const result = await response.json();
+        if (result.notConfigured) {
+          toast.error("WhatsApp ainda não configurado.");
+        } else {
+          toast.success("Notificação reenviada!");
+        }
+        fetchPackages();
+      } else {
+        toast.error("Morador não encontrado");
+      }
+    } catch (err) {
+      toast.error("Erro ao reenviar");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const filteredPackages = packages.filter((p: any) => 
+    (p.moradores?.nome || "").toLowerCase().includes(searchTerm.toLowerCase()) ||
+    p.unit_label?.toLowerCase().includes(searchTerm.toLowerCase())
+  );
+
+  return (
+    <div className="p-4 sm:p-6 max-w-4xl mx-auto">
+      {step === 'list' && (
+        <>
+          <div className="mb-8">
+            <div className="flex justify-between items-center mb-6">
+              <h2 className="text-2xl font-bold text-zinc-900 flex items-center gap-2">
+                <LayoutDashboard className="w-6 h-6 text-emerald-600" />
+                Painel da Portaria
+              </h2>
+              
+              {systemStatus && (
+                <div className="flex items-center gap-3 bg-white p-2 px-3 rounded-2xl border border-zinc-100 shadow-sm">
+                  <div className="flex items-center gap-2">
+                    <div className={`w-2 h-2 rounded-full ${systemStatus.whatsapp.configured ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+                    <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">WhatsApp</span>
+                  </div>
+                  <div className="w-px h-4 bg-zinc-100" />
+                  <div className="flex items-center gap-2">
+                    <div className={`w-2 h-2 rounded-full ${systemStatus.supabase.serviceRole ? 'bg-emerald-500' : 'bg-zinc-300'}`} />
+                    <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Segurança</span>
+                  </div>
                 </div>
               )}
             </div>
-          )}
+            
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+              <button 
+                onClick={startCamera} 
+                className="md:col-span-2 bg-emerald-600 text-white rounded-3xl p-6 flex items-center justify-center gap-4 hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-200 active:scale-95"
+              >
+                <div className="w-12 h-12 bg-white/20 rounded-full flex items-center justify-center">
+                  <Camera className="w-6 h-6" />
+                </div>
+                <div className="text-left">
+                  <p className="text-lg font-bold leading-tight">Registrar Encomenda</p>
+                  <p className="text-emerald-100 text-xs">Abrir câmera e escanear</p>
+                </div>
+              </button>
 
-          {/* TAB 2: FLUXO RECEBER PRISMA */}
-          {activeTab === 'RECEBER' && (
-            <ReceberView
-              prismasEmUso={prismasEmUso}
-              onReceberPrisma={handleReceberPrisma}
-              isLoading={isReceberLoading}
-              onOpenHistorico={(prisma) => setHistoricoPrismaId(prisma.id)}
-            />
-          )}
+              <button 
+                onClick={() => setStep('qr_scan')} 
+                className="md:col-span-2 bg-zinc-900 text-white rounded-3xl p-6 flex items-center justify-center gap-4 hover:bg-zinc-800 transition-all shadow-lg shadow-zinc-200 active:scale-95"
+              >
+                <div className="w-12 h-12 bg-white/10 rounded-full flex items-center justify-center">
+                  <QrCode className="w-6 h-6" />
+                </div>
+                <div className="text-left">
+                  <p className="text-lg font-bold leading-tight">Escanear QR Code</p>
+                  <p className="text-zinc-400 text-xs">Retirada instantânea</p>
+                </div>
+              </button>
 
-          {/* TAB 3: PRISMAS PENDENTES */}
-          {activeTab === 'PENDENTES' && (
-            <PrismasEmAbertoView
-              prismas={prismas}
-              onReceberPrisma={handleReceberPrisma}
-              onRegistrarPendencia={handleRegistrarPendencia}
-              onResolverPendencia={handleResolverPendencia}
-              onOpenHistorico={(prisma) => setHistoricoPrismaId(prisma.id)}
-              usuarioAtual={usuarioAtual}
-              isLoading={isReceberLoading}
-            />
-          )}
+              <button 
+                onClick={() => setStep('residents')} 
+                className="md:col-span-2 bg-white text-zinc-900 border border-zinc-200 rounded-3xl p-6 flex items-center justify-center gap-4 hover:bg-zinc-50 transition-all shadow-sm active:scale-95"
+              >
+                <div className="w-12 h-12 bg-zinc-100 rounded-full flex items-center justify-center">
+                  <Users className="w-6 h-6 text-zinc-600" />
+                </div>
+                <div className="text-left">
+                  <p className="text-lg font-bold leading-tight">Moradores</p>
+                  <p className="text-zinc-500 text-xs">Ver e cadastrar moradores</p>
+                </div>
+              </button>
 
-          {/* TAB 4: BUSCA RÁPIDA */}
-          {activeTab === 'BUSCAR' && (
-            <BuscaView
-              prismas={prismas}
-              movimentacoes={ultimasMovimentacoes}
-              termo={searchTerm}
-              onOpenHistorico={(prisma) => setHistoricoPrismaId(prisma.id)}
-              onOpenHistoricoById={(id) => setHistoricoPrismaId(id)}
-            />
-          )}
-        </div>
+              <Card className="bg-white p-4 flex flex-col justify-center">
+                <p className="text-zinc-500 text-xs font-bold uppercase tracking-wider mb-1">Hoje</p>
+                <p className="text-2xl font-bold text-zinc-900">
+                  {packages.filter(p => {
+                    if (!p.received_at) return false;
+                    try {
+                      return formatDate(p.received_at, 'yyyy-MM-dd') === formatDate(new Date(), 'yyyy-MM-dd');
+                    } catch (e) {
+                      return false;
+                    }
+                  }).length}
+                </p>
+              </Card>
 
-        {/* 4. COMPACT RECENT MOVEMENTS FEED (ALWAYS ACCESSIBLE AT BOTTOM) */}
-        <UltimasMovimentacoes
-          movimentacoes={ultimasMovimentacoes}
-          onOpenHistoricoById={(id) => setHistoricoPrismaId(id)}
-          onOpenAuditoria={() => setIsAuditoriaOpen(true)}
-        />
-      </main>
+              <Card className="bg-white p-4 flex flex-col justify-center">
+                <p className="text-zinc-500 text-xs font-bold uppercase tracking-wider mb-1">Pendentes</p>
+                <p className="text-2xl font-bold text-amber-600">{packages.filter(p => p.status !== 'delivered').length}</p>
+              </Card>
+            </div>
+          </div>
 
-      {/* FOOTER */}
-      <footer className="bg-slate-900 border-t border-slate-800 text-slate-400 py-3 text-center text-xs">
-        <div className="max-w-7xl mx-auto px-4 flex flex-wrap items-center justify-between gap-2">
-          <span>
-            Sistema de Controle de Prismas V1 • {condominioAtual?.nome || 'Condomínio'}
-          </span>
-          <span className="text-[11px] text-slate-400">
-            «Simples na tela. Rápido na operação. Forte no controle. Rastreável na auditoria.»
-          </span>
-        </div>
-      </footer>
+          <div className="space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-4">
+              <div className="flex items-center gap-2">
+                <h3 className="font-bold text-zinc-900">Histórico de Recebimento</h3>
+              </div>
+              <div className="relative w-full sm:max-w-xs">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
+                <input 
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  className="w-full pl-9 pr-4 py-2.5 text-sm rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 bg-white" 
+                  placeholder="Buscar morador ou unidade..." 
+                />
+              </div>
+            </div>
 
-      {/* MODALS */}
-      {/* 1. Entrega Modal */}
-      <EntregaModal
-        prisma={selectedPrismaEntrega}
-        onClose={() => setSelectedPrismaEntrega(null)}
-        onConfirmEntrega={handleConfirmEntrega}
-        isLoading={isSubmittingEntrega}
-        quickHouses={rankingCasas}
-      />
+            {filteredPackages.length === 0 && (
+              <div className="text-center py-12 text-zinc-400 bg-white rounded-2xl border border-dashed border-zinc-200">
+                <Package className="w-12 h-12 mx-auto mb-2 opacity-20" />
+                <p>Nenhuma encomenda registrada</p>
+              </div>
+            )}
 
-      {/* 2. Passagem de Turno Modal */}
-      <PassagemTurnoModal
-        isOpen={isPassagemTurnoOpen}
-        onClose={() => setIsPassagemTurnoOpen(false)}
-        turnoAtivo={turnoAtivo}
-        prismasEmUso={prismasEmUso}
-        usuarios={usuarios}
-        usuarioAtual={usuarioAtual}
-        onConfirmAssumirTurno={handleConfirmAssumirTurno}
-        isLoading={false}
-      />
-
-      {/* 3. Prisma Histórico Modal */}
-      <PrismaHistoricoModal
-        prismaId={historicoPrismaId}
-        onClose={() => setHistoricoPrismaId(null)}
-        usuarioAtual={usuarioAtual}
-        condominioId={condominioAtualId}
-        onUpdateSuccess={() => loadDashboard(false)}
-      />
-
-      {/* 4. Gerenciamento de Prismas (Síndico/Admin) */}
-      <GerenciarPrismasModal
-        isOpen={isGerenciamentoOpen}
-        onClose={() => setIsGerenciamentoOpen(false)}
-        prismas={prismas}
-        condominioId={condominioAtualId}
-        usuarioAtual={usuarioAtual}
-        onUpdateSuccess={() => loadDashboard(false)}
-      />
-
-      {/* 5. Auditoria Completa Modal */}
-      <AuditoriaModal
-        isOpen={isAuditoriaOpen}
-        onClose={() => setIsAuditoriaOpen(false)}
-        condominioId={condominioAtualId}
-      />
-
-      {/* 6. Simulador de Concorrência Multi-Dispositivo */}
-      <ConcorrenciaModal
-        isOpen={isConcorrenciaOpen}
-        onClose={() => setIsConcorrenciaOpen(false)}
-        prismas={prismas}
-        condominioId={condominioAtualId}
-        onSuccess={() => loadDashboard(false)}
-      />
-
-      {/* 7. Configurações do Sistema */}
-      {canAccessConfig && (
-        <ConfiguracoesModal
-          isOpen={isConfiguracoesOpen}
-          onClose={() => setIsConfiguracoesOpen(false)}
-          condominioId={condominioAtualId}
-          usuarioAtual={usuarioAtual}
-          onRefreshData={() => loadDashboard(false)}
-          onOpenHistoricoById={(id) => setHistoricoPrismaId(id)}
-          onOpenAlterarSenha={() => setIsAlterarSenhaOpen(true)}
-          deviceMode={deviceMode}
-          onChangeDeviceMode={handleChangeDeviceMode}
-        />
+            <div className="grid gap-3">
+              {filteredPackages.map((pkg: any) => (
+                <Card key={pkg.package_id} className="flex items-center justify-between p-4 hover:border-emerald-200 transition-colors">
+                  <div className="flex items-center gap-4">
+                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${pkg.status === 'delivered' ? 'bg-zinc-100 text-zinc-400' : 'bg-emerald-50 text-emerald-600'}`}>
+                      <Package className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h4 className="font-bold text-zinc-900 text-sm">{pkg.moradores?.nome || 'Morador'}</h4>
+                        {pkg.status !== 'delivered' && (
+                          <div className="flex items-center gap-1">
+                            {pkg.whatsapp_status === 'sent' && <CheckCircle className="w-3 h-3 text-emerald-500" title="Enviado" />}
+                            {pkg.whatsapp_status === 'failed' && <Bell className="w-3 h-3 text-red-500" title="Falha no envio" />}
+                            {pkg.whatsapp_status === 'delivered' && <CheckCircle className="w-3 h-3 text-blue-500" title="Entregue" />}
+                            {pkg.whatsapp_status === 'read' && <CheckCircle className="w-3 h-3 text-blue-700" title="Lido" />}
+                          </div>
+                        )}
+                      </div>
+                      <p className="text-xs text-zinc-500">
+                        {formatPackageUnit(pkg)} • {pkg.carrier} {pkg.tracking_code && `• ${pkg.tracking_code}`}
+                      </p>
+                      {pkg.notes && (
+                        <div className="mt-1 flex items-start gap-1.5">
+                          <div className="w-1 h-1 rounded-full bg-amber-400 mt-1.5 shrink-0" />
+                          <p className="text-[10px] text-amber-700 italic leading-tight">{pkg.notes}</p>
+                        </div>
+                      )}
+                      <p className="text-[10px] text-zinc-400 mt-1">
+                        Registrado por: {pkg.recebido_por || pkg.porter_name || pkg.registrar?.full_name || 'Desconhecido'} • {formatSafeDateTime(pkg.created_at)}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {pkg.status === 'delivered' ? (
+                      <Badge variant="gray">Entregue</Badge>
+                    ) : (
+                      <>
+                        {pkg.whatsapp_status === 'failed' && (
+                          <Button variant="ghost" size="sm" className="text-xs text-red-600 p-1" onClick={() => resendNotification(pkg)}>
+                            <Plus className="w-3 h-3 rotate-45" /> Reenviar
+                          </Button>
+                        )}
+                        <Button variant="outline" size="sm" className="text-xs py-1 h-8" onClick={() => markAsDelivered(pkg.package_id)}>Entregar</Button>
+                      </>
+                    )}
+                  </div>
+                </Card>
+              ))}
+            </div>
+          </div>
+        </>
       )}
 
-      {/* Modal Alterar Minha Senha (SÍNDICO) */}
-      <AlterarSenhaModal
-        isOpen={isAlterarSenhaOpen}
-        onClose={() => setIsAlterarSenhaOpen(false)}
-        onSuccess={(msg) => showToast(`✅ ${msg}`)}
-      />
+      {step === 'residents' && (
+        <div className="space-y-6">
+          <div className="flex justify-between items-center">
+            <button onClick={() => setStep('list')} className="flex items-center gap-2 text-zinc-500 hover:text-zinc-900 transition-colors">
+              <ArrowLeft className="w-5 h-5" />
+              Voltar ao Painel
+            </button>
+            <div className="flex flex-col gap-2 w-full sm:w-auto items-stretch sm:items-end">
+              <Button onClick={() => { 
+                setEditingResidentId(null); 
+                setResidentFormData({ 
+                  full_name: '', 
+                  unit_number: '', 
+                  unit_type: '',
+                  block: '',
+                  tower: '',
+                  complement: '',
+                  phone: '', 
+                  role: 'resident',
+                  active: true
+                }); 
+                setIsResidentModalOpen(true); 
+              }}>
+                <UserPlus className="w-4 h-4" />
+                Novo Morador
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => setIsImporterOpen(true)}
+                className="flex items-center justify-center gap-2 border-zinc-200 hover:bg-zinc-50 text-zinc-700"
+              >
+                <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+                Importar Planilha
+              </Button>
+            </div>
+          </div>
 
-      {/* 8. Editar Condomínio Modal */}
-      <EditarCondominioModal
-        isOpen={isEditarCondominioOpen}
-        onClose={() => setIsEditarCondominioOpen(false)}
-        condominio={condominioAtual}
-        usuarioAtual={usuarioAtual}
-        onSuccess={(condoAtualizado) => {
-          setCondominioAtual(condoAtualizado);
-          showToast('✅ Informações do condomínio atualizadas com sucesso!');
-          loadDashboard(false);
-        }}
-      />
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
+            <input 
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="w-full pl-10 pr-4 py-3 rounded-2xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 bg-white" 
+              placeholder="Buscar morador..." 
+            />
+          </div>
 
-      {/* 9. Modal de Primeira Execução: Escolha do Modo de Uso do Dispositivo (PC) */}
-      <EscolhaModoDispositivoModal
-        isOpen={isEscolhaModoOpen}
-        onSelectMode={handleSelectDeviceMode}
+          <div className="grid gap-3">
+            {residents.filter(r => r.full_name.toLowerCase().includes(searchTerm.toLowerCase()) || r.unit_number?.includes(searchTerm)).map(res => (
+              <Card key={res.id} className="flex items-center justify-between p-4">
+                <div className="flex items-center gap-4">
+                  <div className="w-10 h-10 bg-zinc-100 rounded-xl flex items-center justify-center text-zinc-500">
+                    <User className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-zinc-900 text-sm">{res.full_name}</h4>
+                    <p className="text-xs text-zinc-500">Unidade {res.unit_number} • {res.phone}</p>
+                  </div>
+                </div>
+                <Button variant="ghost" size="sm" onClick={() => { 
+                  setEditingResidentId(res.id); 
+                  setResidentFormData({ 
+                    full_name: res.full_name, 
+                    unit_number: res.unit_number || '', 
+                    unit_type: res.unit_type || '',
+                    block: res.block || '',
+                    tower: res.tower || '',
+                    complement: res.complement || '',
+                    phone: res.phone || '', 
+                    role: 'resident',
+                    active: res.active ?? true
+                  }); 
+                  setIsResidentModalOpen(true); 
+                }}>
+                  <Edit2 className="w-4 h-4" />
+                </Button>
+              </Card>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {step === 'qr_scan' && (
+        <div className="fixed inset-0 bg-zinc-950 z-50 flex flex-col overflow-hidden">
+          {/* Header */}
+          <div className="p-6 flex justify-between items-center bg-zinc-900/50 backdrop-blur-md border-b border-white/5">
+            <div>
+              <h3 className="text-white text-xl font-bold">Escanear QR Code</h3>
+              <p className="text-zinc-400 text-xs">Aponte a câmera para o código do morador</p>
+            </div>
+            <button 
+              type="button"
+              onClick={async (e) => { 
+                e.preventDefault();
+                await safeStopScanner();
+                setStep('list'); 
+                setQrPackage(null); 
+                setQrScanStatus('idle'); 
+                setShowManualInput(false); 
+              }}
+              className="p-2 bg-white/10 hover:bg-white/20 rounded-full text-white transition-colors"
+            >
+              <X className="w-6 h-6" />
+            </button>
+          </div>
+
+          <div className="flex-1 relative flex flex-col items-center justify-center p-6">
+            <AnimatePresence mode="wait">
+              {!qrPackage && qrScanStatus !== 'success' && (
+                <motion.div 
+                  key="scanner"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="w-full max-w-sm flex flex-col items-center"
+                >
+                  <div className="relative w-full aspect-square bg-zinc-900 rounded-3xl overflow-hidden shadow-2xl border border-white/10">
+                    <div id="qr-reader" className="w-full h-full"></div>
+                    
+                    {/* Scanner Frame Overlay */}
+                    <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+                      <div className="w-64 h-64 relative">
+                        <div className="absolute top-0 left-0 w-8 h-8 border-t-4 border-l-4 border-emerald-500 rounded-tl-lg"></div>
+                        <div className="absolute top-0 right-0 w-8 h-8 border-t-4 border-r-4 border-emerald-500 rounded-tr-lg"></div>
+                        <div className="absolute bottom-0 left-0 w-8 h-8 border-b-4 border-l-4 border-emerald-500 rounded-bl-lg"></div>
+                        <div className="absolute bottom-0 right-0 w-8 h-8 border-b-4 border-r-4 border-emerald-500 rounded-br-lg"></div>
+                        
+                        {/* Scanning Line Animation */}
+                        <motion.div 
+                          animate={{ top: ['0%', '100%', '0%'] }}
+                          transition={{ duration: 3, repeat: Infinity, ease: "linear" }}
+                          className="absolute left-0 right-0 h-0.5 bg-emerald-500/50 shadow-[0_0_15px_rgba(16,185,129,0.5)]"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Validating Overlay */}
+                    {qrScanStatus === 'validating' && (
+                      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex flex-col items-center justify-center text-white">
+                        <Loader2 className="w-12 h-12 animate-spin text-emerald-500 mb-4" />
+                        <p className="font-bold">Validando código...</p>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="mt-8 w-full space-y-4">
+                    {!showManualInput ? (
+                      <button 
+                        onClick={() => setShowManualInput(true)}
+                        className="w-full py-4 bg-white/5 hover:bg-white/10 text-white rounded-2xl flex items-center justify-center gap-2 transition-all border border-white/10"
+                      >
+                        <Keyboard className="w-5 h-5" />
+                        Digitar código manualmente
+                      </button>
+                    ) : (
+                      <motion.div 
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="bg-zinc-900 p-4 rounded-2xl border border-white/10 w-full"
+                      >
+                        <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-2 block">Código do Token</label>
+                        <div className="flex gap-2">
+                          <input 
+                            value={manualToken}
+                            onChange={(e) => setManualToken(e.target.value)}
+                            placeholder="Ex: abc123xyz"
+                            className="flex-1 bg-zinc-800 border border-white/5 rounded-xl px-4 py-3 text-white outline-none focus:ring-2 focus:ring-emerald-500"
+                          />
+                          <button 
+                            onClick={handleManualToken}
+                            disabled={!manualToken.trim() || loading}
+                            className="bg-emerald-600 text-white p-3 rounded-xl disabled:opacity-50"
+                          >
+                            <Check className="w-6 h-6" />
+                          </button>
+                        </div>
+                        <button 
+                          onClick={() => setShowManualInput(false)}
+                          className="mt-3 text-zinc-500 text-xs hover:text-white"
+                        >
+                          Voltar para câmera
+                        </button>
+                      </motion.div>
+                    )}
+                  </div>
+                </motion.div>
+              )}
+
+              {qrPackage && qrScanStatus !== 'success' && (
+                <motion.div 
+                  key="confirmation"
+                  initial={{ opacity: 0, scale: 0.9 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  className="w-full max-w-sm"
+                >
+                  <Card className="p-8 text-center bg-white border-none shadow-2xl relative overflow-hidden">
+                    <div className="absolute top-0 left-0 right-0 h-2 bg-emerald-500" />
+                    
+                    <div className="w-20 h-20 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-6">
+                      <CheckCircle className="w-10 h-10" />
+                    </div>
+                    
+                    <h3 className="text-2xl font-bold text-zinc-900 mb-1">Encomenda Localizada!</h3>
+                    <p className="text-zinc-500 text-sm mb-8">Confirme os dados antes de entregar.</p>
+
+                    <div className="text-left space-y-4 mb-8">
+                      <div className="bg-zinc-50 p-4 rounded-2xl border border-zinc-100">
+                        <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Morador</p>
+                        <p className="text-lg font-bold text-zinc-900">{qrPackage.moradores?.nome || 'Morador'}</p>
+                        <p className="text-sm text-zinc-500">{formatPackageUnit(qrPackage)}</p>
+                      </div>
+
+                      <div className="mt-2 space-y-3">
+                        <div className="bg-zinc-50 p-4 rounded-2xl border border-zinc-100">
+                          <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Recebido em</p>
+                          <p className="text-sm font-bold text-zinc-900">{formatSafeDateTime(qrPackage.created_at)}</p>
+                        </div>
+                      </div>
+
+                      <div className="mt-2 space-y-2">
+                        {qrPackage.tracking_code && (
+                          <div className="bg-zinc-50 p-4 rounded-2xl border border-zinc-100">
+                            <p className="text-[10px] font-bold text-zinc-400 tracking-widest uppercase mb-1">Código da etiqueta</p>
+                            <p className="text-sm font-bold text-zinc-900">{qrPackage.tracking_code}</p>
+                          </div>
+                        )}
+                        <div className="bg-zinc-50 p-4 rounded-2xl border border-zinc-100">
+                          <p className="text-[10px] font-bold text-zinc-400 tracking-widest uppercase mb-1">Código de retirada</p>
+                          <p className="text-sm font-bold text-zinc-900">{qrPackage.pickup_code || 'Sem código'}</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col gap-3">
+                      <Button 
+                        className="w-full py-5 rounded-2xl font-bold text-lg shadow-xl shadow-emerald-100" 
+                        onClick={() => confirmQrRetrieved()} 
+                        loading={loading}
+                      >
+                        Confirmar Retirada
+                      </Button>
+                      
+                      <button 
+                        onClick={() => { setQrPackage(null); setQrScanStatus('idle'); setDeliveryPhoto(null); }}
+                        className="w-full py-4 text-zinc-400 hover:text-zinc-600 font-bold transition-colors"
+                      >
+                        Escanear outro
+                      </button>
+                    </div>
+                  </Card>
+                </motion.div>
+              )}
+
+              {qrScanStatus === 'error' && (
+                <motion.div 
+                  key="error"
+                  initial={{ opacity: 0, scale: 0.9 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  className="w-full max-w-sm"
+                >
+                  <Card className="p-8 text-center bg-white border-none shadow-2xl">
+                    <div className="w-20 h-20 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto mb-6">
+                      <AlertTriangle className="w-10 h-10" />
+                    </div>
+                    <h3 className="text-2xl font-bold text-zinc-900 mb-1">Ops! Algo deu errado</h3>
+                    <p className="text-zinc-500 text-sm mb-8">O QR Code é inválido, expirou ou já foi utilizado.</p>
+                    <Button 
+                      className="w-full py-4 rounded-2xl font-bold bg-zinc-900 hover:bg-zinc-800" 
+                      onClick={() => { setQrScanStatus('idle'); setQrPackage(null); }}
+                    >
+                      Tentar Novamente
+                    </Button>
+                  </Card>
+                </motion.div>
+              )}
+
+              {qrScanStatus === 'success' && (
+                <motion.div 
+                  key="success"
+                  initial={{ opacity: 0, scale: 0.5 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  className="flex flex-col items-center justify-center text-center"
+                >
+                  <div className="w-32 h-32 bg-emerald-500 rounded-full flex items-center justify-center shadow-[0_0_50px_rgba(16,185,129,0.5)] mb-8">
+                    <Check className="w-20 h-20 text-white" />
+                  </div>
+                  <h3 className="text-3xl font-bold text-white mb-2">Sucesso!</h3>
+                  <p className="text-emerald-400 font-medium">Retirada confirmada com sucesso</p>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+
+          {/* Recent History Footer */}
+          {!qrPackage && qrScanStatus === 'idle' && recentRetrievals.length > 0 && (
+            <motion.div 
+              initial={{ y: 100 }}
+              animate={{ y: 0 }}
+              className="bg-zinc-900/80 backdrop-blur-xl p-6 border-t border-white/5 max-h-64 overflow-y-auto"
+            >
+              <h4 className="text-zinc-400 text-[10px] font-bold uppercase tracking-widest mb-4 flex items-center gap-2">
+                <History className="w-3 h-3" />
+                Retiradas Recentes
+              </h4>
+              <div className="space-y-3">
+                {recentRetrievals.map(pkg => (
+                  <div key={pkg.id} className="flex items-center justify-between bg-white/5 p-3 rounded-xl border border-white/5">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 bg-emerald-500/10 text-emerald-500 rounded-lg flex items-center justify-center">
+                        <Check className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <p className="text-sm font-bold text-white">{pkg.moradores?.nome || 'Morador'}</p>
+                        <p className="text-[10px] text-zinc-500">{formatPackageUnit(pkg)} • {formatSafeDateTime(pkg.delivered_at)}</p>
+                      </div>
+                    </div>
+                    <Badge variant="emerald">OK</Badge>
+                  </div>
+                ))}
+              </div>
+            </motion.div>
+          )}
+        </div>
+      )}
+
+      {step === 'camera' && (
+        <div className="fixed inset-0 bg-black z-50 flex flex-col">
+          <div className="absolute top-6 left-6 z-10">
+            <Button variant="ghost" className="text-white hover:bg-white/10" onClick={() => setStep('list')}>
+              Cancelar
+            </Button>
+          </div>
+          
+          <div className="relative flex-1 flex items-center justify-center overflow-hidden">
+            <video ref={videoRef} autoPlay playsInline className="absolute inset-0 w-full h-full object-cover" />
+            
+            {/* Visual Guide Overlay */}
+            <div className="relative z-10 w-72 h-48 border-2 border-white/50 rounded-2xl flex items-center justify-center">
+              <div className="absolute top-0 left-0 w-8 h-8 border-t-4 border-l-4 border-emerald-500 rounded-tl-lg"></div>
+              <div className="absolute top-0 right-0 w-8 h-8 border-t-4 border-r-4 border-emerald-500 rounded-tr-lg"></div>
+              <div className="absolute bottom-0 left-0 w-8 h-8 border-b-4 border-l-4 border-emerald-500 rounded-bl-lg"></div>
+              <div className="absolute bottom-0 right-0 w-8 h-8 border-b-4 border-r-4 border-emerald-500 rounded-br-lg"></div>
+              <p className="text-white/80 text-xs font-bold uppercase tracking-widest text-center px-4">Enquadre a etiqueta aqui</p>
+            </div>
+          </div>
+
+          <canvas ref={canvasRef} className="hidden" />
+          
+          <div className="p-10 flex justify-center bg-zinc-900">
+            <button 
+              onClick={capture} 
+              disabled={loading}
+              className="w-20 h-20 rounded-full border-4 border-white flex items-center justify-center active:scale-90 transition-transform disabled:opacity-50"
+            >
+              <div className="w-16 h-16 bg-white rounded-full shadow-lg" />
+            </button>
+          </div>
+
+          {loading && (
+            <div className="absolute inset-0 bg-black/60 backdrop-blur-sm z-20 flex flex-col items-center justify-center text-white">
+              <Loader2 className="w-12 h-12 animate-spin text-emerald-500 mb-4" />
+              <p className="text-lg font-bold animate-pulse">{loadingMessage || 'Processando...'}</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {step === 'confirm' && (
+        <div className="max-w-md mx-auto animate-in fade-in slide-in-from-bottom-4 duration-300">
+          <Card className="overflow-hidden p-0 border-none shadow-2xl">
+            <div className="bg-emerald-600 p-6 text-white">
+              <h3 className="text-xl font-bold">Confirmar Dados</h3>
+              <p className="text-emerald-100 text-sm">Revise as informações da etiqueta</p>
+            </div>
+            
+            <div className="p-6 space-y-6">
+              {capturedImage && (
+                <div className="relative group">
+                  <img src={capturedImage} className="w-full rounded-2xl border border-zinc-100 h-40 object-cover" />
+                  <button 
+                    onClick={() => setStep('camera')}
+                    className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white font-bold rounded-2xl"
+                  >
+                    Tirar outra foto
+                  </button>
+                </div>
+              )}
+              
+              <div className="space-y-4">
+                <div className="relative">
+                  <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest absolute left-3 top-2">Destinatário</label>
+                  <input 
+                    value={analyzedData?.recipientName || ''} 
+                    onChange={(e) => setAnalyzedData({...analyzedData, recipientName: e.target.value})}
+                    className={`w-full pt-7 pb-3 px-3 border rounded-2xl focus:ring-2 focus:ring-emerald-500 outline-none transition-all font-bold text-zinc-900 ${analyzedData?.recipientNameConfidence < 0.7 ? 'bg-amber-50 border-amber-200' : 'border-zinc-200'}`} 
+                  />
+                  {analyzedData?.recipientNameConfidence < 0.7 && (
+                    <span className="absolute right-3 top-2 text-[10px] font-bold text-amber-600 uppercase">Verificar</span>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="relative">
+                    <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest absolute left-3 top-2">Unidade</label>
+                    <input 
+                      value={analyzedData?.unitNumber || ''} 
+                      onChange={(e) => setAnalyzedData({...analyzedData, unitNumber: e.target.value})}
+                      className={`w-full pt-7 pb-3 px-3 border rounded-2xl focus:ring-2 focus:ring-emerald-500 outline-none transition-all font-bold text-zinc-900 ${analyzedData?.unitNumberConfidence < 0.8 ? 'bg-amber-50 border-amber-200' : 'border-zinc-200'}`} 
+                      placeholder="Ex: 402"
+                    />
+                    {analyzedData?.unitNumberConfidence < 0.8 && (
+                      <span className="absolute right-3 top-2 text-[10px] font-bold text-amber-600 uppercase">?</span>
+                    )}
+                  </div>
+                  <div className="relative">
+                    <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest absolute left-3 top-2">Transportadora</label>
+                    <input 
+                      value={analyzedData?.carrier || ''} 
+                      onChange={(e) => setAnalyzedData({...analyzedData, carrier: e.target.value})}
+                      className="w-full pt-7 pb-3 px-3 border border-zinc-200 rounded-2xl focus:ring-2 focus:ring-emerald-500 outline-none font-bold text-zinc-900" 
+                    />
+                  </div>
+                </div>
+
+                <button 
+                  onClick={() => setShowAdvancedUnit(!showAdvancedUnit)}
+                  className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest flex items-center gap-1 hover:text-emerald-700 transition-colors"
+                >
+                  {showAdvancedUnit ? 'Ocultar detalhes da unidade' : 'Ver detalhes da unidade'}
+                  <Plus className={`w-3 h-3 transition-transform ${showAdvancedUnit ? 'rotate-45' : ''}`} />
+                </button>
+
+                {showAdvancedUnit && (
+                  <div className="grid grid-cols-2 gap-3 p-4 bg-zinc-50 rounded-2xl border border-zinc-100 animate-in fade-in slide-in-from-top-2 duration-200">
+                    <div className="relative">
+                      <label className="text-[8px] font-bold text-zinc-400 uppercase tracking-widest absolute left-2 top-1">Tipo</label>
+                      <input 
+                        value={analyzedData?.unitDetails?.type || ''} 
+                        onChange={(e) => setAnalyzedData({...analyzedData, unitDetails: {...analyzedData.unitDetails, type: e.target.value}})}
+                        className="w-full pt-4 pb-1 px-2 border-b border-zinc-200 bg-transparent outline-none text-xs font-bold text-zinc-900"
+                        placeholder="Ex: AP"
+                      />
+                    </div>
+                    <div className="relative">
+                      <label className="text-[8px] font-bold text-zinc-400 uppercase tracking-widest absolute left-2 top-1">Número</label>
+                      <input 
+                        value={analyzedData?.unitDetails?.number || ''} 
+                        onChange={(e) => setAnalyzedData({...analyzedData, unitDetails: {...analyzedData.unitDetails, number: e.target.value}})}
+                        className="w-full pt-4 pb-1 px-2 border-b border-zinc-200 bg-transparent outline-none text-xs font-bold text-zinc-900"
+                        placeholder="Ex: 101"
+                      />
+                    </div>
+                    <div className="relative">
+                      <label className="text-[8px] font-bold text-zinc-400 uppercase tracking-widest absolute left-2 top-1">Bloco</label>
+                      <input 
+                        value={analyzedData?.unitDetails?.block || ''} 
+                        onChange={(e) => setAnalyzedData({...analyzedData, unitDetails: {...analyzedData.unitDetails, block: e.target.value}})}
+                        className="w-full pt-4 pb-1 px-2 border-b border-zinc-200 bg-transparent outline-none text-xs font-bold text-zinc-900"
+                      />
+                    </div>
+                    <div className="relative">
+                      <label className="text-[8px] font-bold text-zinc-400 uppercase tracking-widest absolute left-2 top-1">Torre</label>
+                      <input 
+                        value={analyzedData?.unitDetails?.tower || ''} 
+                        onChange={(e) => setAnalyzedData({...analyzedData, unitDetails: {...analyzedData.unitDetails, tower: e.target.value}})}
+                        className="w-full pt-4 pb-1 px-2 border-b border-zinc-200 bg-transparent outline-none text-xs font-bold text-zinc-900"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                <div className="relative">
+                  <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest absolute left-3 top-2">Rastreio (Opcional)</label>
+                  <input 
+                    value={analyzedData?.trackingNumber || ''} 
+                    onChange={(e) => setAnalyzedData({...analyzedData, trackingNumber: e.target.value})}
+                    className="w-full pt-7 pb-3 px-3 border border-zinc-200 rounded-2xl focus:ring-2 focus:ring-emerald-500 outline-none font-bold text-zinc-900" 
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest block px-1">Observações (Opcional)</label>
+                  
+                  {!showNotesOptions ? (
+                    <button 
+                      onClick={() => setShowNotesOptions(true)}
+                      className={`w-full p-4 rounded-2xl border border-dashed flex items-center justify-between transition-all ${
+                        notes ? 'border-amber-200 bg-amber-50 text-amber-700' : 'border-zinc-200 text-zinc-500 hover:bg-zinc-50'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2">
+                        <AlertTriangle className={`w-4 h-4 ${notes ? 'text-amber-500' : 'text-zinc-400'}`} />
+                        <span className="text-sm font-bold">{notes || 'Adicionar observação rápida'}</span>
+                      </div>
+                      <Plus className="w-4 h-4" />
+                    </button>
+                  ) : (
+                    <div className="bg-zinc-50 rounded-2xl border border-zinc-100 p-2 grid grid-cols-1 gap-1 animate-in fade-in slide-in-from-top-2 duration-200">
+                      {[
+                        'Encomenda frágil',
+                        'Volume grande',
+                        'Caixa danificada',
+                        'Recebido com avaria',
+                        'Retirar com documento',
+                        'Entregar depois',
+                        'Entrega urgente'
+                      ].map((option) => (
+                        <button
+                          key={option}
+                          onClick={() => {
+                            setNotes(notes === option ? '' : option);
+                            setShowNotesOptions(false);
+                          }}
+                          className={`w-full p-3 rounded-xl text-left text-xs font-bold transition-all flex items-center justify-between ${
+                            notes === option 
+                              ? 'bg-amber-100 text-amber-700' 
+                              : 'hover:bg-white text-zinc-600'
+                          }`}
+                        >
+                          {option}
+                          {notes === option && <Check className="w-3 h-3" />}
+                        </button>
+                      ))}
+                      <button 
+                        onClick={() => setShowNotesOptions(false)}
+                        className="w-full p-2 text-[10px] font-bold text-zinc-400 uppercase tracking-widest hover:text-zinc-600 transition-colors mt-1"
+                      >
+                        Fechar lista
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Resident Selection */}
+                <div className="space-y-3 pt-2">
+                  <div className="flex justify-between items-center">
+                    <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Morador Destinatário</label>
+                    {matchingResidents.length > 0 && (
+                      <span className="text-[10px] font-bold text-emerald-600 uppercase">
+                        {matchingResidents.length} encontrado(s)
+                      </span>
+                    )}
+                  </div>
+                  
+                  {matchingResidents.length > 0 ? (
+                    <div className="space-y-2">
+                      {matchingResidents.slice(0, 3).map(({ resident, score }) => (
+                        <button
+                          key={resident.id}
+                          onClick={() => setSelectedResidentId(resident.id)}
+                          className={`w-full p-4 rounded-2xl border text-left transition-all flex items-center justify-between group ${
+                            selectedResidentId === resident.id 
+                              ? 'border-emerald-500 bg-emerald-50 ring-1 ring-emerald-500' 
+                              : 'border-zinc-100 bg-zinc-50 hover:bg-zinc-100'
+                          }`}
+                        >
+                          <div className="flex-1">
+                            <div className="flex items-center gap-2 mb-1">
+                              <p className="text-sm font-bold text-zinc-900">{resident.full_name}</p>
+                              {score >= 180 && (
+                                <span className="bg-emerald-100 text-emerald-700 text-[8px] px-1.5 py-0.5 rounded-full font-bold uppercase tracking-wider">Alta Confiança</span>
+                              )}
+                              {score >= 100 && score < 180 && (
+                                <span className="bg-blue-100 text-blue-700 text-[8px] px-1.5 py-0.5 rounded-full font-bold uppercase tracking-wider">Média</span>
+                              )}
+                              {score < 100 && (
+                                <span className="bg-amber-100 text-amber-700 text-[8px] px-1.5 py-0.5 rounded-full font-bold uppercase tracking-wider">Baixa</span>
+                              )}
+                            </div>
+                            <p className="text-[10px] text-zinc-500">
+                              Unidade: {resident.unit} {resident.phone ? `• ${resident.phone}` : '• Sem telefone'}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <div className="text-right hidden group-hover:block">
+                              <p className="text-[8px] text-zinc-400 font-bold uppercase">Score</p>
+                              <p className="text-[10px] font-bold text-zinc-600">{Math.round(score)}</p>
+                            </div>
+                            {selectedResidentId === resident.id && (
+                              <CheckCircle className="w-5 h-5 text-emerald-600" />
+                            )}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  ) : analyzedData?.unitNumber ? (
+                    <div className="p-4 rounded-2xl bg-amber-50 border border-amber-100 text-amber-700 text-xs flex items-center gap-3">
+                      <AlertTriangle className="w-5 h-5 shrink-0" />
+                      <p>Nenhum morador cadastrado para a unidade {analyzedData.unitNumber}.</p>
+                    </div>
+                  ) : (
+                    <div className="p-4 rounded-2xl bg-zinc-50 border border-zinc-100 text-zinc-500 text-xs text-center">
+                      Informe a unidade para buscar moradores.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-3">
+                <div className="px-1">
+                  {systemStatus?.whatsapp.configured ? (
+                    <div className="flex items-center gap-2 text-[10px] font-bold text-emerald-600 uppercase mb-1">
+                      <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                      WhatsApp Ativo
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 text-[10px] font-bold text-amber-600 uppercase mb-1">
+                      <div className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                      WhatsApp não configurado (Apenas salvar)
+                    </div>
+                  )}
+                </div>
+                <Button 
+                  className="w-full py-4 rounded-2xl text-lg font-bold shadow-lg shadow-emerald-100" 
+                  onClick={savePackage} 
+                  loading={loading}
+                  disabled={matchingResidents.length > 1 && !selectedResidentId}
+                >
+                  {matchingResidents.length > 1 && !selectedResidentId ? 'Selecione um morador' : 'Salvar e Notificar'}
+                </Button>
+                <Button 
+                  variant="ghost" 
+                  className="w-full" 
+                  onClick={() => {
+                    setStep('list');
+                    setShowNotesOptions(false);
+                  }}
+                  disabled={loading}
+                >
+                  Cancelar
+                </Button>
+              </div>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      <Modal 
+        isOpen={isResidentModalOpen} 
+        onClose={() => setIsResidentModalOpen(false)} 
+        title={editingResidentId ? "Editar Morador" : "Cadastrar Morador"}
+      >
+        <form onSubmit={handleSaveResident} className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-zinc-700 mb-1">Nome Completo</label>
+            <input 
+              required
+              value={residentFormData.full_name}
+              onChange={(e) => setResidentFormData({...residentFormData, full_name: e.target.value})}
+              className="w-full px-4 py-2 rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500"
+              placeholder="Ex: João Silva"
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-zinc-700 mb-1">Unidade (Identificador)</label>
+              <input 
+                value={residentFormData.unit_number}
+                onChange={(e) => setResidentFormData({...residentFormData, unit_number: e.target.value})}
+                className="w-full px-4 py-2 rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 bg-zinc-50 font-semibold"
+                placeholder="Gerado automaticamente..."
+              />
+              <p className="text-[9px] text-zinc-400 mt-1 px-1 italic">Este campo é usado para buscas e notificações.</p>
+            </div>
+
+            <div className="p-4 bg-zinc-50 rounded-2xl border border-zinc-100 space-y-4 col-span-2">
+              <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Detalhes da Unidade (Opcional)</p>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-[10px] font-medium text-zinc-500 mb-1">Tipo</label>
+                  <input 
+                    value={residentFormData.unit_type || ''}
+                    onChange={(e) => setResidentFormData({...residentFormData, unit_type: e.target.value})}
+                    className="w-full px-3 py-2 text-sm rounded-lg border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500"
+                    placeholder="Ex: AP, Casa"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-medium text-zinc-500 mb-1">Bloco</label>
+                  <input 
+                    value={residentFormData.block || ''}
+                    onChange={(e) => setResidentFormData({...residentFormData, block: e.target.value})}
+                    className="w-full px-3 py-2 text-sm rounded-lg border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-medium text-zinc-500 mb-1">Torre</label>
+                  <input 
+                    value={residentFormData.tower || ''}
+                    onChange={(e) => setResidentFormData({...residentFormData, tower: e.target.value})}
+                    className="w-full px-3 py-2 text-sm rounded-lg border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-zinc-700 mb-1">Telefone (WhatsApp)</label>
+              <input 
+                required
+                value={residentFormData.phone}
+                onChange={(e) => setResidentFormData({...residentFormData, phone: e.target.value})}
+                className="w-full px-4 py-2 rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500"
+                placeholder="5511999999999"
+              />
+            </div>
+          </div>
+          <Button type="submit" className="w-full py-3" loading={loading}>
+            {editingResidentId ? 'Salvar Alterações' : 'Cadastrar Morador'}
+          </Button>
+        </form>
+      </Modal>
+
+      <ResidentImporterModal
+        isOpen={isImporterOpen}
+        onClose={() => setIsImporterOpen(false)}
+        user={user}
+        onImportComplete={fetchResidents}
       />
     </div>
   );
-}
+};
+
+const ResidentDashboard = ({ user }: { user: Profile }) => {
+  const [packages, setPackages] = useState<PackageType[]>([]);
+  const [selectedPkg, setSelectedPkg] = useState<PackageType | null>(null);
+
+  useEffect(() => {
+    const fetchMyPackages = async () => {
+      const { data } = await supabase
+        .from('packages')
+        .select('*')
+        .eq('unit_number', user.unidade)
+        .eq('condominium_id', user.condominium_id)
+        .order('received_at', { ascending: false });
+      if (data) setPackages(data);
+    };
+    fetchMyPackages();
+  }, [user.unidade]);
+
+  return (
+    <div className="p-6 max-w-2xl mx-auto">
+      <div className="mb-8">
+        <h2 className="text-2xl font-bold text-zinc-900">Olá, {user.full_name.split(' ')[0]}!</h2>
+        <p className="text-zinc-500">Acompanhe suas encomendas da Unidade {user.unidade}</p>
+      </div>
+
+      <div className="space-y-4">
+        {packages.length === 0 && (
+          <div className="text-center py-12 text-zinc-400 bg-white rounded-2xl border border-dashed border-zinc-200">
+            <Package className="w-12 h-12 mx-auto mb-2 opacity-20" />
+            <p>Nenhuma encomenda encontrada</p>
+          </div>
+        )}
+        {packages.map(pkg => (
+          <Card key={pkg.id} className={`flex items-center justify-between p-4 ${pkg.status !== 'delivered' ? 'cursor-pointer hover:border-emerald-200' : ''}`} onClick={() => pkg.status !== 'delivered' && setSelectedPkg(pkg)}>
+            <div className="flex items-center gap-4">
+              <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${pkg.status === 'delivered' ? 'bg-zinc-100 text-zinc-400' : 'bg-emerald-100 text-emerald-600'}`}>
+                <Package className="w-5 h-5" />
+              </div>
+              <div>
+                <p className="font-semibold text-zinc-900">{pkg.carrier}</p>
+                <p className="text-xs text-zinc-500">
+                  {pkg.received_at ? formatDate(pkg.received_at, "dd/MM 'às' HH:mm", { locale: ptBR }) : 'Data desconhecida'}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              {pkg.status !== 'delivered' && pkg.pickup_token && (
+                <div className="w-8 h-8 bg-zinc-100 rounded-lg flex items-center justify-center text-zinc-600">
+                  <QrCode className="w-5 h-5" />
+                </div>
+              )}
+              <Badge variant={pkg.status === 'delivered' ? 'gray' : 'emerald'}>
+                {pkg.status === 'delivered' ? 'Retirado' : 'Na Portaria'}
+              </Badge>
+            </div>
+          </Card>
+        ))}
+      </div>
+
+      {selectedPkg && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-6 backdrop-blur-sm animate-in fade-in duration-300">
+          <Card className="max-w-sm w-full p-8 text-center animate-in zoom-in-95 duration-300">
+            <h3 className="text-xl font-bold mb-2">QR Code de Retirada</h3>
+            <p className="text-zinc-500 text-sm mb-6">Apresente este código na portaria para retirar sua encomenda.</p>
+            
+            <div className="bg-white p-4 rounded-2xl border-2 border-zinc-100 inline-block mb-6">
+              <QRCodeSVG value={selectedPkg.pickup_token || ''} size={200} />
+            </div>
+
+            <div className="text-left bg-zinc-50 p-4 rounded-xl mb-6">
+              <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Detalhes</p>
+              <p className="text-sm font-bold text-zinc-900">{selectedPkg.carrier}</p>
+              <p className="text-xs text-zinc-500">Recebido em {formatDate(selectedPkg.received_at, "dd/MM 'às' HH:mm", { locale: ptBR })}</p>
+            </div>
+
+            <Button className="w-full py-4 rounded-xl font-bold" onClick={() => setSelectedPkg(null)}>
+              Fechar
+            </Button>
+          </Card>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const SindicoDashboard = ({ user, onLogout, onUpdateUser }: { user: Profile, onLogout: () => void, onUpdateUser: (user: Profile) => void }) => {
+  return <SyndicPanel user={user} onLogout={onLogout} onUpdateUser={onUpdateUser} />;
+};
+
+// --- Main App ---
+
+const isValidUuid = (id?: string | null): boolean => {
+  if (!id) return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+};
 
 export default function App() {
+  const [user, setUser] = useState<Profile | null>(null);
+  const [loading, setLoading] = useState(true);
+  const location = useLocation();
+
+  useEffect(() => {
+    console.log('[PORTARIA-DEBUG] APP MOUNT', {
+      href: window.location.href,
+      pathname: window.location.pathname,
+      hasToken: !!localStorage.getItem('encomendas_portaria_token')
+    });
+
+    const checkUser = async () => {
+      console.log('[PORTARIA-DEBUG] CHECKUSER START');
+      try {
+        const { data, error: sessionError } = await supabase.auth.getSession().catch((err) => {
+          return { data: { session: null }, error: err };
+        });
+        
+        console.log('[PORTARIA-DEBUG] GET SESSION', {
+          hasSession: !!data?.session,
+          hasUser: !!data?.session?.user,
+          error: sessionError ? sessionError.message : null
+        });
+
+        if (sessionError) {
+          const msg = sessionError.message || '';
+          if (
+            msg.includes('Invalid Refresh Token') ||
+            msg.includes('Refresh Token Not Found') ||
+            msg.includes('refresh_token_not_found')
+          ) {
+            console.warn('[App] Refresh token inválido na inicialização. Limpando sessão local.');
+            clearSupabaseStorage();
+            await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+          }
+        }
+
+        const session = data?.session;
+        if (session && session.user) {
+          const { data: profile } = await supabase
+            .from('profiles')
+            .select('*')
+            .eq('id', session.user.id)
+            .maybeSingle();
+          
+          if (profile) {
+            if (profile.active === false) {
+              clearSupabaseStorage();
+              await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+              console.log('[PORTARIA-DEBUG] SET USER NULL (ORIGIN: INACTIVE_PROFILE)');
+              setUser(null);
+            } else {
+              console.log('[PORTARIA-DEBUG] SET SUPABASE USER (ORIGIN: AUTH_PROFILE)');
+              setUser(profile);
+            }
+          } else {
+            // Sessão ativa mas sem perfil? Desloga por segurança
+            clearSupabaseStorage();
+            await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+            console.log('[PORTARIA-DEBUG] SET USER NULL (ORIGIN: NO_PROFILE_FOUND)');
+            setUser(null);
+          }
+        } else {
+          // Sem sessão Auth tradicional do Supabase
+          // Verificar se existe sessão virtual da Portaria salva no localStorage
+          const portariaToken = localStorage.getItem('encomendas_portaria_token');
+          console.log('[PORTARIA-DEBUG] PORTARIA TOKEN', portariaToken ? 'PRESENTE' : 'AUSENTE');
+
+          if (portariaToken) {
+            try {
+              console.log('[PORTARIA-DEBUG] RESTORE RPC START');
+              const { data: rpcData, error: rpcError } = await supabase.rpc('rpc_restore_portaria_session', {
+                p_token: portariaToken
+              });
+
+              console.log('[PORTARIA-DEBUG] RESTORE RPC RESULT', {
+                success: !rpcError,
+                error: rpcError ? rpcError.message : null,
+                recordsCount: Array.isArray(rpcData) ? rpcData.length : (rpcData ? 1 : 0)
+              });
+
+              if (rpcError) {
+                console.warn('[App] Erro de rede/RPC ao restaurar sessão da portaria (token preservado):', rpcError);
+                console.log('[PORTARIA-DEBUG] SET USER NULL (ORIGIN: RPC_ERROR)');
+                setUser(null);
+              } else {
+                const setting = Array.isArray(rpcData) ? rpcData[0] : rpcData;
+                if (setting && setting.condominium_id) {
+                  const { data: condo } = await supabase
+                    .from('condominiums')
+                    .select('*')
+                    .eq('id', setting.condominium_id)
+                    .maybeSingle();
+
+                  if (condo && condo.active === false) {
+                    console.warn('[App] Condomínio inativo. Desativando sessão da portaria.');
+                    localStorage.removeItem('encomendas_portaria_token');
+                    console.log('[PORTARIA-DEBUG] SET USER NULL (ORIGIN: INACTIVE_CONDO)');
+                    setUser(null);
+                  } else {
+                    const portariaProfile: Profile = {
+                      id: `portaria-${setting.condominium_id}`,
+                      full_name: `Portaria ${setting.portaria_name || condo?.name || 'Condomínio'}`,
+                      email: `portaria@${setting.condominium_id}.local`,
+                      phone: '',
+                      role: 'porteiro',
+                      condominium_id: setting.condominium_id,
+                      active: true,
+                      created_at: new Date().toISOString()
+                    };
+                    console.log('[PORTARIA-DEBUG] SET PORTARIA USER (SUCCESS)');
+                    setUser(portariaProfile);
+                  }
+                } else {
+                  // Resposta inequívoca de token inválido/inexistente/desativado no banco
+                  console.warn('[App] Token de portaria inválido ou revogado pelo administrador.');
+                  localStorage.removeItem('encomendas_portaria_token');
+                  console.log('[PORTARIA-DEBUG] SET USER NULL (ORIGIN: TOKEN_REVOKED_BY_ADMIN)');
+                  setUser(null);
+                }
+              }
+            } catch (err) {
+              console.warn('[App] Exceção de rede na restauração da portaria (token preservado):', err);
+              console.log('[PORTARIA-DEBUG] SET USER NULL (ORIGIN: NETWORK_EXCEPTION)');
+              setUser(null);
+            }
+          } else {
+            console.log('[PORTARIA-DEBUG] SET USER NULL (ORIGIN: NO_PORTARIA_TOKEN)');
+            setUser(null);
+          }
+        }
+      } catch (err: any) {
+        const msg = err?.message || String(err || '');
+        if (
+          msg.includes('Invalid Refresh Token') ||
+          msg.includes('Refresh Token Not Found') ||
+          msg.includes('refresh_token_not_found')
+        ) {
+          console.warn('[App] Exceção de refresh token. Limpando sessão local.');
+          clearSupabaseStorage();
+          await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+        } else {
+          console.error("Erro ao verificar sessão:", err);
+        }
+        console.log('[PORTARIA-DEBUG] SET USER NULL (ORIGIN: CHECKUSER_CATCH)');
+        setUser(null);
+      } finally {
+        console.log('[PORTARIA-DEBUG] LOADING FALSE');
+        setLoading(false);
+      }
+    };
+
+    checkUser();
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      console.log('[PORTARIA-DEBUG] AUTH EVENT', {
+        event,
+        hasSession: !!session,
+        hasUser: !!session?.user
+      });
+
+      if (event === 'INITIAL_SESSION') {
+        if (session?.user) {
+          try {
+            const { data: profile } = await supabase
+              .from('profiles')
+              .select('*')
+              .eq('id', session.user.id)
+              .maybeSingle();
+            if (profile && profile.active !== false) {
+              console.log('[PORTARIA-DEBUG] SET SUPABASE USER (ORIGIN: INITIAL_SESSION)');
+              setUser(profile);
+            }
+          } catch (_) {}
+        }
+      } else if (event === 'SIGNED_OUT') {
+        const hasPortariaToken = localStorage.getItem('encomendas_portaria_token');
+        if (!hasPortariaToken) {
+          console.log('[PORTARIA-DEBUG] SET USER NULL (ORIGIN: SIGNED_OUT)');
+          setUser(null);
+        }
+      } else if (event === 'SIGNED_IN' || event === 'USER_UPDATED' || event === 'TOKEN_REFRESHED') {
+        if (session?.user) {
+          try {
+            const { data: profile } = await supabase
+              .from('profiles')
+              .select('*')
+              .eq('id', session.user.id)
+              .maybeSingle();
+            if (profile && profile.active !== false) {
+              console.log('[PORTARIA-DEBUG] SET SUPABASE USER (ORIGIN: ' + event + ')');
+              setUser(profile);
+            }
+          } catch (_) {}
+        }
+      }
+    });
+
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  const handleLogout = async () => {
+    clearActivePlantao();
+    clearManualPorter();
+    localStorage.removeItem('encomendas_portaria_token');
+    await supabase.auth.signOut().catch(() => {});
+    setUser(null);
+  };
+
+  const handleUpdateUser = (updatedUser: Profile) => {
+    setUser(updatedUser);
+  };
+
   return (
-    <AuthProvider>
-      <AppContent />
-    </AuthProvider>
+    <Routes>
+      <Route path="/portal/:token" element={<ResidentPortal />} />
+      <Route path="/retirada" element={<Retirada />} />
+      <Route path="/retirada/:token" element={<Retirada />} />
+      <Route path="/change-password" element={user ? <ChangePassword onUpdateUser={handleUpdateUser} /> : <Navigate to="/" />} />
+      <Route path="/select-condominium" element={
+        user ? (
+          user.condominium_id ? <Navigate to="/dashboard" /> : <SelectCondominium user={user} onUpdateUser={handleUpdateUser} />
+        ) : <Navigate to="/" />
+      } />
+      <Route path="*" element={<AppLayout user={user} loading={loading} setUser={setUser} handleLogout={handleLogout} />} />
+    </Routes>
+  );
+}
+
+const AppLayout = ({ user, loading, setUser, handleLogout }: any) => {
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  useEffect(() => {
+    // Role-based initial redirection
+    const allowedPaths = ['/select-condominium', '/condominiums/new', '/change-password'];
+    if (!loading && user && !user.condominium_id && !allowedPaths.includes(location.pathname)) {
+      navigate('/select-condominium');
+      return;
+    }
+
+    if (!loading && user && user.must_change_password && location.pathname !== '/change-password') {
+      navigate('/change-password');
+      return;
+    }
+
+    if (!loading && user && user.condominium_id) {
+      const role = normalizeRole(user.role);
+      console.log("ROLE USUÁRIO (Layout):", role);
+
+      // Proteção de rotas e redirecionamento automático
+      if (location.pathname === '/' || location.pathname === '/dashboard') {
+        if (role === 'porteiro') {
+          navigate('/portaria');
+        } else if (role === 'sindico') {
+          navigate('/sindico');
+        } else if (role === 'admin') {
+          navigate('/dashboard');
+        }
+      }
+
+      // Impedir que porteiro acesse /sindico ou /dashboard
+      if (role === 'porteiro' && (location.pathname === '/sindico' || location.pathname === '/dashboard')) {
+        navigate('/portaria');
+      }
+    }
+  }, [user, loading, navigate, location.pathname]);
+
+  if (loading) return (
+    <div className="min-h-screen flex items-center justify-center bg-zinc-50">
+      <Loader2 className="w-8 h-8 animate-spin text-emerald-600" />
+    </div>
+  );
+
+  if (!user) {
+    console.log('[PORTARIA-DEBUG] LOGIN RENDER', {
+      userExists: false,
+      loading,
+      pathname: location.pathname,
+      tokenPresent: !!localStorage.getItem('encomendas_portaria_token')
+    });
+    return <LoginPage onLogin={setUser} />;
+  }
+
+  if (user.must_change_password) {
+    return (
+      <ChangePassword 
+        onUpdateUser={(updated) => setUser(prev => prev ? ({ ...prev, ...updated, must_change_password: false }) : null)} 
+      />
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-zinc-50">
+      <nav className="bg-white border-b border-zinc-200 px-6 py-4 sticky top-0 z-40">
+        <div className="max-w-6xl mx-auto flex justify-between items-center">
+          <div className="flex items-center gap-4">
+            {normalizeRole(user.role) === 'admin' && (
+              <button 
+                onClick={() => navigate('/dashboard')}
+                className="p-2 hover:bg-zinc-100 rounded-xl text-zinc-500 transition-all flex items-center gap-2"
+                title="Voltar para Painel Admin"
+              >
+                <ArrowLeft className="w-5 h-5" />
+                <span className="text-xs font-bold uppercase hidden sm:inline">Admin</span>
+              </button>
+            )}
+            <div className="flex items-center gap-3 cursor-pointer group" onClick={() => {
+              const role = normalizeRole(user.role);
+              if (role === 'porteiro') navigate('/portaria');
+              else if (role === 'sindico') navigate('/sindico');
+              else navigate('/dashboard');
+            }}>
+              <div className="w-10 h-10 bg-emerald-600 text-white rounded-xl shadow-sm flex items-center justify-center shrink-0 group-hover:bg-emerald-700 transition-colors">
+                <Package className="w-5 sm:w-6 h-5 sm:h-6" />
+              </div>
+              <div className="flex flex-col">
+                <span className="font-extrabold text-sm sm:text-lg text-zinc-900 tracking-tight leading-none group-hover:text-emerald-700 transition-colors">
+                  ENCOMENDAS INTELIGENTES
+                </span>
+                <span className="text-[10px] sm:text-xs text-zinc-400 font-medium tracking-normal leading-tight mt-0.5">
+                  Gestão Inteligente de Encomendas para Condomínios
+                </span>
+              </div>
+            </div>
+            
+            {/* Desktop Nav Links */}
+            {(() => {
+              const role = normalizeRole(user.role);
+              return (role === 'porteiro' || role === 'sindico' || role === 'admin') && (
+                <div className="hidden md:flex items-center gap-1 ml-8">
+                  <button 
+                    onClick={() => {
+                      if (role === 'porteiro') navigate('/portaria');
+                      else if (role === 'sindico') navigate('/sindico');
+                      else navigate('/dashboard');
+                    }}
+                    className={`px-4 py-2 rounded-xl text-sm font-bold transition-all ${
+                      location.pathname === '/portaria' || location.pathname === '/sindico' || location.pathname === '/dashboard'
+                        ? 'bg-emerald-50 text-emerald-600' 
+                        : 'text-zinc-500 hover:bg-zinc-50'
+                    }`}
+                  >
+                    Início
+                  </button>
+                  {role === 'porteiro' && (
+                    <button 
+                      onClick={() => navigate('/portaria')}
+                      className={`px-4 py-2 rounded-xl text-sm font-bold transition-all ${
+                        location.pathname === '/portaria' && !new URLSearchParams(location.search).get('tab')
+                          ? 'bg-emerald-50 text-emerald-600' 
+                          : 'text-zinc-500 hover:bg-zinc-50'
+                      }`}
+                    >
+                      Encomendas
+                    </button>
+                  )}
+                  <button 
+                    onClick={() => {
+                      if (role === 'porteiro') navigate('/portaria?tab=residents');
+                      else if (role === 'sindico') navigate('/sindico?tab=residents');
+                      else navigate('/profiles');
+                    }}
+                    className={`px-4 py-2 rounded-xl text-sm font-bold transition-all ${
+                      (location.pathname === '/portaria' && new URLSearchParams(location.search).get('tab') === 'residents') || 
+                      (location.pathname === '/sindico' && new URLSearchParams(location.search).get('tab') === 'residents') ||
+                      location.pathname === '/profiles'
+                        ? 'bg-emerald-50 text-emerald-600' 
+                        : 'text-zinc-500 hover:bg-zinc-50'
+                    }`}
+                  >
+                    Moradores
+                  </button>
+                  {role === 'admin' && (
+                    <>
+                      <button 
+                        onClick={() => navigate('/users')}
+                        className={`px-4 py-2 rounded-xl text-sm font-bold transition-all ${
+                          location.pathname === '/users'
+                            ? 'bg-emerald-50 text-emerald-600' 
+                            : 'text-zinc-500 hover:bg-zinc-50'
+                        }`}
+                      >
+                        Usuários
+                      </button>
+                      <button 
+                        onClick={() => navigate('/condominiums')}
+                        className={`px-4 py-2 rounded-xl text-sm font-bold transition-all ${
+                          location.pathname === '/condominiums'
+                            ? 'bg-emerald-50 text-emerald-600' 
+                            : 'text-zinc-500 hover:bg-zinc-50'
+                        }`}
+                      >
+                        Gestão de Condomínios
+                      </button>
+                    </>
+                  )}
+                </div>
+              );
+            })()}
+          </div>
+          <div className="flex items-center gap-4">
+            <div className="text-right hidden sm:block">
+              <p className="text-sm font-bold text-zinc-900">{user.full_name}</p>
+              <p className="text-xs text-zinc-500 uppercase tracking-wider">
+                {(() => {
+                  const role = normalizeRole(user.role);
+                  return role === 'porteiro' ? 'Portaria' : role === 'sindico' ? 'Síndico' : role === 'admin' ? 'Admin' : `Unidade`;
+                })()}
+              </p>
+            </div>
+            <button onClick={handleLogout} className="p-2 text-zinc-400 hover:text-red-500 transition-colors">
+              <LogOut className="w-5 h-5" />
+            </button>
+          </div>
+        </div>
+      </nav>
+
+      <main className="pb-20">
+        <Routes>
+          <Route path="/dashboard" element={
+            (() => {
+              const role = normalizeRole(user.role);
+              if (role === 'porteiro') return <Navigate to="/portaria" />;
+              if (role === 'sindico') return <Navigate to="/sindico" />;
+              return <Dashboard user={user} />;
+            })()
+          } />
+          <Route path="/sindico/*" element={
+            (() => {
+              const role = normalizeRole(user.role);
+              return role === 'sindico' || role === 'admin' ? <SindicoDashboard user={user} onLogout={handleLogout} onUpdateUser={setUser} /> : <Navigate to="/dashboard" />
+            })()
+          } />
+          <Route path="/portaria" element={
+            (() => {
+              const role = normalizeRole(user.role);
+              return (role === 'porteiro' || role === 'sindico' || role === 'admin') ? <Portaria user={user} /> : <Navigate to="/dashboard" />
+            })()
+          } />
+          <Route path="/condominiums" element={<CondominiumList user={user} />} />
+          <Route path="/condominiums/new" element={<CondominiumNew user={user} onUpdateUser={setUser} />} />
+          <Route path="/profiles" element={<ProfileList user={user} />} />
+          <Route path="/profiles/new" element={<ProfileNew user={user} />} />
+          <Route path="/users" element={<UserManagement user={user} />} />
+          <Route path="/packages" element={<PackageList user={user} />} />
+          <Route path="/packages/new" element={<PackageNew user={user} />} />
+          <Route path="/settings" element={
+            (() => {
+              const role = normalizeRole(user.role);
+              return role === 'admin' ? <Settings user={user} /> : <Navigate to="/dashboard" />;
+            })()
+          } />
+          
+          <Route path="/" element={
+            (() => {
+              const role = normalizeRole(user.role);
+              if (role === 'porteiro') return <Navigate to="/portaria" />;
+              if (role === 'sindico') return <Navigate to="/sindico" />;
+              return <Navigate to="/dashboard" />;
+            })()
+          } />
+          <Route path="*" element={
+            (() => {
+              const role = normalizeRole(user.role);
+              if (role === 'porteiro') return <Navigate to="/portaria" />;
+              if (role === 'sindico') return <Navigate to="/sindico" />;
+              return <Navigate to="/dashboard" />;
+            })()
+          } />
+        </Routes>
+      </main>
+
+      {/* Bottom Navigation for Porter/Sindico/Admin */}
+      {(() => {
+        const role = normalizeRole(user.role);
+        return (role === 'porteiro' || role === 'sindico' || role === 'admin') && (
+          <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-zinc-200 px-6 py-3 z-40 sm:hidden">
+            <div className="flex justify-around items-center">
+              <button 
+                onClick={() => {
+                  if (role === 'porteiro') navigate('/portaria');
+                  else if (role === 'sindico') navigate('/sindico');
+                  else navigate('/dashboard');
+                }}
+                className={`flex flex-col items-center gap-1 ${
+                  location.pathname === '/portaria' || location.pathname === '/sindico' || location.pathname === '/dashboard' ? 'text-emerald-600' : 'text-zinc-400'
+                }`}
+              >
+                <LayoutDashboard className="w-6 h-6" />
+                <span className="text-[10px] font-bold uppercase tracking-wider">Início</span>
+              </button>
+              {role === 'porteiro' && (
+                <button 
+                  onClick={() => navigate('/portaria')}
+                  className={`flex flex-col items-center gap-1 ${
+                  location.pathname === '/portaria' && !new URLSearchParams(location.search).get('tab') ? 'text-zinc-800' : 'text-zinc-400'
+                }`}
+                >
+                  <Package className="w-6 h-6" />
+                  <span className="text-[10px] font-bold uppercase tracking-wider">Portaria</span>
+                </button>
+              )}
+              <button 
+                onClick={() => {
+                  if (role === 'porteiro') navigate('/portaria?tab=residents');
+                  else if (role === 'sindico') navigate('/sindico?tab=residents');
+                  else navigate('/profiles');
+                }}
+                className={`flex flex-col items-center gap-1 ${
+                  (location.pathname === '/portaria' && new URLSearchParams(location.search).get('tab') === 'residents') || 
+                  (location.pathname === '/sindico' && new URLSearchParams(location.search).get('tab') === 'residents') ||
+                  location.pathname === '/profiles' ? 'text-blue-600' : 'text-zinc-400'
+                }`}
+              >
+                <Users className="w-6 h-6" />
+                <span className="text-[10px] font-bold uppercase tracking-wider">Moradores</span>
+              </button>
+              {role === 'admin' && (
+                <button 
+                  onClick={() => navigate('/users')}
+                  className={`flex flex-col items-center gap-1 ${
+                    location.pathname === '/users' ? 'text-zinc-800' : 'text-zinc-400'
+                  }`}
+                >
+                  <Shield className="w-6 h-6" />
+                  <span className="text-[10px] font-bold uppercase tracking-wider">Usuários</span>
+                </button>
+              )}
+            </div>
+          </div>
+        );
+      })()}
+      
+      <Toaster position="bottom-right" />
+    </div>
   );
 }
