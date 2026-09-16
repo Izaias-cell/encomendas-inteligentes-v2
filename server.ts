@@ -26,8 +26,8 @@ if (!supabaseServiceKey) {
   console.log("[DEBUG BACKEND] SUPABASE_SERVICE_ROLE_KEY encontrada. Cliente admin inicializado.");
 }
 
-async function startServer() {
-  const formatSafeDateTime = (value: any) => {
+// Formatter helpers
+const formatSafeDateTime = (value: any) => {
   if (!value) return "-";
   const d = new Date(value);
   return isNaN(d.getTime()) ? "-" : d.toLocaleString("pt-BR");
@@ -39,8 +39,7 @@ const formatSafeDate = (value: any) => {
   return isNaN(d.getTime()) ? "-" : d.toLocaleDateString("pt-BR");
 };
 
-// ... existing code ...
-const app = express();
+export const app = express();
   const PORT = Number(process.env.PORT) || 3000;
 
   // CORS Middleware for Web and Capacitor Native App
@@ -1582,10 +1581,18 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
         throw error;
       }
 
-      // Fetch profiles, moradores, and packages counts safely without breaking if empty
-      const { data: allProfiles } = await supabaseAdmin.from('profiles').select('id, condominium_id');
-      const { data: allMoradores } = await supabaseAdmin.from('moradores').select('id, condominium_id');
-      const { data: allPackages } = await supabaseAdmin.from('packages').select('id, condominium_id');
+      // Fetch profiles, moradores, packages, and condominium_settings in parallel
+      const [
+        { data: allProfiles },
+        { data: allMoradores },
+        { data: allPackages },
+        { data: allSettings }
+      ] = await Promise.all([
+        supabaseAdmin.from('profiles').select('id, condominium_id'),
+        supabaseAdmin.from('moradores').select('id, condominium_id'),
+        supabaseAdmin.from('packages').select('id, condominium_id'),
+        supabaseAdmin.from('condominium_settings').select('*')
+      ]);
 
       const profilesByCondo: Record<string, number> = {};
       (allProfiles || []).forEach(p => {
@@ -1608,8 +1615,40 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
         }
       });
 
+      const settingsByCondo = new Map<string, any>();
+      (allSettings || []).forEach(s => {
+        if (s && s.condominium_id) {
+          settingsByCondo.set(s.condominium_id, s);
+        }
+      });
+
       const enriched = await Promise.all((condominiums || []).map(async c => {
-        const creds = await getOrInitPortariaCreds(c.id, c.name);
+        let creds: PortariaCreds;
+
+        // 1. Check in-memory store first
+        if (portariaStore.has(c.id)) {
+          creds = portariaStore.get(c.id)!;
+          if (c.name && creds.portaria_name !== c.name) {
+            creds.portaria_name = c.name;
+          }
+        } else {
+          // 2. Check batch-queried settings
+          const dbSettings = settingsByCondo.get(c.id);
+          if (dbSettings && dbSettings.portaria_access_code) {
+            creds = {
+              condominium_id: c.id,
+              portaria_name: dbSettings.portaria_name || c.name,
+              portaria_access_code: dbSettings.portaria_access_code,
+              active_token: dbSettings.active_portaria_token || null,
+              updated_at: new Date().toISOString()
+            };
+            portariaStore.set(c.id, creds);
+          } else {
+            // 3. Only initialize when no settings exist at all
+            creds = await getOrInitPortariaCreds(c.id, c.name);
+          }
+        }
+
         return {
           ...c,
           user_count: profilesByCondo[c.id] || 0,
@@ -2694,6 +2733,9 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
     res.status(404).json({ error: `Rota de API não encontrada: ${req.method} ${req.path}` });
   });
 
+export async function startServer() {
+  const PORT = Number(process.env.PORT) || 3000;
+
   // Vite middleware para desenvolvimento
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
@@ -2732,6 +2774,11 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
   }
 }
 
-startServer().catch(err => {
-  console.error("Fatal error starting server:", err);
-});
+// Inicia o servidor local se não estiver rodando no ambiente Serverless da Vercel
+if (!process.env.VERCEL) {
+  startServer().catch(err => {
+    console.error("Fatal error starting server:", err);
+  });
+}
+
+export default app;

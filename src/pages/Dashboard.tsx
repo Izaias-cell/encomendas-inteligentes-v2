@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { toast } from 'react-hot-toast';
@@ -159,8 +159,16 @@ export default function Dashboard({ user }: DashboardProps) {
   };
 
   const fetchStats = async () => {
-    if (!user.condominium_id) return;
     try {
+      if (!user.condominium_id) {
+        setStats({
+          total: 0,
+          pending: 0,
+          delivered: 0
+        });
+        return;
+      }
+
       const [allRes, pendingRes, deliveredRes] = await Promise.all([
         supabase
           .from('packages')
@@ -372,38 +380,95 @@ export default function Dashboard({ user }: DashboardProps) {
     </div>
   );
 
-  const ActionCard = ({ title, description, icon: Icon, onClick, color, extraAction }: any) => (
-    <div 
-      onClick={onClick}
-      className="bg-white rounded-3xl border border-zinc-100 shadow-sm p-6 sm:p-7 md:p-8 hover:shadow-md transition-all group text-left flex flex-col items-start cursor-pointer w-full"
-    >
-      <div className="flex items-center justify-between gap-2 w-full mb-6">
-        <div className={`w-12 h-12 sm:w-14 sm:h-14 ${color} rounded-2xl flex items-center justify-center group-hover:scale-110 transition-transform shrink-0`}>
-          <Icon className="w-6 h-6 sm:w-7 sm:h-7" />
+  const ActionCard = ({ title, description, icon: Icon, onClick, color, extraAction }: any) => {
+    const touchStartRef = useRef<{ x: number; y: number } | null>(null);
+    const isDraggingRef = useRef(false);
+    const lastDragTimeRef = useRef<number>(0);
+
+    const handleTouchStart = (e: React.TouchEvent) => {
+      if (e.touches.length > 0) {
+        touchStartRef.current = {
+          x: e.touches[0].clientX,
+          y: e.touches[0].clientY
+        };
+        isDraggingRef.current = false;
+      }
+    };
+
+    const handleTouchMove = (e: React.TouchEvent) => {
+      if (!touchStartRef.current || e.touches.length === 0) return;
+      const dx = Math.abs(e.touches[0].clientX - touchStartRef.current.x);
+      const dy = Math.abs(e.touches[0].clientY - touchStartRef.current.y);
+      if (dx > 10 || dy > 10) {
+        isDraggingRef.current = true;
+        lastDragTimeRef.current = Date.now();
+      }
+    };
+
+    const handleTouchEnd = () => {
+      touchStartRef.current = null;
+    };
+
+    const handleTouchCancel = () => {
+      touchStartRef.current = null;
+      // If a drag/scroll was occurring, record the timestamp so the synthetic click can be blocked
+      if (isDraggingRef.current) {
+        lastDragTimeRef.current = Date.now();
+      }
+    };
+
+    const handleClick = (e: React.MouseEvent) => {
+      const now = Date.now();
+      // Block click if currently marked as dragging or if a drag/scroll occurred within the last 400ms
+      if (isDraggingRef.current || (now - lastDragTimeRef.current < 400)) {
+        isDraggingRef.current = false;
+        lastDragTimeRef.current = 0;
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      if (onClick) {
+        onClick(e);
+      }
+    };
+
+    return (
+      <div 
+        onClick={handleClick}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
+        onTouchCancel={handleTouchCancel}
+        className="bg-white rounded-3xl border border-zinc-100 shadow-sm p-6 sm:p-7 md:p-8 hover:shadow-md transition-all group text-left flex flex-col items-start cursor-pointer w-full"
+      >
+        <div className="flex items-center justify-between gap-2 w-full mb-6">
+          <div className={`w-12 h-12 sm:w-14 sm:h-14 ${color} rounded-2xl flex items-center justify-center group-hover:scale-110 transition-transform shrink-0`}>
+            <Icon className="w-6 h-6 sm:w-7 sm:h-7" />
+          </div>
+          {extraAction && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                extraAction.onClick();
+              }}
+              className="w-fit max-w-[65%] whitespace-nowrap text-[11px] sm:text-xs font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-2.5 py-1.5 sm:px-3 sm:py-1.5 rounded-xl transition-all inline-flex items-center gap-1.5 shrink-0 hover:scale-105 shadow-2xs"
+              title={extraAction.label}
+            >
+              <UserPlus className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+              <span className="truncate">{extraAction.label}</span>
+            </button>
+          )}
         </div>
-        {extraAction && (
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              extraAction.onClick();
-            }}
-            className="w-fit max-w-[65%] whitespace-nowrap text-[11px] sm:text-xs font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-2.5 py-1.5 sm:px-3 sm:py-1.5 rounded-xl transition-all inline-flex items-center gap-1.5 shrink-0 hover:scale-105 shadow-2xs"
-            title={extraAction.label}
-          >
-            <UserPlus className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-            <span className="truncate">{extraAction.label}</span>
-          </button>
-        )}
+        <h3 className="text-xl font-bold text-zinc-900 mb-2">{title}</h3>
+        <p className="text-zinc-500 text-sm mb-6 flex-grow">{description}</p>
+        <div className="flex items-center gap-2 text-emerald-600 font-bold group-hover:gap-4 transition-all">
+          Acessar agora
+          <ArrowRight className="w-5 h-5" />
+        </div>
       </div>
-      <h3 className="text-xl font-bold text-zinc-900 mb-2">{title}</h3>
-      <p className="text-zinc-500 text-sm mb-6 flex-grow">{description}</p>
-      <div className="flex items-center gap-2 text-emerald-600 font-bold group-hover:gap-4 transition-all">
-        Acessar agora
-        <ArrowRight className="w-5 h-5" />
-      </div>
-    </div>
-  );
+    );
+  };
 
   if (loading) {
     return (

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Clock, CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
-import { motion } from 'motion/react';
+import { Clock, CheckCircle, AlertCircle, Loader2, Package, X, ZoomIn, Camera } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
 import { supabase } from '../lib/supabase';
 import { Package as PackageType } from '../types';
 
@@ -13,6 +13,7 @@ const Retirada = () => {
   const [error, setError] = useState<string | null>(null);
   const [packageData, setPackageData] = useState<any>(null);
   const [allPackages, setAllPackages] = useState<any[]>([]);
+  const [selectedImage, setSelectedImage] = useState<string | null>(null);
 
   useEffect(() => {
     const fetchPackage = async () => {
@@ -75,6 +76,18 @@ const Retirada = () => {
   const isDelivered = packageData.status === 'delivered';
   const resident = packageData.moradores;
   const condo = packageData.condominiums;
+
+  // Extrai todas as fotos válidas das encomendas do lote
+  const photos = allPackages
+    .map((p, idx) => ({
+      id: p.id || `photo_${idx}`,
+      url: p.photo_url,
+      number: idx + 1,
+      carrier: p.carrier || p.transportadora
+    }))
+    .filter((item): item is { id: string; url: string; number: number; carrier?: string } => 
+      typeof item.url === 'string' && item.url.trim().length > 0 && item.url.startsWith('http')
+    );
 
   const getUnitDisplay = () => {
     // 1. Prioridade: Dados do morador vinculado
@@ -156,7 +169,7 @@ const Retirada = () => {
           </div>
 
           {/* Status Badge */}
-          <div className={`flex items-center gap-2 px-6 py-3 rounded-full mb-8 ${isDelivered ? 'bg-zinc-100 text-zinc-600' : 'bg-emerald-100 text-emerald-700 shadow-sm'}`}>
+          <div className={`flex items-center gap-2 px-6 py-3 rounded-full mb-6 ${isDelivered ? 'bg-zinc-100 text-zinc-600' : 'bg-emerald-100 text-emerald-700 shadow-sm'}`}>
             {isDelivered ? (
               <>
                 <CheckCircle className="w-5 h-5" />
@@ -169,6 +182,63 @@ const Retirada = () => {
               </>
             )}
           </div>
+
+          {/* Galeria de Fotos das Encomendas */}
+          {photos.length > 0 && (
+            <div className="w-full mb-8">
+              <div className="flex items-center justify-between mb-3 px-1">
+                <span className="text-xs font-bold text-zinc-700 uppercase tracking-wider flex items-center gap-1.5">
+                  <Camera className="w-4 h-4 text-emerald-600" />
+                  {photos.length > 1 ? `Fotos do Lote (${photos.length} Volumes)` : 'Foto da Encomenda'}
+                </span>
+                <span className="text-[10px] text-zinc-400 font-medium">Toque para ampliar</span>
+              </div>
+
+              {photos.length === 1 ? (
+                <div 
+                  onClick={() => setSelectedImage(photos[0].url)}
+                  className="relative group cursor-pointer overflow-hidden rounded-2xl border border-zinc-200 shadow-sm bg-zinc-100 aspect-[4/3] flex items-center justify-center"
+                >
+                  <img 
+                    src={photos[0].url} 
+                    alt="Foto da encomenda" 
+                    className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+                    referrerPolicy="no-referrer"
+                  />
+                  <div className="absolute inset-0 bg-black/20 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                    <span className="bg-white/90 backdrop-blur-sm text-zinc-800 text-xs font-bold py-1.5 px-3 rounded-full flex items-center gap-1 shadow-lg">
+                      <ZoomIn className="w-3.5 h-3.5" /> Ampliar
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 gap-3">
+                  {photos.map((photo) => (
+                    <div 
+                      key={photo.id}
+                      onClick={() => setSelectedImage(photo.url)}
+                      className="relative group cursor-pointer overflow-hidden rounded-2xl border border-zinc-200 shadow-sm bg-zinc-100 aspect-[4/3] flex items-center justify-center"
+                    >
+                      <img 
+                        src={photo.url} 
+                        alt={`Volume ${photo.number}`} 
+                        className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+                        referrerPolicy="no-referrer"
+                      />
+                      <div className="absolute top-2 left-2 bg-black/60 backdrop-blur-md text-white text-[10px] font-bold px-2 py-0.5 rounded-full">
+                        Vol. {photo.number}
+                      </div>
+                      <div className="absolute inset-0 bg-black/20 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                        <span className="bg-white/90 backdrop-blur-sm text-zinc-800 text-[11px] font-bold py-1 px-2.5 rounded-full flex items-center gap-1 shadow-lg">
+                          <ZoomIn className="w-3 h-3" /> Ver
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Instructions */}
           {!isDelivered ? (
@@ -188,6 +258,38 @@ const Retirada = () => {
           <p className="text-[10px] text-zinc-400 font-bold uppercase tracking-widest">Encomendas Inteligentes</p>
         </div>
       </motion.div>
+
+      {/* Modal de Zoom de Imagem */}
+      <AnimatePresence>
+        {selectedImage && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setSelectedImage(null)}
+            className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex flex-col items-center justify-center p-4 cursor-pointer"
+          >
+            <button 
+              type="button"
+              onClick={(e) => { e.stopPropagation(); setSelectedImage(null); }}
+              className="absolute top-4 right-4 text-white/80 hover:text-white p-2 rounded-full bg-white/10 hover:bg-white/20 transition-all cursor-pointer"
+            >
+              <X className="w-7 h-7" />
+            </button>
+            <motion.img 
+              initial={{ scale: 0.9 }}
+              animate={{ scale: 1 }}
+              exit={{ scale: 0.9 }}
+              src={selectedImage} 
+              alt="Foto ampliada" 
+              className="max-w-full max-h-[85vh] object-contain rounded-2xl shadow-2xl border border-white/10"
+              onClick={(e) => e.stopPropagation()}
+              referrerPolicy="no-referrer"
+            />
+            <p className="text-white/60 text-xs mt-4">Toque em qualquer lugar fora da imagem para fechar</p>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 };

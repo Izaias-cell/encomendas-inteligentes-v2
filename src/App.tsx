@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, memo } from 'react';
-import { Camera, Package, User, LayoutDashboard, LogOut, Bell, CheckCircle, Search, Loader2, Plus, Phone, Home, History, QrCode, X, RefreshCw, AlertTriangle, Check, ArrowLeft, Keyboard, XCircle, Users, UserPlus, Edit2, Shield, Building2, FileSpreadsheet } from 'lucide-react';
+import { Camera, Package, User, LayoutDashboard, LogOut, Bell, CheckCircle, Search, Loader2, Plus, Phone, Home, History, QrCode, X, RefreshCw, AlertTriangle, Check, ArrowLeft, Keyboard, XCircle, Users, UserPlus, Edit2, Shield, Building2, FileSpreadsheet, WifiOff } from 'lucide-react';
 import { Toaster, toast } from 'react-hot-toast';
 import { supabase, clearSupabaseStorage } from './lib/supabase';
 import { ptBR } from 'date-fns/locale';
@@ -441,18 +441,10 @@ const LoginPage = ({ onLogin }: any) => {
     setActivatingPortaria(true);
     try {
       const res = await api.post('/api/portaria/confirm-link', { access_code });
-      let portariaToken = res?.data?.portaria_token;
+      const portariaToken = res?.data?.portaria_token;
 
-      if (!portariaToken) {
-        // Direct local token fallback
-        portariaToken = `ptk_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
-        try {
-          await supabase.rpc('rpc_confirm_portaria_token', {
-            p_condominium_id: condominium.id,
-            p_access_code: access_code,
-            p_token: portariaToken
-          });
-        } catch {}
+      if (!res.ok || !portariaToken) {
+        throw new Error(res?.error || res?.data?.error || "Falha ao validar e vincular a portaria no servidor.");
       }
 
       if (permanent) {
@@ -461,8 +453,10 @@ const LoginPage = ({ onLogin }: any) => {
         localStorage.removeItem('encomendas_portaria_token');
       }
 
+      sessionStorage.setItem('encomendas_portaria_active', 'true');
+
       const portariaProfile: Profile = {
-        id: `portaria-${condominium.id}`,
+        id: condominium.id,
         full_name: `Portaria ${condominium.portaria_name || condominium.name}`,
         email: `portaria@${condominium.id}.local`,
         phone: '',
@@ -478,6 +472,7 @@ const LoginPage = ({ onLogin }: any) => {
       toast.success(`Portaria ativada: ${condominium.name}`);
       navigate('/portaria');
     } catch (err: any) {
+      sessionStorage.removeItem('encomendas_portaria_active');
       toast.error(err.message || "Erro ao conectar portaria.");
     } finally {
       setActivatingPortaria(false);
@@ -2539,9 +2534,181 @@ const isValidUuid = (id?: string | null): boolean => {
 };
 
 export default function App() {
-  const [user, setUser] = useState<Profile | null>(null);
+  const [user, setUserState] = useState<Profile | null>(null);
+  const userRef = useRef<Profile | null>(null);
   const [loading, setLoading] = useState(true);
+  const [portariaTempError, setPortariaTempError] = useState<string | null>(null);
+  const [isRetryingPortaria, setIsRetryingPortaria] = useState(false);
   const location = useLocation();
+
+  const setUser = useCallback((newUser: Profile | null | ((prev: Profile | null) => Profile | null)) => {
+    if (typeof newUser === 'function') {
+      setUserState(prev => {
+        const next = newUser(prev);
+        userRef.current = next;
+        return next;
+      });
+    } else {
+      userRef.current = newUser;
+      setUserState(newUser);
+    }
+  }, []);
+
+  useEffect(() => {
+    userRef.current = user;
+  }, [user]);
+
+  const checkUserSession = useCallback(async () => {
+    console.log('[PORTARIA-DEBUG] CHECKUSER START');
+    setLoading(true);
+    setPortariaTempError(null);
+    try {
+      // Prioridade 1: Sessão virtual da Portaria persistida
+      const portariaToken = localStorage.getItem('encomendas_portaria_token');
+      console.log('[PORTARIA-DEBUG] PORTARIA TOKEN', portariaToken ? 'PRESENTE' : 'AUSENTE');
+
+      if (portariaToken) {
+        try {
+          console.log('[PORTARIA-DEBUG] RESTORE VIA API START (TIMEOUT: 4000ms, RETRIES: 0)');
+          const res = await api.get(`/api/portaria/validate-token/${encodeURIComponent(portariaToken)}`, {
+            skipAuth: true,
+            timeoutMs: 4000,
+            retries: 0
+          });
+
+          console.log('[PORTARIA-DEBUG] RESTORE API RESULT', {
+            ok: res.ok,
+            status: res.status,
+            error: res.error,
+            hasCondo: !!res?.data?.condominium
+          });
+
+          if (res.ok && res.data?.condominium) {
+            const condo = res.data.condominium;
+            const portariaProfile: Profile = {
+              id: condo.id,
+              full_name: `Portaria ${condo.portaria_name || condo.name || 'Condomínio'}`,
+              email: `portaria@${condo.id}.local`,
+              phone: '',
+              role: 'porteiro',
+              condominium_id: condo.id,
+              active: true,
+              created_at: new Date().toISOString()
+            };
+            sessionStorage.setItem('encomendas_portaria_active', 'true');
+            setPortariaTempError(null);
+            console.log('[PORTARIA-DEBUG] SET PORTARIA USER (SUCCESS)');
+            setUser(portariaProfile);
+            return;
+          } else if (res.status === 401 || res.status === 403 || res.status === 404) {
+            // Token inequivocamente inválido, revogado, não existente ou expirado
+            console.warn(`[App] Token de portaria inválido ou inexistente no servidor (HTTP ${res.status}). Removendo token local.`);
+            localStorage.removeItem('encomendas_portaria_token');
+            sessionStorage.removeItem('encomendas_portaria_active');
+            setPortariaTempError(null);
+            console.log('[PORTARIA-DEBUG] SET USER NULL (ORIGIN: TOKEN_REVOKED_OR_NOT_FOUND)');
+            setUser(null);
+            // Prossiga para verificar se há sessão do Supabase (Admin) ou tela de login
+          } else {
+            // Erro temporário de rede, timeout ou 5xx: NÃO remover o token do localStorage
+            console.warn('[App] Falha temporária ao validar sessão da portaria (HTTP ' + res.status + ', token preservado):', res.error);
+            setPortariaTempError(res.error || 'Não foi possível validar o acesso da portaria no momento. Verifique sua conexão e tente novamente.');
+            console.log('[PORTARIA-DEBUG] SET USER NULL (ORIGIN: TEMPORARY_NETWORK_ERROR)');
+            setUser(null);
+            return;
+          }
+        } catch (err: any) {
+          // Exceção de rede inesperada: preservar token no localStorage
+          console.warn('[App] Exceção de rede na restauração da portaria (token preservado):', err);
+          setPortariaTempError('Erro de conexão ao validar o acesso da portaria. Verifique sua rede e tente novamente.');
+          console.log('[PORTARIA-DEBUG] SET USER NULL (ORIGIN: NETWORK_EXCEPTION)');
+          setUser(null);
+          return;
+        }
+      }
+
+      // Prioridade 2: Sessão Auth tradicional do Supabase (Admin, Síndico, etc.)
+      const { data, error: sessionError } = await supabase.auth.getSession().catch((err) => {
+        return { data: { session: null }, error: err };
+      });
+      
+      console.log('[PORTARIA-DEBUG] GET SESSION', {
+        hasSession: !!data?.session,
+        hasUser: !!data?.session?.user,
+        error: sessionError ? sessionError.message : null
+      });
+
+      if (sessionError) {
+        const msg = sessionError.message || '';
+        if (
+          msg.includes('Invalid Refresh Token') ||
+          msg.includes('Refresh Token Not Found') ||
+          msg.includes('refresh_token_not_found')
+        ) {
+          console.warn('[App] Refresh token inválido na inicialização. Limpando sessão local.');
+          clearSupabaseStorage();
+          await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+        }
+      }
+
+      const session = data?.session;
+      if (session && session.user) {
+        const { data: profile } = await supabase
+          .from('profiles')
+          .select('*')
+          .eq('id', session.user.id)
+          .maybeSingle();
+        
+        if (profile) {
+          if (profile.active === false) {
+            clearSupabaseStorage();
+            await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+            console.log('[PORTARIA-DEBUG] SET USER NULL (ORIGIN: INACTIVE_PROFILE)');
+            setUser(null);
+          } else {
+            console.log('[PORTARIA-DEBUG] SET SUPABASE USER (ORIGIN: AUTH_PROFILE)');
+            setUser(profile);
+          }
+        } else {
+          // Sessão ativa mas sem perfil? Desloga por segurança
+          clearSupabaseStorage();
+          await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+          console.log('[PORTARIA-DEBUG] SET USER NULL (ORIGIN: NO_PROFILE_FOUND)');
+          setUser(null);
+        }
+      } else {
+        console.log('[PORTARIA-DEBUG] SET USER NULL (ORIGIN: NO_SESSION)');
+        setUser(null);
+      }
+    } catch (err: any) {
+      const msg = err?.message || String(err || '');
+      if (
+        msg.includes('Invalid Refresh Token') ||
+        msg.includes('Refresh Token Not Found') ||
+        msg.includes('refresh_token_not_found')
+      ) {
+        console.warn('[App] Exceção de refresh token. Limpando sessão local.');
+        clearSupabaseStorage();
+        await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+      } else {
+        console.error("Erro ao verificar sessão:", err);
+      }
+      console.log('[PORTARIA-DEBUG] SET USER NULL (ORIGIN: CHECKUSER_CATCH)');
+      setUser(null);
+    } finally {
+      console.log('[PORTARIA-DEBUG] LOADING FALSE');
+      setLoading(false);
+    }
+  }, [setUser]);
+
+  const handleRetryPortariaValidation = useCallback(async () => {
+    setIsRetryingPortaria(true);
+    try {
+      await checkUserSession();
+    } finally {
+      setIsRetryingPortaria(false);
+    }
+  }, [checkUserSession]);
 
   useEffect(() => {
     console.log('[PORTARIA-DEBUG] APP MOUNT', {
@@ -2550,148 +2717,7 @@ export default function App() {
       hasToken: !!localStorage.getItem('encomendas_portaria_token')
     });
 
-    const checkUser = async () => {
-      console.log('[PORTARIA-DEBUG] CHECKUSER START');
-      try {
-        const { data, error: sessionError } = await supabase.auth.getSession().catch((err) => {
-          return { data: { session: null }, error: err };
-        });
-        
-        console.log('[PORTARIA-DEBUG] GET SESSION', {
-          hasSession: !!data?.session,
-          hasUser: !!data?.session?.user,
-          error: sessionError ? sessionError.message : null
-        });
-
-        if (sessionError) {
-          const msg = sessionError.message || '';
-          if (
-            msg.includes('Invalid Refresh Token') ||
-            msg.includes('Refresh Token Not Found') ||
-            msg.includes('refresh_token_not_found')
-          ) {
-            console.warn('[App] Refresh token inválido na inicialização. Limpando sessão local.');
-            clearSupabaseStorage();
-            await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
-          }
-        }
-
-        const session = data?.session;
-        if (session && session.user) {
-          const { data: profile } = await supabase
-            .from('profiles')
-            .select('*')
-            .eq('id', session.user.id)
-            .maybeSingle();
-          
-          if (profile) {
-            if (profile.active === false) {
-              clearSupabaseStorage();
-              await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
-              console.log('[PORTARIA-DEBUG] SET USER NULL (ORIGIN: INACTIVE_PROFILE)');
-              setUser(null);
-            } else {
-              console.log('[PORTARIA-DEBUG] SET SUPABASE USER (ORIGIN: AUTH_PROFILE)');
-              setUser(profile);
-            }
-          } else {
-            // Sessão ativa mas sem perfil? Desloga por segurança
-            clearSupabaseStorage();
-            await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
-            console.log('[PORTARIA-DEBUG] SET USER NULL (ORIGIN: NO_PROFILE_FOUND)');
-            setUser(null);
-          }
-        } else {
-          // Sem sessão Auth tradicional do Supabase
-          // Verificar se existe sessão virtual da Portaria salva no localStorage
-          const portariaToken = localStorage.getItem('encomendas_portaria_token');
-          console.log('[PORTARIA-DEBUG] PORTARIA TOKEN', portariaToken ? 'PRESENTE' : 'AUSENTE');
-
-          if (portariaToken) {
-            try {
-              console.log('[PORTARIA-DEBUG] RESTORE RPC START');
-              const { data: rpcData, error: rpcError } = await supabase.rpc('rpc_restore_portaria_session', {
-                p_token: portariaToken
-              });
-
-              console.log('[PORTARIA-DEBUG] RESTORE RPC RESULT', {
-                success: !rpcError,
-                error: rpcError ? rpcError.message : null,
-                recordsCount: Array.isArray(rpcData) ? rpcData.length : (rpcData ? 1 : 0)
-              });
-
-              if (rpcError) {
-                console.warn('[App] Erro de rede/RPC ao restaurar sessão da portaria (token preservado):', rpcError);
-                console.log('[PORTARIA-DEBUG] SET USER NULL (ORIGIN: RPC_ERROR)');
-                setUser(null);
-              } else {
-                const setting = Array.isArray(rpcData) ? rpcData[0] : rpcData;
-                if (setting && setting.condominium_id) {
-                  const { data: condo } = await supabase
-                    .from('condominiums')
-                    .select('*')
-                    .eq('id', setting.condominium_id)
-                    .maybeSingle();
-
-                  if (condo && condo.active === false) {
-                    console.warn('[App] Condomínio inativo. Desativando sessão da portaria.');
-                    localStorage.removeItem('encomendas_portaria_token');
-                    console.log('[PORTARIA-DEBUG] SET USER NULL (ORIGIN: INACTIVE_CONDO)');
-                    setUser(null);
-                  } else {
-                    const portariaProfile: Profile = {
-                      id: `portaria-${setting.condominium_id}`,
-                      full_name: `Portaria ${setting.portaria_name || condo?.name || 'Condomínio'}`,
-                      email: `portaria@${setting.condominium_id}.local`,
-                      phone: '',
-                      role: 'porteiro',
-                      condominium_id: setting.condominium_id,
-                      active: true,
-                      created_at: new Date().toISOString()
-                    };
-                    console.log('[PORTARIA-DEBUG] SET PORTARIA USER (SUCCESS)');
-                    setUser(portariaProfile);
-                  }
-                } else {
-                  // Resposta inequívoca de token inválido/inexistente/desativado no banco
-                  console.warn('[App] Token de portaria inválido ou revogado pelo administrador.');
-                  localStorage.removeItem('encomendas_portaria_token');
-                  console.log('[PORTARIA-DEBUG] SET USER NULL (ORIGIN: TOKEN_REVOKED_BY_ADMIN)');
-                  setUser(null);
-                }
-              }
-            } catch (err) {
-              console.warn('[App] Exceção de rede na restauração da portaria (token preservado):', err);
-              console.log('[PORTARIA-DEBUG] SET USER NULL (ORIGIN: NETWORK_EXCEPTION)');
-              setUser(null);
-            }
-          } else {
-            console.log('[PORTARIA-DEBUG] SET USER NULL (ORIGIN: NO_PORTARIA_TOKEN)');
-            setUser(null);
-          }
-        }
-      } catch (err: any) {
-        const msg = err?.message || String(err || '');
-        if (
-          msg.includes('Invalid Refresh Token') ||
-          msg.includes('Refresh Token Not Found') ||
-          msg.includes('refresh_token_not_found')
-        ) {
-          console.warn('[App] Exceção de refresh token. Limpando sessão local.');
-          clearSupabaseStorage();
-          await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
-        } else {
-          console.error("Erro ao verificar sessão:", err);
-        }
-        console.log('[PORTARIA-DEBUG] SET USER NULL (ORIGIN: CHECKUSER_CATCH)');
-        setUser(null);
-      } finally {
-        console.log('[PORTARIA-DEBUG] LOADING FALSE');
-        setLoading(false);
-      }
-    };
-
-    checkUser();
+    checkUserSession();
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
       console.log('[PORTARIA-DEBUG] AUTH EVENT', {
@@ -2700,7 +2726,16 @@ export default function App() {
         hasUser: !!session?.user
       });
 
+      // Blindagem: Se o usuário atual está em sessão virtual de portaria, ignora eventos de auth do Supabase
+      const isPortariaActive = 
+        (userRef.current && userRef.current.role === 'porteiro') || 
+        !!localStorage.getItem('encomendas_portaria_token') ||
+        sessionStorage.getItem('encomendas_portaria_active') === 'true';
+
       if (event === 'INITIAL_SESSION') {
+        if (isPortariaActive) {
+          return;
+        }
         if (session?.user) {
           try {
             const { data: profile } = await supabase
@@ -2715,12 +2750,17 @@ export default function App() {
           } catch (_) {}
         }
       } else if (event === 'SIGNED_OUT') {
-        const hasPortariaToken = localStorage.getItem('encomendas_portaria_token');
-        if (!hasPortariaToken) {
+        if (!isPortariaActive) {
           console.log('[PORTARIA-DEBUG] SET USER NULL (ORIGIN: SIGNED_OUT)');
           setUser(null);
+          setLoading(false);
+        } else {
+          console.log('[PORTARIA-DEBUG] SIGNED_OUT IGNORED (PORTARIA ACTIVE)');
         }
       } else if (event === 'SIGNED_IN' || event === 'USER_UPDATED' || event === 'TOKEN_REFRESHED') {
+        if (isPortariaActive) {
+          return;
+        }
         if (session?.user) {
           try {
             const { data: profile } = await supabase
@@ -2745,9 +2785,14 @@ export default function App() {
   const handleLogout = async () => {
     clearActivePlantao();
     clearManualPorter();
+    sessionStorage.removeItem('encomendas_portaria_active');
     localStorage.removeItem('encomendas_portaria_token');
-    await supabase.auth.signOut().catch(() => {});
-    setUser(null);
+    try {
+      await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+    } finally {
+      setUser(null);
+      setLoading(false);
+    }
   };
 
   const handleUpdateUser = (updatedUser: Profile) => {
@@ -2765,12 +2810,32 @@ export default function App() {
           user.condominium_id ? <Navigate to="/dashboard" /> : <SelectCondominium user={user} onUpdateUser={handleUpdateUser} />
         ) : <Navigate to="/" />
       } />
-      <Route path="*" element={<AppLayout user={user} loading={loading} setUser={setUser} handleLogout={handleLogout} />} />
+      <Route path="*" element={
+        <AppLayout 
+          user={user} 
+          loading={loading} 
+          setUser={setUser} 
+          handleLogout={handleLogout}
+          portariaTempError={portariaTempError}
+          setPortariaTempError={setPortariaTempError}
+          handleRetryPortariaValidation={handleRetryPortariaValidation}
+          isRetryingPortaria={isRetryingPortaria}
+        />
+      } />
     </Routes>
   );
 }
 
-const AppLayout = ({ user, loading, setUser, handleLogout }: any) => {
+const AppLayout = ({ 
+  user, 
+  loading, 
+  setUser, 
+  handleLogout,
+  portariaTempError,
+  setPortariaTempError,
+  handleRetryPortariaValidation,
+  isRetryingPortaria
+}: any) => {
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -2814,6 +2879,53 @@ const AppLayout = ({ user, loading, setUser, handleLogout }: any) => {
       <Loader2 className="w-8 h-8 animate-spin text-emerald-600" />
     </div>
   );
+
+  if (!user && portariaTempError) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-zinc-50 p-4">
+        <div className="max-w-md w-full bg-white rounded-2xl p-6 shadow-sm border border-zinc-200 text-center space-y-4">
+          <div className="w-12 h-12 bg-amber-50 text-amber-600 rounded-full flex items-center justify-center mx-auto">
+            <WifiOff className="w-6 h-6" />
+          </div>
+          <div>
+            <h3 className="text-lg font-semibold text-zinc-900">Falha temporária de conexão</h3>
+            <p className="text-sm text-zinc-500 mt-1">
+              {portariaTempError}
+            </p>
+          </div>
+          <div className="pt-2 flex flex-col gap-2">
+            <button
+              onClick={handleRetryPortariaValidation}
+              disabled={isRetryingPortaria}
+              className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-sm font-medium rounded-xl transition-colors flex items-center justify-center gap-2"
+            >
+              {isRetryingPortaria ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>Tentando novamente...</span>
+                </>
+              ) : (
+                <>
+                  <RefreshCw className="w-4 h-4" />
+                  <span>Tentar novamente</span>
+                </>
+              )}
+            </button>
+            <button
+              onClick={() => {
+                setPortariaTempError(null);
+                localStorage.removeItem('encomendas_portaria_token');
+                sessionStorage.removeItem('encomendas_portaria_active');
+              }}
+              className="w-full py-2 px-4 text-xs text-zinc-500 hover:text-zinc-700 hover:bg-zinc-100 rounded-lg transition-colors"
+            >
+              Entrar com outra conta / Voltar ao login
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (!user) {
     console.log('[PORTARIA-DEBUG] LOGIN RENDER', {

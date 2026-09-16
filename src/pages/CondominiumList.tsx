@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { api } from '../lib/apiClient';
@@ -239,8 +239,29 @@ export default function CondominiumList({ user }: CondominiumListProps) {
 
   const navigate = useNavigate();
 
+  const isMountedRef = useRef(true);
+  const activeExecutionIdRef = useRef(0);
+
+  const withTimeout = <T,>(promise: PromiseLike<T>, ms: number, timeoutMsg: string): Promise<T> => {
+    let timer: any;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(timeoutMsg)), ms);
+    });
+    return Promise.race([
+      Promise.resolve(promise),
+      timeoutPromise
+    ]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
+  };
+
   useEffect(() => {
+    isMountedRef.current = true;
     fetchCondominiums();
+    return () => {
+      isMountedRef.current = false;
+      activeExecutionIdRef.current += 1;
+    };
   }, []);
 
   const getValidSession = async () => {
@@ -266,9 +287,20 @@ export default function CondominiumList({ user }: CondominiumListProps) {
   };
 
   const fetchCondominiums = async () => {
+    activeExecutionIdRef.current += 1;
+    const executionId = activeExecutionIdRef.current;
+    const isCurrent = () => isMountedRef.current && activeExecutionIdRef.current === executionId;
+
     setLoading(true);
     try {
-      const res = await api.get('/api/admin/condominiums');
+      const res = await withTimeout(
+        api.get('/api/admin/condominiums', { timeoutMs: 9000, retries: 1 }),
+        12000,
+        'Tempo limite esgotado ao aguardar resposta da API Express.'
+      );
+
+      if (!isCurrent()) return;
+
       if (res && res.ok && res.data?.condominiums && Array.isArray(res.data.condominiums)) {
         setCondos(res.data.condominiums);
         if (res.data.summary) {
@@ -278,24 +310,41 @@ export default function CondominiumList({ user }: CondominiumListProps) {
       }
       throw new Error(res?.error || 'Falha na resposta da API Express');
     } catch (apiError: any) {
+      if (!isCurrent()) return;
       console.warn('[CondominiumList] API indisponível, executando fallback direto no Supabase:', apiError);
       try {
-        const { data: dbCondos, error: condoError } = await supabase
+        const condoQuery = supabase
           .from('condominiums')
           .select('*')
           .order('created_at', { ascending: false });
+
+        const { data: dbCondos, error: condoError } = await withTimeout(
+          condoQuery,
+          10000,
+          'Tempo limite esgotado ao buscar condomínios no Supabase.'
+        );
+
+        if (!isCurrent()) return;
 
         if (condoError) {
           throw condoError;
         }
 
         if (dbCondos) {
-          const [profilesRes, packagesRes, moradoresRes, settingsRes] = await Promise.all([
+          const queries = Promise.all([
             supabase.from('profiles').select('id, condominium_id, active'),
             supabase.from('packages').select('id, condominium_id, status'),
             supabase.from('moradores').select('id, condominium_id'),
             supabase.from('condominium_settings').select('condominium_id, portaria_access_code, portaria_name')
           ]);
+
+          const [profilesRes, packagesRes, moradoresRes, settingsRes] = await withTimeout(
+            queries,
+            10000,
+            'Tempo limite esgotado ao carregar dados complementares no Supabase.'
+          );
+
+          if (!isCurrent()) return;
 
           const allProfiles = profilesRes.data || [];
           const allPackages = packagesRes.data || [];
@@ -339,11 +388,17 @@ export default function CondominiumList({ user }: CondominiumListProps) {
           });
         }
       } catch (fallbackError: any) {
+        if (!isCurrent()) return;
         console.error('Erro ao buscar condomínios no Supabase:', fallbackError);
-        toast.error(fallbackError.message || 'Erro ao carregar condomínios');
+        const errMsg = typeof fallbackError?.message === 'string'
+          ? fallbackError.message
+          : 'Não foi possível carregar os condomínios no momento. Verifique sua conexão e tente novamente.';
+        toast.error(errMsg);
       }
     } finally {
-      setLoading(false);
+      if (isCurrent()) {
+        setLoading(false);
+      }
     }
   };
 
