@@ -347,7 +347,10 @@ const LoginPage = ({ onLogin }: any) => {
 
       // If business error (e.g. inactive condo or explicit not found with json), handle it
       if (res && (res.status === 404 || res.status === 403)) {
-        const errMsg = res?.data?.error || res?.error || "Código de acesso da portaria não encontrado.";
+        const rawErr = res?.data?.error || res?.error || "Código de acesso da portaria não encontrado.";
+        const errMsg = typeof rawErr === "object" && rawErr !== null
+          ? String(rawErr.message || rawErr.code || JSON.stringify(rawErr))
+          : String(rawErr);
         setError(errMsg);
         toast.error(errMsg);
         return;
@@ -385,7 +388,10 @@ const LoginPage = ({ onLogin }: any) => {
         }
       }
 
-      const errMsg = res?.data?.error || res?.error || "Código de acesso da portaria não encontrado.";
+      const rawErr = res?.data?.error || res?.error || "Código de acesso da portaria não encontrado.";
+      const errMsg = typeof rawErr === "object" && rawErr !== null
+        ? String(rawErr.message || rawErr.code || JSON.stringify(rawErr))
+        : String(rawErr);
       setError(errMsg);
       toast.error(errMsg);
     } catch (err: any) {
@@ -417,8 +423,12 @@ const LoginPage = ({ onLogin }: any) => {
         }
       } catch {}
 
-      setError(err.message || "Erro ao conectar à portaria.");
-      toast.error(err.message || "Erro ao conectar à portaria.");
+      const rawCatchErr = err?.message || err;
+      const catchErrMsg = typeof rawCatchErr === "object" && rawCatchErr !== null
+        ? String(rawCatchErr.message || rawCatchErr.code || JSON.stringify(rawCatchErr))
+        : String(rawCatchErr || "Erro ao conectar à portaria.");
+      setError(catchErrMsg);
+      toast.error(catchErrMsg);
     } finally {
       setActivatingPortaria(false);
     }
