@@ -1,5 +1,5 @@
 import express from "express";
-import { createServer as createViteServer } from "vite";
+// Vite is imported dynamically for local dev mode to prevent runtime issues in serverless
 import path from "path";
 import { fileURLToPath } from "url";
 import crypto from "crypto";
@@ -26,8 +26,9 @@ if (!supabaseServiceKey) {
   console.log("[DEBUG BACKEND] SUPABASE_SERVICE_ROLE_KEY encontrada. Cliente admin inicializado.");
 }
 
-// Formatter helpers
-const formatSafeDateTime = (value: any) => {
+export const app = express();
+
+  const formatSafeDateTime = (value: any) => {
   if (!value) return "-";
   const d = new Date(value);
   return isNaN(d.getTime()) ? "-" : d.toLocaleString("pt-BR");
@@ -39,109 +40,11 @@ const formatSafeDate = (value: any) => {
   return isNaN(d.getTime()) ? "-" : d.toLocaleDateString("pt-BR");
 };
 
-export const app = express();
-  const PORT = Number(process.env.PORT) || 3000;
-
-  // CORS Middleware for Web and Capacitor Native App
-  app.use((req, res, next) => {
-    const origin = req.headers.origin;
-    const allowedOrigins = [
-      'https://encomendas-inteligentes-v2.vercel.app',
-      'capacitor://localhost',
-      'http://localhost',
-      'https://localhost',
-      'http://localhost:3000',
-      'http://localhost:5173',
-      'http://127.0.0.1:3000',
-      'http://127.0.0.1:5173'
-    ];
-
-    const isAllowed = !origin ||
-      allowedOrigins.includes(origin) ||
-      origin.endsWith('.vercel.app') ||
-      origin.endsWith('.run.app') ||
-      origin.startsWith('capacitor://') ||
-      origin.startsWith('ionic://');
-
-    if (isAllowed) {
-      res.setHeader('Access-Control-Allow-Origin', origin || '*');
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, Accept, X-Requested-With');
-      res.setHeader('Access-Control-Allow-Credentials', 'true');
-    }
-
-    if (req.method === 'OPTIONS') {
-      return res.sendStatus(204);
-    }
-    next();
-  });
-
-  // Trust reverse proxy headers (Cloud Run / Ingress / Nginx / Load Balancer)
-  app.set('trust proxy', 1);
+// ... existing code ...
+// app is exported at module level
+const PORT = Number(process.env.PORT) || 3000;
 
   app.use(express.json({ limit: '10mb' }));
-
-  /**
-   * Resolves the canonical public base URL of the application.
-   * Ensures that all generated shareable demo & referral links point to the real
-   * public URL in production, independent of what client/device (PC, mobile, tablet)
-   * or proxy generated the request.
-   */
-  const getCanonicalPublicBaseUrl = (req: express.Request): string => {
-    // 1. Explicit environment variable
-    const envUrl = process.env.APP_URL || process.env.VITE_APP_URL || process.env.PUBLIC_URL;
-    if (envUrl && envUrl.trim()) {
-      const clean = envUrl.trim().replace(/\/+$/, '');
-      if (!clean.includes('localhost') && !clean.includes('127.0.0.1')) {
-        return clean;
-      }
-    }
-
-    // 2. Reverse proxy headers (x-forwarded-host & x-forwarded-proto)
-    const forwardedHost = req.headers['x-forwarded-host'];
-    const forwardedProto = req.headers['x-forwarded-proto'];
-    if (forwardedHost) {
-      const hostStr = (Array.isArray(forwardedHost) ? forwardedHost[0] : forwardedHost.split(',')[0]).trim();
-      const protoStr = (forwardedProto
-        ? (Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto.split(',')[0]).trim()
-        : (hostStr.includes('localhost') || hostStr.includes('127.0.0.1') ? 'http' : 'https'));
-      if (hostStr && !hostStr.startsWith('localhost') && !hostStr.startsWith('127.0.0.1')) {
-        return `${protoStr}://${hostStr}`;
-      }
-    }
-
-    // 3. Origin header sent by browser on API fetch requests
-    const originHeader = req.headers['origin'];
-    if (originHeader && typeof originHeader === 'string' && originHeader.startsWith('http')) {
-      try {
-        const u = new URL(originHeader);
-        if (!u.hostname.includes('localhost') && !u.hostname.includes('127.0.0.1')) {
-          return `${u.protocol}//${u.host}`;
-        }
-      } catch {}
-    }
-
-    // 4. Referer header sent by browser
-    const refererHeader = req.headers['referer'];
-    if (refererHeader && typeof refererHeader === 'string' && refererHeader.startsWith('http')) {
-      try {
-        const u = new URL(refererHeader);
-        if (!u.hostname.includes('localhost') && !u.hostname.includes('127.0.0.1')) {
-          return `${u.protocol}//${u.host}`;
-        }
-      } catch {}
-    }
-
-    // 5. Host header (if not localhost)
-    const host = req.get('host');
-    if (host && !host.startsWith('localhost') && !host.startsWith('127.0.0.1')) {
-      const proto = req.protocol === 'https' ? 'https' : 'http';
-      return `${proto}://${host}`;
-    }
-
-    // 6. Development fallback
-    return `${req.protocol || 'http'}://${host || 'localhost:3000'}`;
-  };
 
   // --- PORTARIA OPERATIONAL ACCESS MANAGER ---
   interface PortariaCreds {
@@ -252,40 +155,6 @@ export const app = express();
     }
 
     return creds;
-  };
-
-  const safeLogAuditoria = async (event: {
-    condominio_id?: string | null;
-    usuario_id?: string | null;
-    usuario_nome: string;
-    usuario_perfil: string;
-    tipo_evento: string;
-    acao: string;
-    tabela_afetada: string;
-    registro_id?: string | null;
-    descricao: string;
-    metodo?: string;
-    dados_antes?: any;
-    dados_depois?: any;
-  }) => {
-    try {
-      await supabaseAdmin.from('auditoria_eventos').insert([{
-        condominio_id: event.condominio_id || null,
-        usuario_id: event.usuario_id || null,
-        usuario_nome: event.usuario_nome,
-        usuario_perfil: event.usuario_perfil,
-        tipo_evento: event.tipo_evento,
-        acao: event.acao,
-        tabela_afetada: event.tabela_afetada,
-        registro_id: event.registro_id || null,
-        descricao: event.descricao,
-        metodo: event.metodo || 'COMMERCIAL_ENGINE',
-        dados_antes: event.dados_antes || null,
-        dados_depois: event.dados_depois || null
-      }]);
-    } catch (e: any) {
-      console.warn("[Auditoria] Aviso ao registrar log de auditoria:", e?.message || e);
-    }
   };
 
   // --- PORTARIA API ENDPOINTS ---
@@ -890,6 +759,7 @@ export const app = express();
                 must_change_password: true,
                 horario_inicio: u.horario_inicio || null,
                 horario_fim: u.horario_fim || null,
+                escala_tipo: u.escala_tipo || null,
                 created_by: user.id
               }]).select().single();
 
@@ -1015,37 +885,9 @@ export const app = express();
     }
   });
 
-  // Create initial profile API route (for signup)
+  // Create initial profile API route (DESATIVADO - Cadastro público desativado)
   app.post("/api/auth/create-profile", async (req, res) => {
-    const authHeader = req.headers.authorization;
-    if (!authHeader) return res.status(401).json({ error: "Não autorizado" });
-
-    const token = authHeader.split(' ')[1];
-    const { data: { user }, error: authError } = await supabase.auth.getUser(token);
-
-    if (authError || !user) return res.status(401).json({ error: "Sessão inválida" });
-
-    const { fullName, role } = req.body;
-
-    try {
-      const { data: profile, error: profileError } = await supabaseAdmin
-        .from('profiles')
-        .insert([{
-          id: user.id,
-          full_name: fullName,
-          role: role || 'resident',
-          active: true
-        }])
-        .select()
-        .single();
-
-      if (profileError) throw profileError;
-
-      res.json({ profile });
-    } catch (err: any) {
-      console.error("Erro ao criar perfil:", err);
-      res.status(500).json({ error: err.message });
-    }
+    return res.status(403).json({ error: "Cadastro público desativado. Somente o administrador pode criar contas de acesso." });
   });
 
   const sendWhatsAppMessage = async (to: string, message: string, condominiumId: string, packageId?: string, isTemplate = false, templateData?: any) => {
@@ -1458,14 +1300,11 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
         
         const foundAdmin = (profiles || []).find(p => {
           const r = (p.role || '').toLowerCase();
-          return r === 'admin' || r === 'superadmin' || r === 'gestor';
-        }) || (profiles || []).find(p => {
-          const r = (p.role || '').toLowerCase();
           return r.includes('admin') || r.includes('sindico');
-        }) || { id: 'demo-admin-id', full_name: 'Administrador Demo', role: 'admin', active: true };
+        }) || (profiles || [])[0];
 
         adminUser = { id: foundAdmin?.id || 'demo-admin-id', email: foundAdmin?.email || 'admin@demo.com' };
-        adminProfile = { ...foundAdmin, role: 'admin' };
+        adminProfile = foundAdmin || { id: 'demo-admin-id', full_name: 'Administrador Demo', role: 'admin', active: true };
       } else {
         const { data: { user }, error: authError } = await supabase.auth.getUser(token);
         if (authError || !user) {
@@ -1541,8 +1380,7 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
 
       let enrichedProfiles = profiles || [];
       try {
-        const authRes = await supabaseAdmin.auth.admin.listUsers();
-        const authUsers = authRes?.data?.users;
+        const { data: { users: authUsers } } = await supabaseAdmin.auth.admin.listUsers();
         const emailMap = new Map((authUsers || []).map(u => [u.id, u.email]));
         enrichedProfiles = enrichedProfiles.map(p => ({
           ...p,
@@ -1581,18 +1419,10 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
         throw error;
       }
 
-      // Fetch profiles, moradores, packages, and condominium_settings in parallel
-      const [
-        { data: allProfiles },
-        { data: allMoradores },
-        { data: allPackages },
-        { data: allSettings }
-      ] = await Promise.all([
-        supabaseAdmin.from('profiles').select('id, condominium_id'),
-        supabaseAdmin.from('moradores').select('id, condominium_id'),
-        supabaseAdmin.from('packages').select('id, condominium_id'),
-        supabaseAdmin.from('condominium_settings').select('*')
-      ]);
+      // Fetch profiles, moradores, and packages counts safely without breaking if empty
+      const { data: allProfiles } = await supabaseAdmin.from('profiles').select('id, condominium_id');
+      const { data: allMoradores } = await supabaseAdmin.from('moradores').select('id, condominium_id');
+      const { data: allPackages } = await supabaseAdmin.from('packages').select('id, condominium_id');
 
       const profilesByCondo: Record<string, number> = {};
       (allProfiles || []).forEach(p => {
@@ -1615,40 +1445,8 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
         }
       });
 
-      const settingsByCondo = new Map<string, any>();
-      (allSettings || []).forEach(s => {
-        if (s && s.condominium_id) {
-          settingsByCondo.set(s.condominium_id, s);
-        }
-      });
-
       const enriched = await Promise.all((condominiums || []).map(async c => {
-        let creds: PortariaCreds;
-
-        // 1. Check in-memory store first
-        if (portariaStore.has(c.id)) {
-          creds = portariaStore.get(c.id)!;
-          if (c.name && creds.portaria_name !== c.name) {
-            creds.portaria_name = c.name;
-          }
-        } else {
-          // 2. Check batch-queried settings
-          const dbSettings = settingsByCondo.get(c.id);
-          if (dbSettings && dbSettings.portaria_access_code) {
-            creds = {
-              condominium_id: c.id,
-              portaria_name: dbSettings.portaria_name || c.name,
-              portaria_access_code: dbSettings.portaria_access_code,
-              active_token: dbSettings.active_portaria_token || null,
-              updated_at: new Date().toISOString()
-            };
-            portariaStore.set(c.id, creds);
-          } else {
-            // 3. Only initialize when no settings exist at all
-            creds = await getOrInitPortariaCreds(c.id, c.name);
-          }
-        }
-
+        const creds = await getOrInitPortariaCreds(c.id, c.name);
         return {
           ...c,
           user_count: profilesByCondo[c.id] || 0,
@@ -1694,14 +1492,11 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
         .eq('condominium_id', id)
         .order('full_name');
 
-      if (error) {
-        console.warn("[Admin API] Aviso ao buscar profiles do condomínio:", error.message);
-      }
+      if (error) throw error;
 
       let enrichedProfiles = profiles || [];
       try {
-        const authRes = await supabaseAdmin.auth.admin.listUsers();
-        const authUsers = authRes?.data?.users;
+        const { data: { users: authUsers } } = await supabaseAdmin.auth.admin.listUsers();
         const emailMap = new Map((authUsers || []).map(u => [u.id, u.email]));
         enrichedProfiles = enrichedProfiles.map(p => ({
           ...p,
@@ -2192,8 +1987,8 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
     if ("error" in session) return res.status(session.status).json({ error: session.error });
     const { adminUser, adminProfile } = session;
 
-    const { email, password, full_name, phone, role, condominium_id, horario_inicio, horario_fim } = req.body;
-    console.log("[DEBUG BACKEND] Criando novo usuário:", { email, full_name, role, condominium_id });
+    const { email, password, full_name, phone, role, condominium_id, horario_inicio, horario_fim, escala_tipo } = req.body;
+    console.log("[DEBUG BACKEND] Criando novo usuário:", { email, full_name, role, condominium_id, escala_tipo });
 
     if (!full_name || full_name.trim() === '') {
       return res.status(400).json({ error: "O nome completo é obrigatório." });
@@ -2215,14 +2010,10 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
       }
     }
 
-    // Síndico permissions check
-    if (adminProfile.role === 'sindico') {
-      if (condominium_id !== adminProfile.condominium_id) {
-        return res.status(403).json({ error: "Síndicos só podem criar usuários para o seu próprio condomínio." });
-      }
-      if (role !== 'porteiro' && role !== 'resident') {
-        return res.status(403).json({ error: "Síndicos só podem criar porteiros ou moradores." });
-      }
+    // Regra Operacional Definitiva: Somente Administradores podem criar acessos de usuários
+    const rawRole = (adminProfile?.role || '').toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    if (!rawRole.includes('admin')) {
+      return res.status(403).json({ error: "Acesso negado. Apenas o administrador pode criar novos acessos de usuários." });
     }
 
     try {
@@ -2285,6 +2076,7 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
           must_change_password: true,
           horario_inicio: horario_inicio || null,
           horario_fim: horario_fim || null,
+          escala_tipo: escala_tipo || null,
           created_by: adminUser.id
         }])
         .select()
@@ -2334,8 +2126,8 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
     const { adminUser, adminProfile } = session;
 
     const { id } = req.params;
-    const { full_name, phone, role, condominium_id, active, horario_inicio, horario_fim } = req.body;
-    console.log("[DEBUG BACKEND] Atualizando usuário:", id, { full_name, phone, role, condominium_id, active, horario_inicio, horario_fim });
+    const { full_name, phone, role, condominium_id, active, horario_inicio, horario_fim, escala_tipo } = req.body;
+    console.log("[DEBUG BACKEND] Atualizando usuário:", id, { full_name, phone, role, condominium_id, active, horario_inicio, horario_fim, escala_tipo });
 
     // Fetch target user to check permissions
     const { data: targetProfile } = await supabaseAdmin
@@ -2377,6 +2169,7 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
       if (active !== undefined) updateData.active = active;
       if (horario_inicio !== undefined) updateData.horario_inicio = horario_inicio || null;
       if (horario_fim !== undefined) updateData.horario_fim = horario_fim || null;
+      if (escala_tipo !== undefined) updateData.escala_tipo = escala_tipo || null;
 
       console.log("[DEBUG BACKEND] Dados de atualização:", updateData);
 
@@ -2453,14 +2246,10 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
       return res.status(404).json({ error: "Este usuário ainda não possui uma conta de acesso." });
     }
 
-    // Síndico restrictions
-    if (adminProfile.role === 'sindico') {
-      if (targetProfile.condominium_id && targetProfile.condominium_id !== adminProfile.condominium_id) {
-        return res.status(403).json({ error: "Acesso negado: Usuário pertence a outro condomínio." });
-      }
-      if (targetProfile.role === 'admin' || targetProfile.role === 'sindico') {
-        return res.status(403).json({ error: "Síndicos não podem resetar senha de administradores ou de outros síndicos." });
-      }
+    // Regra Operacional Definitiva: Somente Administradores podem gerar/resetar credenciais de acesso
+    const resetCallerRole = (adminProfile?.role || '').toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    if (!resetCallerRole.includes('admin')) {
+      return res.status(403).json({ error: "Acesso negado. Apenas o administrador pode gerar ou redefinir credenciais de acesso." });
     }
 
     try {
@@ -2734,10 +2523,9 @@ ${directPickupLink || portalLink || `https://api.qrserver.com/v1/create-qr-code/
   });
 
 export async function startServer() {
-  const PORT = Number(process.env.PORT) || 3000;
-
   // Vite middleware para desenvolvimento
   if (process.env.NODE_ENV !== "production") {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
@@ -2754,16 +2542,16 @@ export async function startServer() {
     console.log(`Server running on http://localhost:${PORT}`);
   });
 
-  // Ensure 'packages' bucket exists asynchronously (non-blocking)
-  if (supabaseServiceKey && supabaseUrl && !supabaseUrl.includes('placeholder')) {
+  // Ensure "packages" bucket exists asynchronously (non-blocking)
+  if (supabaseServiceKey && supabaseUrl && !supabaseUrl.includes("placeholder")) {
     supabaseAdmin.storage.listBuckets().then(({ data: buckets }) => {
-      if (!buckets?.find(b => b.name === 'packages')) {
-        supabaseAdmin.storage.createBucket('packages', {
+      if (!buckets?.find(b => b.name === "packages")) {
+        supabaseAdmin.storage.createBucket("packages", {
           public: true,
-          allowedMimeTypes: ['image/jpeg', 'image/png'],
+          allowedMimeTypes: ["image/jpeg", "image/png"],
           fileSizeLimit: 5242880 // 5MB
         }).then(() => {
-          console.log("Created 'packages' storage bucket");
+          console.log("Created \x27packages\x27 storage bucket");
         }).catch(err => {
           console.warn("Storage bucket creation notice:", err?.message || err);
         });

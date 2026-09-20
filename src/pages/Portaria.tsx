@@ -1,7 +1,6 @@
 import React, { useEffect, useState, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
-import { api } from '../lib/apiClient';
 import { Package, Profile, Morador } from '../types';
 import { feedback } from '../lib/feedback';
 import { 
@@ -54,7 +53,8 @@ import {
   setActivePlantao as saveActivePlantao, 
   clearActivePlantao, 
   isTimeInShift, 
-  isPlantaoExpired, 
+  isPlantaoExpired,
+  findEligiblePorterForShift,
   PlantaoAtivo 
 } from '../lib/plantaoUtils';
 
@@ -121,6 +121,42 @@ export default function Portaria({ user }: PortariaProps) {
   const [motivoSubstituicao, setMotivoSubstituicao] = useState<string>('Troca de Turno');
   const [obsSubstituicao, setObsSubstituicao] = useState<string>('');
 
+  const autoActivatePlantao = (porteiro: Profile) => {
+    const newPlantao: PlantaoAtivo = {
+      id: porteiro.id,
+      condominium_id: user?.condominium_id || '',
+      porteiro_id: porteiro.id,
+      porteiro_nome: porteiro.full_name,
+      horario_inicio: porteiro.horario_inicio || '00:00',
+      horario_fim: porteiro.horario_fim || '23:59',
+      started_at: new Date().toISOString(),
+      substituicao: {
+        is_substituicao: false
+      }
+    };
+
+    saveActivePlantao(newPlantao);
+    setActivePlantaoState(newPlantao);
+    setCurrentPorter(porteiro.full_name);
+    setManualPorter(porteiro.full_name, user?.condominium_id);
+    setShowShiftModal(false);
+    setShowPorterModal(false);
+    setIsShiftExpired(false);
+
+    registrarAuditoria({
+      condominio_id: user?.condominium_id || '',
+      usuario_id: user?.id || '',
+      usuario_nome: user?.full_name || 'Porteiro',
+      usuario_perfil: user?.role || 'porteiro',
+      tipo_evento: 'INICIO_PLANTAO',
+      acao: 'CREATE',
+      tabela_afetada: 'profiles',
+      registro_id: porteiro.id,
+      descricao: `Início automático do plantão por escala (${porteiro.escala_tipo === 'impar' ? 'Dia Ímpar' : porteiro.escala_tipo === 'par' ? 'Dia Par' : 'Diário'}): ${porteiro.full_name} (${porteiro.horario_inicio || '00:00'} às ${porteiro.horario_fim || '23:59'})`,
+      metodo: 'SISTEMA'
+    }).catch(() => {});
+  };
+
   const fetchPorteiros = async () => {
     if (!user?.condominium_id) return;
     try {
@@ -132,18 +168,18 @@ export default function Portaria({ user }: PortariaProps) {
         .eq('active', true)
         .order('full_name');
 
-      if (!error && data && data.length > 0) {
+      if (!error && data) {
         setPorteirosList(data);
-        return;
-      }
 
-      // Fallback: se Supabase direto falhar ou não retornar porteiros (ex: sessão anônima da portaria),
-      // busca via endpoint autenticado pelo backend que valida o token permanente
-      const savedToken = localStorage.getItem('encomendas_portaria_token');
-      if (savedToken) {
-        const res = await api.get(`/api/portaria/validate-token/${encodeURIComponent(savedToken)}`, { skipAuth: true });
-        if (res.ok && res.data?.porters && Array.isArray(res.data.porters)) {
-          setPorteirosList(res.data.porters);
+        // Identificação automática por escala (Ímpar/Par/Diário)
+        const current = getActivePlantao(user.condominium_id);
+        if (!current || isPlantaoExpired(current)) {
+          const { eligiblePorter, count } = findEligiblePorterForShift(data, new Date(), user.condominium_id);
+          if (eligiblePorter && count === 1) {
+            autoActivatePlantao(eligiblePorter);
+          } else {
+            setShowShiftModal(true);
+          }
         }
       }
     } catch (err) {
@@ -166,16 +202,29 @@ export default function Portaria({ user }: PortariaProps) {
       const current = getActivePlantao(user?.condominium_id);
       if (current) {
         if (isPlantaoExpired(current)) {
-          setIsShiftExpired(true);
-          setShowShiftModal(true);
+          // Plantão expirou: tenta identificar automaticamente o próximo porteiro da escala
+          const { eligiblePorter, count } = findEligiblePorterForShift(porteirosList, new Date(), user?.condominium_id);
+          if (eligiblePorter && count === 1) {
+            autoActivatePlantao(eligiblePorter);
+          } else {
+            setIsShiftExpired(true);
+            setShowShiftModal(true);
+          }
         } else {
           setIsShiftExpired(false);
+        }
+      } else {
+        const { eligiblePorter, count } = findEligiblePorterForShift(porteirosList, new Date(), user?.condominium_id);
+        if (eligiblePorter && count === 1) {
+          autoActivatePlantao(eligiblePorter);
+        } else {
+          setShowShiftModal(true);
         }
       }
     }, 30000);
 
     return () => clearInterval(checkInterval);
-  }, [user?.condominium_id]);
+  }, [user?.condominium_id, porteirosList]);
 
   const handleSelectPlantao = (porteiro: Profile) => {
     const now = new Date();
@@ -269,10 +318,10 @@ export default function Portaria({ user }: PortariaProps) {
     toast.success(`Substituição de plantão registrada! Porteiro: ${selectedSubstituto.full_name} 🔁`);
   };
 
-  // Não forçar a abertura bloqueante contínua se não houver porteiro selecionado
-  // O usuário pode abrir quando desejar pelo botão no topo do painel
   useEffect(() => {
-    // Mantido sem forçar setShowPorterModal(true) para não bloquear a tela da portaria
+    if (currentPorter === 'Selecione o Porteiro') {
+      setShowPorterModal(true);
+    }
   }, [currentPorter]);
   const [showConfirmDelivery, setShowConfirmDelivery] = useState(false);
   const [isConfirmingDelivery, setIsConfirmingDelivery] = useState(false);
@@ -511,13 +560,10 @@ export default function Portaria({ user }: PortariaProps) {
         .eq('id', user.condominium_id)
         .maybeSingle();
       
-      if (error) {
-        console.warn('Aviso ao buscar nome do condomínio:', error?.message || error);
-        return;
-      }
+      if (error) throw error;
       if (data) setCondoName(data.name);
-    } catch (error: any) {
-      console.warn('Aviso ao buscar nome do condomínio (rede indisponível):', error?.message || error);
+    } catch (error) {
+      console.error('Erro ao buscar nome do condomínio:', error);
     }
   };
 
@@ -538,8 +584,7 @@ export default function Portaria({ user }: PortariaProps) {
           .from('packages')
           .update({ status: 'received' })
           .eq('condominium_id', user.condominium_id)
-          .in('status', ['pending', 'notified'])
-          .then(() => {}, (err) => console.warn('[Portaria] Aviso na migração de status recebidos:', err));
+          .in('status', ['pending', 'notified']);
 
         // 2. Inicializar whatsapp_notified para registros antigos baseados no whatsapp_status
         const notifiedStatuses = ['sent', 'enviado', 'delivered', 'read'];
@@ -548,15 +593,13 @@ export default function Portaria({ user }: PortariaProps) {
           .update({ whatsapp_notified: true, whatsapp_sent: true })
           .eq('condominium_id', user.condominium_id)
           .in('whatsapp_status', notifiedStatuses)
-          .is('whatsapp_notified', null)
-          .then(() => {}, (err) => console.warn('[Portaria] Aviso na migração de status notificados:', err));
+          .is('whatsapp_notified', null);
         
         await supabase
           .from('packages')
           .update({ whatsapp_notified: false, whatsapp_sent: false })
           .eq('condominium_id', user.condominium_id)
-          .is('whatsapp_notified', null)
-          .then(() => {}, (err) => console.warn('[Portaria] Aviso na migração de status não-notificados:', err));
+          .is('whatsapp_notified', null);
 
         // 3. Manter compatibilidade com status legados
         await supabase
@@ -564,15 +607,14 @@ export default function Portaria({ user }: PortariaProps) {
           .update({ whatsapp_status: 'pending' })
           .eq('condominium_id', user.condominium_id)
           .in('status', ['received', 'pending'])
-          .is('whatsapp_status', null)
-          .then(() => {}, (err) => console.warn('[Portaria] Aviso na migração de status legados:', err));
+          .is('whatsapp_status', null);
           
       } catch (err) {
-        console.warn('[Portaria] Migração de status não pôde ser executada (sessão/permissão restrita):', err);
+        console.error('Erro ao processar migração de status:', err);
       }
     };
     migrateStatuses();
-  }, [user?.condominium_id]);
+  }, [user.condominium_id]);
 
   // Removed individualNotifyData state as per request for direct flows
   const handleDirectNotify = async (pkg: any) => {
@@ -1464,8 +1506,7 @@ export default function Portaria({ user }: PortariaProps) {
       ]);
 
       if (pkgResult.error) {
-        console.warn('Aviso ao buscar encomendas (permissão ou rede):', pkgResult.error.message || pkgResult.error);
-        setPackages([]);
+        console.error('Erro ao buscar encomendas:', pkgResult.error);
       } else {
         const pkgs = pkgResult.data || [];
         setPackages(pkgs);
@@ -1475,15 +1516,14 @@ export default function Portaria({ user }: PortariaProps) {
       }
 
       if (resResult.error) {
-        console.warn('Aviso ao buscar moradores (permissão ou rede):', resResult.error.message || resResult.error);
-        setResidents([]);
+        console.error('Erro ao buscar moradores:', resResult.error);
       } else {
         setResidents(resResult.data || []);
       }
 
-      // Só mostramos aviso se ambos falharem
+      // Só mostramos erro se ambos falharem
       if (pkgResult.error && resResult.error) {
-        console.warn('Não foi possível sincronizar dados da portaria no momento.');
+        toast.error('Erro ao carregar dados da portaria');
       }
 
       return {
@@ -3126,16 +3166,17 @@ const isValidUuid = (id?: string | null): boolean => {
                       Quem está assumindo o controle da portaria neste turno?
                     </p>
                   </div>
-                  <button 
-                    onClick={() => {
-                      setShowPorterModal(false);
-                      setShowShiftModal(false);
-                    }} 
-                    className="p-2 hover:bg-zinc-100 rounded-full transition-colors text-zinc-400 shrink-0"
-                    title="Fechar"
-                  >
-                    <X className="w-5 h-5" />
-                  </button>
+                  {activePlantao && !isShiftExpired && (
+                    <button 
+                      onClick={() => {
+                        setShowPorterModal(false);
+                        setShowShiftModal(false);
+                      }} 
+                      className="p-2 hover:bg-zinc-100 rounded-full transition-colors text-zinc-400 shrink-0"
+                    >
+                      <X className="w-5 h-5" />
+                    </button>
+                  )}
                 </div>
 
                 {isShiftExpired && (
@@ -3203,7 +3244,7 @@ const isValidUuid = (id?: string | null): boolean => {
                   )}
                 </div>
 
-                {activePlantao && !isShiftExpired ? (
+                {activePlantao && !isShiftExpired && (
                   <button
                     onClick={() => {
                       setShowPorterModal(false);
@@ -3212,16 +3253,6 @@ const isValidUuid = (id?: string | null): boolean => {
                     className="w-full py-3.5 bg-zinc-900 text-white rounded-2xl font-bold hover:bg-black transition-all text-sm"
                   >
                     Permanecer no Plantão Atual
-                  </button>
-                ) : (
-                  <button
-                    onClick={() => {
-                      setShowPorterModal(false);
-                      setShowShiftModal(false);
-                    }}
-                    className="w-full py-3 bg-zinc-100 text-zinc-600 rounded-2xl font-semibold hover:bg-zinc-200 transition-all text-sm"
-                  >
-                    Acessar Portaria sem Definir Plantão
                   </button>
                 )}
               </div>

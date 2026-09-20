@@ -42,7 +42,8 @@ export default function UserFormModal({
     condominium_id: '',
     active: true,
     horario_inicio: '',
-    horario_fim: ''
+    horario_fim: '',
+    escala_tipo: '' as 'impar' | 'par' | 'todos' | ''
   });
 
   const [createdSuccessData, setCreatedSuccessData] = useState<{
@@ -68,7 +69,8 @@ export default function UserFormModal({
           condominium_id: editingUser.condominium_id || presetCondominiumId || '',
           active: editingUser.active !== false,
           horario_inicio: editingUser.horario_inicio || '',
-          horario_fim: editingUser.horario_fim || ''
+          horario_fim: editingUser.horario_fim || '',
+          escala_tipo: (editingUser.escala_tipo as any) || ''
         });
       } else {
         const defaultCondoId = presetCondominiumId || (currentUser.role === 'sindico' ? currentUser.condominium_id || '' : condominiums[0]?.id || '');
@@ -80,7 +82,8 @@ export default function UserFormModal({
           condominium_id: defaultCondoId,
           active: true,
           horario_inicio: '',
-          horario_fim: ''
+          horario_fim: '',
+          escala_tipo: ''
         });
       }
     }
@@ -216,7 +219,8 @@ export default function UserFormModal({
             condominium_id: targetCondoId || null,
             active: formData.active,
             horario_inicio: formData.horario_inicio || null,
-            horario_fim: formData.horario_fim || null
+            horario_fim: formData.horario_fim || null,
+            escala_tipo: formData.escala_tipo || null
           })
         });
 
@@ -265,7 +269,8 @@ export default function UserFormModal({
             role: formData.role,
             condominium_id: targetCondoId || null,
             horario_inicio: formData.horario_inicio || null,
-            horario_fim: formData.horario_fim || null
+            horario_fim: formData.horario_fim || null,
+            escala_tipo: formData.escala_tipo || null
           })
         });
 
@@ -588,6 +593,25 @@ export default function UserFormModal({
                         className="w-full px-3 py-2 rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 text-sm"
                       />
                     </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-zinc-500 uppercase tracking-wider mb-1.5">
+                      Tipo de Escala (Dias de Plantão)
+                    </label>
+                    <select
+                      value={formData.escala_tipo || ''}
+                      onChange={e => setFormData({ ...formData, escala_tipo: e.target.value as any })}
+                      className="w-full px-4 py-2.5 rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 bg-white text-sm font-medium"
+                    >
+                      <option value="">Não configurada (Manual)</option>
+                      <option value="impar">Dia Ímpar</option>
+                      <option value="par">Dia Par</option>
+                      <option value="todos">Todos os Dias / Diário</option>
+                    </select>
+                    <p className="text-[11px] text-zinc-400 mt-1">
+                      Permite que o sistema identifique automaticamente o porteiro ativo no plantão deste condomínio.
+                    </p>
                   </div>
                 </div>
               )}

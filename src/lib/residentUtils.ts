@@ -1,5 +1,4 @@
 import { Morador } from '../types';
-import { isLikelyPhoneNumber } from '../services/residentImporter';
 
 export const getResidentAddressLines = (resident: Morador | any) => {
   if (!resident) return [];
@@ -10,11 +9,6 @@ export const getResidentAddressLines = (resident: Morador | any) => {
   const unitType = resident.unit_type || '';
   
   let mainUnit = String(rawUnit).trim();
-  // Se o campo de unidade for na verdade um número de telefone, descarta
-  if (mainUnit && isLikelyPhoneNumber(mainUnit)) {
-    mainUnit = '';
-  }
-
   if (unitType && mainUnit) {
     const unitUpper = mainUnit.toUpperCase();
     const typeUpper = String(unitType).toUpperCase();
@@ -55,11 +49,7 @@ export const formatResidentAddress = (resident: Morador | any) => {
   if (!resident) return 'Unidade';
   const lines = getResidentAddressLines(resident);
   if (lines.length > 0) return lines.join(' • ');
-  const raw = resident.unidade ? String(resident.unidade).trim() : '';
-  if (raw && !isLikelyPhoneNumber(raw)) {
-    return raw;
-  }
-  return 'Sem Residência';
+  return resident.unidade ? String(resident.unidade).trim() : 'Unidade';
 };
 
 export const formatPackageUnit = (pkg: any) => {

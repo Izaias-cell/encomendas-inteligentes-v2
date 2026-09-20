@@ -20,38 +20,20 @@ export interface ApiResponse<T = any> {
  */
 export async function getValidAuthToken(): Promise<string> {
   try {
-    const { data, error } = await supabase.auth.getSession();
-    if (error) {
-      const msg = error.message || '';
-      if (
-        msg.includes('Invalid Refresh Token') ||
-        msg.includes('Refresh Token Not Found') ||
-        msg.includes('refresh_token_not_found')
-      ) {
-        console.warn('[ApiClient] Sessão expirada ou refresh token inválido. Limpando sessão local.');
-        await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
-      }
-      return 'MOCK_TOKEN';
+    const { data: { session } } = await supabase.auth.getSession();
+    if (session && session.access_token) {
+      return session.access_token;
     }
-    if (data?.session && data.session.access_token) {
-      return data.session.access_token;
+
+    const { data: { user } } = await supabase.auth.getUser();
+    if (user) {
+      const { data: { session: refreshed } } = await supabase.auth.getSession();
+      if (refreshed?.access_token) return refreshed.access_token;
     }
 
     return 'MOCK_TOKEN';
-  } catch (err: any) {
-    const msg = err?.message || String(err || '');
-    if (
-      msg.includes('Invalid Refresh Token') ||
-      msg.includes('Refresh Token Not Found') ||
-      msg.includes('refresh_token_not_found')
-    ) {
-      console.warn('[ApiClient] Erro de refresh token ao obter token. Limpando sessão local.');
-      try {
-        await supabase.auth.signOut({ scope: 'local' });
-      } catch (_) {}
-    } else {
-      console.warn('[ApiClient] Erro ao obter token Supabase, utilizando fallback MOCK_TOKEN:', err);
-    }
+  } catch (err) {
+    console.warn('[ApiClient] Erro ao obter token Supabase, utilizando fallback MOCK_TOKEN:', err);
     return 'MOCK_TOKEN';
   }
 }
@@ -102,10 +84,11 @@ export async function apiFetch<T = any>(
 
       console.log(`[ApiClient] [Tentativa ${attempt}/${retries + 1}] ${fetchOptions.method || 'GET'} ${endpoint}`);
 
-      const baseUrl = typeof window !== 'undefined' ? window.location.origin : '';
       const fullUrl = (endpoint.startsWith('http://') || endpoint.startsWith('https://'))
         ? endpoint
-        : `${baseUrl}${endpoint.startsWith('/') ? '' : '/'}${endpoint}`;
+        : (typeof window !== 'undefined' && window.location?.origin
+            ? `${window.location.origin}${endpoint.startsWith('/') ? '' : '/'}${endpoint}`
+            : `http://localhost:3000${endpoint.startsWith('/') ? '' : '/'}${endpoint}`);
 
       const response = await fetch(fullUrl, {
         ...fetchOptions,

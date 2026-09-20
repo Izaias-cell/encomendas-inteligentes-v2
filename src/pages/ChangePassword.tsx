@@ -25,8 +25,7 @@ export default function ChangePassword({ onUpdateUser }: { onUpdateUser?: (profi
 
     setLoading(true);
     try {
-      const { data: sessionData } = await supabase.auth.getSession().catch(() => ({ data: { session: null } }));
-      const session = sessionData?.session;
+      const { data: { session } } = await supabase.auth.getSession();
       const token = session?.access_token || 'MOCK_TOKEN';
 
       const response = await fetch('/api/auth/change-password', {

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 /*
  * REGRA DE OURO DO REGISTRO DE ENCOMENDAS (PROTEÇÃO DE FLUXO):
  * 1. O OCR nunca deve rodar antes da foto estar capturada e armazenada.
@@ -40,7 +40,13 @@ import { Profile, Morador, CondominiumSettings } from '../types';
 import toast from 'react-hot-toast';
 import { registrarAuditoria, sanitizeUuid, isValidUuid } from '../services/auditService';
 import { getCurrentPorter, setManualPorter } from '../lib/porterUtils';
-import { getActivePlantao } from '../lib/plantaoUtils';
+import { 
+  getActivePlantao, 
+  setActivePlantao, 
+  isPlantaoExpired, 
+  findEligiblePorterForShift, 
+  PlantaoAtivo 
+} from '../lib/plantaoUtils';
 import { extractBasicText } from '../services/geminiService';
 import { parseLabelText } from '../services/labelParser';
 import { findMatchingResidents, ScoredResident, normalizeUnit, normalizeName } from '../services/residentMatcher';
@@ -48,7 +54,6 @@ import { formatResidentAddress } from '../lib/residentUtils';
 import { motion, AnimatePresence } from 'motion/react';
 import { generatePickupCode, prepareWhatsAppNotification, sendWhatsAppMessage, getWhatsAppLink } from '../services/whatsappService';
 import { isTestResident } from '../services/residentModeService';
-import { createCollage } from '../utils/imageCollage';
 
 interface PackageNewProps {
   user: Profile;
@@ -124,6 +129,28 @@ export default function PackageNew({ user }: PackageNewProps) {
         .then(({ data, error }) => {
           if (!error && data) {
             setPortersList(data);
+
+            // Se não há plantão ativo ou se o plantão atual está expirado, tenta determinar pela escala
+            const plantao = getActivePlantao(user.condominium_id);
+            if (!plantao || isPlantaoExpired(plantao)) {
+              const { eligiblePorter, count } = findEligiblePorterForShift(data, new Date(), user.condominium_id);
+              if (eligiblePorter && count === 1) {
+                const newPlantao: PlantaoAtivo = {
+                  id: eligiblePorter.id,
+                  condominium_id: user.condominium_id,
+                  porteiro_id: eligiblePorter.id,
+                  porteiro_nome: eligiblePorter.full_name,
+                  horario_inicio: eligiblePorter.horario_inicio || '00:00',
+                  horario_fim: eligiblePorter.horario_fim || '23:59',
+                  started_at: new Date().toISOString(),
+                  substituicao: { is_substituicao: false }
+                };
+                setActivePlantao(newPlantao);
+                setManualPorter(eligiblePorter.full_name, user.condominium_id);
+                setCurrentPorterState(eligiblePorter.full_name);
+                setShowPorterModal(false);
+              }
+            }
           }
         });
     }
@@ -150,7 +177,7 @@ export default function PackageNew({ user }: PackageNewProps) {
   const [isOcrLoading, setIsOcrLoading] = useState(false);
   const [ocrConfidence, setOcrConfidence] = useState<'alta' | 'media' | 'baixa' | null>(null);
   const [debugOcrImage, setDebugOcrImage] = useState<string | null>(null);
-  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const [isCameraStabilizing, setIsCameraStabilizing] = useState(true);
@@ -163,7 +190,6 @@ export default function PackageNew({ user }: PackageNewProps) {
   const [shouldFocusSearch, setShouldFocusSearch] = useState(false);
   const [isBatch, setIsBatch] = useState(false);
   const [batchQuantity, setBatchQuantity] = useState(1);
-  const [batchPhotos, setBatchPhotos] = useState<Array<{ id: string; url: string; uploadPromise?: Promise<string | null> }>>([]);
   const [detectedHandwrittenUnit, setDetectedHandwrittenUnit] = useState<string | null>(null);
   const [showResidencyAlert, setShowResidencyAlert] = useState(false);
   const [ignoreResidencyAlert, setIgnoreResidencyAlert] = useState(false);
@@ -299,101 +325,31 @@ export default function PackageNew({ user }: PackageNewProps) {
     fetchData();
   }, [user?.condominium_id]);
 
-  // Cleanup camera on unmount or when leaving camera step (exceto no modo batch enquanto adiciona fotos)
+  // Auto-trigger camera on mount
   useEffect(() => {
-    if (step !== 'camera') {
-      if (!isBatch && batchPhotos.length === 0) {
-        stopCamera();
-      }
+    if (step === 'camera' && !photoUrl && !cameraActive && !blockAutoCamera) {
+      startCamera();
     }
-  }, [step, isBatch, batchPhotos.length]);
-
-  // Cleanup definitivo ao desmontar o componente
-  useEffect(() => {
-    return () => {
-      stopCamera();
-    };
-  }, []);
-
-  // Inicialização e reconexão automática da câmera ao entrar na etapa 'camera'
-  useEffect(() => {
-    if (step === 'camera' && !cameraError && !isStartingCameraRef.current) {
-      // 1. Se já temos stream ativa e viva, reconectar ao elemento de vídeo se necessário
-      if (streamRef.current) {
-        const activeTrack = streamRef.current.getVideoTracks()[0];
-        if (activeTrack && activeTrack.readyState === 'live') {
-          if (videoRef.current && videoRef.current.srcObject !== streamRef.current) {
-            videoRef.current.srcObject = streamRef.current;
-            try {
-              const playPromise = videoRef.current.play();
-              if (playPromise !== undefined) {
-                playPromise.catch(() => {});
-              }
-            } catch (e) {}
-          }
-          if (!cameraActive) {
-            setCameraActive(true);
-          }
-          setIsCameraStabilizing(false);
-          return;
-        } else {
-          streamRef.current = null;
-        }
-      }
-
-      // 2. Se não há stream viva ou o elemento de vídeo precisa ser inicializado
-      if (!cameraActive || !videoRef.current?.srcObject) {
-        console.log('[CAMERA-CYCLE-DEBUG] START_CAMERA (AUTO)');
-        startCamera();
-      }
-    }
-  }, [step, cameraActive, cameraError]);
+    return () => stopCamera();
+  }, [step, photoUrl, blockAutoCamera]);
 
   // Fetch condominium name on mount
   useEffect(() => {
     const fetchCondoName = async () => {
       if (!user?.condominium_id) return;
-      try {
-        const { data, error } = await supabase
-          .from('condominiums')
-          .select('name')
-          .eq('id', user.condominium_id)
-          .maybeSingle();
-        
-        if (!error && data) {
-          setCondoName(data.name);
-        }
-      } catch (err: any) {
-        console.warn("Aviso ao buscar nome do condomínio:", err?.message || err);
+      const { data, error } = await supabase
+        .from('condominiums')
+        .select('name')
+        .eq('id', user.condominium_id)
+        .single();
+      
+      if (!error && data) {
+        setCondoName(data.name);
       }
     };
 
     fetchCondoName();
   }, [user?.condominium_id]);
-
-  const getUserMediaWithTimeout = (constraints: MediaStreamConstraints, timeoutMs = 3500): Promise<MediaStream> => {
-    let timer: any;
-    const timeoutPromise = new Promise<MediaStream>((_, reject) => {
-      timer = setTimeout(() => {
-        const timeoutError = new Error("Tempo limite para acesso à câmera excedido.");
-        timeoutError.name = "TimeoutError";
-        reject(timeoutError);
-      }, timeoutMs);
-    });
-
-    return Promise.race([
-      navigator.mediaDevices.getUserMedia(constraints)
-        .then((stream) => {
-          clearTimeout(timer);
-          return stream;
-        })
-        .catch((err) => {
-          clearTimeout(timer);
-          throw err;
-        }),
-      timeoutPromise
-    ]);
-  };
 
   const startCamera = async () => {
     // 1. Verificar suporte
@@ -407,189 +363,85 @@ export default function PackageNew({ user }: PackageNewProps) {
       return;
     }
 
-    // Se já temos um stream com track de vídeo ativo e live, reutiliza-o instantaneamente sem novo getUserMedia
-    if (streamRef.current) {
+    // Se já estiver ativa com track funcionando, não precisa recriar
+    if (cameraActive && streamRef.current) {
       const activeTrack = streamRef.current.getVideoTracks()[0];
       if (activeTrack && activeTrack.readyState === 'live') {
-        if (videoRef.current) {
-          videoRef.current.srcObject = streamRef.current;
-          try {
-            const playPromise = videoRef.current.play();
-            if (playPromise !== undefined) {
-              playPromise.catch(() => {});
-            }
-          } catch(e) {}
-          setCameraActive(true);
-          setIsCameraStabilizing(false);
-          setCameraError(null);
-          return;
-        } else {
-          setCameraActive(true);
-          setIsCameraStabilizing(false);
-          return;
-        }
-      } else {
-        streamRef.current = null;
+        return;
       }
     }
 
     isStartingCameraRef.current = true;
+
+    // 2. Parar qualquer stream existente antes de abrir uma nova
+    stopCamera();
     setIsCameraStabilizing(true);
     setBlockAutoCamera(false);
     setCameraError(null);
     
-    console.log('[CAMERA-CYCLE-DEBUG] START_CAMERA');
-
     try {
-      let stream: MediaStream | null = null;
+      let stream: MediaStream;
       
-      const tryGetMedia = async (constraints: MediaStreamConstraints, timeout = 3500) => {
-        return await getUserMediaWithTimeout(constraints, timeout);
-      };
-
       // 3. Tentar preferencialmente a câmera traseira
       try {
-        console.log('[CAMERA-CYCLE-DEBUG] GET_USER_MEDIA_START (rear)');
-        stream = await tryGetMedia({
+        stream = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: { ideal: "environment" } },
           audio: false
-        }, 3500);
-      } catch (err1: any) {
-        console.log('[CAMERA-CYCLE-DEBUG] ERROR rear:', err1?.name || err1?.message);
-        
-        // Se for erro definitivo de permissão/segurança, propaga imediatamente
-        const isPermission = 
-          err1?.name === 'NotAllowedError' || 
-          err1?.name === 'PermissionDeniedError' || 
-          err1?.name === 'SecurityError' ||
-          err1?.message?.toLowerCase().includes('permission') || 
-          err1?.message?.toLowerCase().includes('denied');
-
-        if (isPermission) {
-          throw err1;
-        }
-
-        // Se for erro transitório de hardware ocupado/liberando entre registros consecutivos
-        const isTransient = 
-          err1?.name === 'NotReadableError' || 
-          err1?.name === 'TrackStartError' || 
-          err1?.name === 'AbortError' ||
-          err1?.message?.toLowerCase().includes('in use') ||
-          err1?.message?.toLowerCase().includes('could not start');
-
-        if (isTransient) {
-          console.log('[CAMERA-CYCLE-DEBUG] CAMERA_RESTART: Aguardando liberação do sensor de hardware (180ms)...');
-          await new Promise(res => setTimeout(res, 180));
-          
-          if (!isStartingCameraRef.current) return;
-          
-          try {
-            console.log('[CAMERA-CYCLE-DEBUG] GET_USER_MEDIA_RETRY (rear)');
-            stream = await tryGetMedia({
-              video: { facingMode: { ideal: "environment" } },
-              audio: false
-            }, 3000);
-          } catch (retryErr: any) {
-            console.warn("Retry de câmera traseira falhou, tentando fallback...", retryErr);
-          }
-        }
-
-        // Se ainda não obteve stream, tenta fallback para frontal ou qualquer câmera
-        if (!stream) {
-          try {
-            console.log('[CAMERA-CYCLE-DEBUG] GET_USER_MEDIA_START (fallback user)');
-            stream = await tryGetMedia({
-              video: { facingMode: "user" },
-              audio: false
-            }, 2500);
-          } catch (err2: any) {
-            if (
-              err2?.name === 'NotAllowedError' || 
-              err2?.name === 'PermissionDeniedError' || 
-              err2?.name === 'SecurityError' ||
-              err2?.message?.toLowerCase().includes('permission') || 
-              err2?.message?.toLowerCase().includes('denied')
-            ) {
-              throw err2;
-            }
-            console.log('[CAMERA-CYCLE-DEBUG] GET_USER_MEDIA_START (fallback any)');
-            stream = await tryGetMedia({ video: true, audio: false }, 2500);
-          }
+        });
+      } catch (err1) {
+        console.warn("Falha ao abrir câmera traseira, tentando frontal...", err1);
+        // 4. Fallback para câmera frontal
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: "user" },
+            audio: false
+          });
+        } catch (err2) {
+          console.warn("Falha ao abrir câmera frontal, tentando qualquer vídeo...", err2);
+          // 5. Fallback final: qualquer vídeo disponível
+          stream = await navigator.mediaDevices.getUserMedia({ 
+            video: true, 
+            audio: false 
+          });
         }
       }
-
-      if (!stream) {
-        throw new Error("Não foi possível inicializar o dispositivo de vídeo.");
-      }
-
-      console.log('[CAMERA-CYCLE-DEBUG] GET_USER_MEDIA_SUCCESS');
-
-      // Se a câmera foi interrompida/desmontada durante a obtenção do stream
-      if (!isStartingCameraRef.current) {
-        stream.getTracks().forEach(t => { try { t.stop(); } catch(e) {} });
-        return;
-      }
-
-      // Limpar stream anterior caso ainda exista
-      if (streamRef.current && streamRef.current !== stream) {
-        streamRef.current.getTracks().forEach(t => { try { t.stop(); } catch(e) {} });
-      }
-
+      
       streamRef.current = stream;
       
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         
-        try {
-          const playPromise = videoRef.current.play();
-          if (playPromise !== undefined) {
-            playPromise.catch(() => {});
-          }
-        } catch(e) {}
+        // Android Chrome precisa de load() em alguns casos após atribuir srcObject
+        try { videoRef.current.load(); } catch(e) {}
         
         setCameraActive(true);
-        setIsCameraStabilizing(false);
-        console.log('[CAMERA-CYCLE-DEBUG] STREAM_ATTACHED');
-        console.log('[CAMERA-CYCLE-DEBUG] VIDEO_READY');
 
-        // Configuração adaptativa não-bloqueante de foco e exposição contínua
-        const track = stream.getVideoTracks()[0];
-        if (track && track.applyConstraints) {
-          track.applyConstraints({
-            advanced: [
-              { focusMode: 'continuous' } as any,
-              { exposureMode: 'continuous' } as any
-            ]
-          }).catch(() => {});
-        }
-      } else {
-        setCameraActive(true);
-        setIsCameraStabilizing(false);
-        console.log('[CAMERA-CYCLE-DEBUG] VIDEO_READY (no ref)');
+        // Aguarda estabilização (foco e exposição contínua se disponível)
+        setTimeout(() => {
+          setIsCameraStabilizing(false);
+          const track = stream.getVideoTracks()[0];
+          if (track && track.applyConstraints) {
+            track.applyConstraints({
+              advanced: [
+                { focusMode: 'continuous' } as any,
+                { exposureMode: 'continuous' } as any
+              ]
+            }).catch(() => {});
+          }
+        }, 800); // 800ms para estabilização térmica e de sensor
       }
     } catch (err: any) {
-      console.log('[CAMERA-CYCLE-DEBUG] ERROR:', err?.name || err?.message || err);
-      const isPermissionDenied = 
-        err?.name === 'NotAllowedError' || 
-        err?.name === 'PermissionDeniedError' || 
-        err?.name === 'SecurityError' ||
-        err?.message?.toLowerCase().includes('permission') || 
-        err?.message?.toLowerCase().includes('denied');
-
-      if (isPermissionDenied) {
-        console.warn("Permissão de câmera não concedida pelo usuário/navegador:", err?.message || err);
-        setCameraError("Permissão da câmera necessária para captura automática. Você também pode tirar a foto diretamente pelo dispositivo ou usar o modo manual.");
+      console.error("Erro crítico ao acessar câmera:", err);
+      
+      // 6. Tratar erros específicos conforme solicitado
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+        setCameraError("Permissão da câmera negada. Ative nas configurações do navegador ou abra o aplicativo em uma nova aba fora do chat.");
+      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+        setCameraError("Nenhuma câmera encontrada no dispositivo.");
+      } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+        setCameraError("A câmera está sendo usada por outro aplicativo ou falhou ao iniciar.");
       } else {
-        console.error("Erro ao acessar câmera:", err);
-        if (err?.name === 'NotFoundError' || err?.name === 'DevicesNotFoundError') {
-          setCameraError("Nenhuma câmera encontrada no dispositivo.");
-        } else if (err?.name === 'NotReadableError' || err?.name === 'TrackStartError') {
-          setCameraError("A câmera está sendo usada por outro aplicativo ou falhou ao iniciar.");
-        } else if (err?.name === 'TimeoutError') {
-          setCameraError("Tempo limite para abrir a câmera esgotado. Verifique as permissões ou tente novamente.");
-        } else {
-          setCameraError("Erro ao abrir câmera. Tente novamente ou capture pelo dispositivo.");
-        }
+        setCameraError("Erro ao abrir câmera. Tente novamente.");
       }
       
       setCameraActive(false);
@@ -602,23 +454,15 @@ export default function PackageNew({ user }: PackageNewProps) {
   const stopCamera = () => {
     isStartingCameraRef.current = false;
     if (streamRef.current) {
-      console.log('[CAMERA-CYCLE-DEBUG] STOP_CAMERA');
       streamRef.current.getTracks().forEach(track => {
-        try { 
-          track.stop(); 
-          console.log('[CAMERA-CYCLE-DEBUG] TRACK_STOPPED');
-        } catch(e) {}
+        try { track.stop(); } catch(e) {}
       });
       streamRef.current = null;
     }
     if (videoRef.current) {
-      try {
-        videoRef.current.pause();
-      } catch(e) {}
       videoRef.current.srcObject = null;
     }
     setCameraActive(false);
-    setIsCameraStabilizing(false);
     setFlashOn(false);
   };
 
@@ -651,50 +495,8 @@ export default function PackageNew({ user }: PackageNewProps) {
     }
   };
 
-  const handleAddBatchPackage = () => {
-    // Garante que se houver foto única em photoUrl, ela esteja em batchPhotos
-    if (batchPhotos.length === 0 && photoUrl) {
-      setBatchPhotos([{
-        id: `photo_${Date.now()}_1`,
-        url: photoUrl,
-        uploadPromise: uploadPromiseRef.current || undefined
-      }]);
-    }
-    setIsBatch(true);
-    setStep('camera');
-  };
-
-  const handleRemoveBatchPhoto = (photoId: string) => {
-    setBatchPhotos(prev => {
-      const filtered = prev.filter(p => p.id !== photoId);
-      const newLen = filtered.length;
-      setBatchQuantity(Math.max(1, newLen));
-      if (newLen <= 1) {
-        setIsBatch(false);
-      }
-      if (newLen > 0) {
-        setPhotoUrl(filtered[0].url);
-      } else {
-        setPhotoUrl('');
-      }
-      return filtered;
-    });
-    toast.success('Foto removida do lote', { duration: 1500 });
-  };
-
-  const handleFinishBatchCapture = () => {
-    stopCamera();
-    if (batchPhotos.length > 0) {
-      setBatchQuantity(batchPhotos.length);
-      setIsBatch(batchPhotos.length > 1);
-    }
-    setIsOcrLoading(false);
-    setStep('manual');
-    setShouldFocusSearch(true);
-  };
-
   const capturePhoto = async () => {
-    if (!videoRef.current || !canvasRef.current || isCapturing) return;
+    if (!videoRef.current || !canvasRef.current || isCameraStabilizing || isCapturing) return;
     
     setIsCapturing(true);
     const requestId = ++activeRequestIdRef.current;
@@ -707,15 +509,6 @@ export default function PackageNew({ user }: PackageNewProps) {
 
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    
-    // Garantir conexão do stream se ainda não acoplado ao elemento de vídeo
-    if (streamRef.current && video.srcObject !== streamRef.current) {
-      const activeTrack = streamRef.current.getVideoTracks()[0];
-      if (activeTrack && activeTrack.readyState === 'live') {
-        video.srcObject = streamRef.current;
-        try { video.play(); } catch(e) {}
-      }
-    }
     
     // Resolução otimizada para foto da encomenda (máximo 1600px)
     const MAX_DIMENSION = 1600; 
@@ -757,101 +550,37 @@ export default function PackageNew({ user }: PackageNewProps) {
         ocrBase64 = ocrCanvas.toDataURL('image/jpeg', 0.70);
       }
 
-      // Se estiver iniciando novo ciclo de captura sem morador selecionado e sem lote prévio, garante código novo
-      if (!selectedResident && batchPhotos.length === 0) {
-        setPickupCode(generatePickupCode());
-      }
+      // Parar câmera imediatamente para liberar hardware
+      stopCamera();
 
-      // Flash da captura desligado rapidamente para não reter overlay branco
-      setTimeout(() => {
-        setIsCapturing(false);
-      }, 100);
-
-      // No fluxo individual, encerra a câmera após a foto. No modo batch, mantém o stream ativo para as próximas fotos instantâneas
-      if (!isBatch && batchPhotos.length === 0) {
-        stopCamera();
-      }
-
-      const isFirstPhoto = batchPhotos.length === 0;
-
-      if (isFirstPhoto && !selectedResident) {
-        setSelectedResident(null);
-        setRecipientName('');
-        setUnitNumber('');
-        setSearchTerm('');
-        setMatchingResidents([]);
-        setNotes('');
-        lastScrolledTargetYRef.current = -1;
-        searchedTermRef.current = '';
-        setIsManualUnitSearch(true);
-        setIsOcrLoading(true);
-        setStatusMessage('Lendo Etiqueta...');
-      }
-
+      // Limpar seleções e preparar entrada manual imediatamente
+      setSelectedResident(null);
+      setRecipientName('');
+      setUnitNumber('');
+      setSearchTerm('');
+      setMatchingResidents([]);
+      setNotes('');
+      lastScrolledTargetYRef.current = -1;
+      searchedTermRef.current = '';
+      setIsOcrLoading(false);
+      setStatusMessage('Entrada Manual');
+      setIsManualUnitSearch(true);
       setStep('manual');
       setShouldFocusSearch(true);
 
-      // Processar Blob da foto em paralelo para upload e visualização
+      // Processar Blob da foto em paralelo para upload e visualização rápida
       canvas.toBlob((blob) => {
         if (!blob || requestId !== activeRequestIdRef.current) return;
 
-        const previewUrl = URL.createObjectURL(blob);
-        
-        // Inicia upload em background
-        const uploadPromise = (async () => {
-          try {
-            const file = new File([blob], `package_photo_${Date.now()}.jpg`, { type: "image/jpeg" });
-            const fileName = `${Date.now()}_${Math.random().toString(36).substring(7)}.jpg`;
-            const filePath = `package-photos/${fileName}`;
-            
-            const { error: uploadError } = await supabase.storage
-              .from('packages')
-              .upload(filePath, file);
-
-            if (!uploadError) {
-              const { data: { publicUrl } } = supabase.storage
-                .from('packages')
-                .getPublicUrl(filePath);
-              return publicUrl;
-            }
-            return null;
-          } catch (e) {
-            console.error('Erro no upload de foto do lote:', e);
-            return null;
-          }
-        })();
-
-        uploadPromiseRef.current = uploadPromise;
-
-        const newPhotoItem = {
-          id: `photo_${Date.now()}_${Math.random().toString(36).substring(7)}`,
-          url: previewUrl,
-          uploadPromise
-        };
-
-        setBatchPhotos(prev => {
-          const updated = [...prev, newPhotoItem];
-          setBatchQuantity(updated.length);
-          if (updated.length > 1) {
-            setIsBatch(true);
-          }
-          return updated;
-        });
-
-        if (isFirstPhoto) {
-          if (objectUrlRef.current && objectUrlRef.current.startsWith('blob:')) {
-            try { URL.revokeObjectURL(objectUrlRef.current); } catch(e) {}
-          }
-          objectUrlRef.current = previewUrl;
-          setPhotoUrl(previewUrl);
-
-          // Executa OCR na primeira foto
-          if (ocrBase64) {
-            processImageFlow(previewUrl, ocrBase64, true, requestId, blob);
-          }
-        } else {
-          toast.success(`Foto registrada com sucesso!`, { icon: '📸', duration: 2000 });
+        if (objectUrlRef.current && objectUrlRef.current.startsWith('blob:')) {
+          try { URL.revokeObjectURL(objectUrlRef.current); } catch(e) {}
         }
+        const previewUrl = URL.createObjectURL(blob);
+        objectUrlRef.current = previewUrl;
+        setPhotoUrl(previewUrl);
+
+        // Inicia upload e OCR com o blob direto sem converter de volta
+        processImageFlow(previewUrl, ocrBase64, true, requestId, blob);
       }, 'image/jpeg', 0.85);
     } else {
       setIsCapturing(false);
@@ -1307,7 +1036,6 @@ export default function PackageNew({ user }: PackageNewProps) {
     // Não limpamos recipientName e unitNumber para que o porteiro possa ver o que o OCR leu
     setSearchTerm('');
     setMatchingResidents([]);
-    setPickupCode(generatePickupCode());
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1375,7 +1103,6 @@ export default function PackageNew({ user }: PackageNewProps) {
     setSearchTerm('');
     setIsBatch(false);
     setBatchQuantity(1);
-    setBatchPhotos([]);
     // No "next package" mode, we keep the unit search active
     setIsManualUnitSearch(true);
     setMatchingResidents([]);
@@ -1402,20 +1129,13 @@ export default function PackageNew({ user }: PackageNewProps) {
         return;
       }
 
-      let attempts = 0;
-      const interval = setInterval(() => {
-        attempts++;
+      const timer = setTimeout(() => {
         if (unitInputRef.current && searchTerm.trim().length === 0) {
           unitInputRef.current.focus();
-          setShouldFocusSearch(false);
-          clearInterval(interval);
-        } else if (attempts > 15 || searchTerm.trim().length > 0) {
-          clearInterval(interval);
-          setShouldFocusSearch(false);
         }
-      }, 50);
-
-      return () => clearInterval(interval);
+        setShouldFocusSearch(false);
+      }, 40);
+      return () => clearTimeout(timer);
     }
   }, [shouldFocusSearch, step, searchTerm]);
 
@@ -1493,8 +1213,7 @@ export default function PackageNew({ user }: PackageNewProps) {
       }
 
       // 1. Obter o usuário logado e tratar UUIDs de forma segura
-      const { data: authData } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
-      const authUser = authData?.user;
+      const { data: { user: authUser } } = await supabase.auth.getUser();
       const condoId = sanitizeUuid(user?.condominium_id) || user?.condominium_id || '';
       const candidateUuid = (authUser?.id && isValidUuid(authUser.id)) 
         ? authUser.id 
@@ -1528,11 +1247,9 @@ export default function PackageNew({ user }: PackageNewProps) {
       const existingToken = existingPackages?.find(p => p.pickup_token)?.pickup_token;
       const existingCode = existingPackages?.find(p => p.pickup_code)?.pickup_code;
 
-      const finalPickupCode = existingCode || pickupCode || generatePickupCode();
+      const finalPickupCode = existingCode || pickupCode;
       const finalPickupToken = existingToken || (Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15));
-
-      const batchCount = Math.max(batchPhotos.length, (isBatch || batchQuantity > 1) ? batchQuantity : 1);
-      const totalPackages = (existingPackages?.length || 0) + batchCount;
+      const totalPackages = (existingPackages?.length || 0) + 1;
 
       // Se houver encomendas existentes, sincroniza códigos
       if (hasExisting) {
@@ -1546,59 +1263,11 @@ export default function PackageNew({ user }: PackageNewProps) {
           .eq('status', 'received');
       }
 
-      // 3. Resolver fotos do lote e preparar mensagem
-      const resolvedPhotos: string[] = [];
-      if (batchPhotos.length > 0) {
-        for (const bp of batchPhotos) {
-          let pUrl = bp.url;
-          if (bp.uploadPromise) {
-            try {
-              const uploaded = await bp.uploadPromise;
-              if (uploaded) pUrl = uploaded;
-            } catch (e) {
-              console.warn("Erro ao aguardar upload de foto do lote:", e);
-            }
-          }
-          resolvedPhotos.push(pUrl);
-        }
-      } else if (finalPhotoUrl) {
-        resolvedPhotos.push(finalPhotoUrl);
-      }
-
-      const isBatchNote = batchCount > 1;
-      const batchLabel = isBatchNote ? ` (Lote de ${batchCount} encomendas)` : '';
-      const finalNotes = isBatchNote ? (notes ? `${notes}, Lote de ${batchCount} encomendas` : `Lote de ${batchCount} encomendas`) : notes;
+      // 3. Preparar mensagem
+      const isBatchNote = isBatch || batchQuantity > 1;
+      const batchLabel = isBatchNote ? ` (Lote de ${batchQuantity} encomendas)` : '';
+      const finalNotes = isBatchNote ? (notes ? `${notes}, Lote de ${batchQuantity} encomendas` : `Lote de ${batchQuantity} encomendas`) : notes;
       const isLargePackage = notes.includes('Encomenda grande (retirada imediata)');
-
-      // Gerar imagem composta (colagem) exclusivamente para notificação de lote com múltiplas fotos
-      let whatsappPhotoUrl = resolvedPhotos[0] || finalPhotoUrl || '';
-      if (resolvedPhotos.length > 1) {
-        try {
-          const collageBlob = await createCollage(resolvedPhotos);
-          if (collageBlob) {
-            const collageFileName = `collage_${Date.now()}_${Math.random().toString(36).substring(7)}.jpg`;
-            const collageFilePath = `package-photos/${collageFileName}`;
-            const collageFile = new File([collageBlob], collageFileName, { type: 'image/jpeg' });
-            
-            const { error: collageUploadError } = await supabase.storage
-              .from('packages')
-              .upload(collageFilePath, collageFile);
-
-            if (!collageUploadError) {
-              const { data: { publicUrl } } = supabase.storage
-                .from('packages')
-                .getPublicUrl(collageFilePath);
-              if (publicUrl) {
-                whatsappPhotoUrl = publicUrl;
-              }
-            } else {
-              console.warn('[COLAGEM] Falha no upload da colagem no Storage:', collageUploadError);
-            }
-          }
-        } catch (collageErr) {
-          console.error('[COLAGEM] Erro ao gerar imagem composta:', collageErr);
-        }
-      }
 
       let directMessage = `Olá, ${targetResident.nome}! Sua encomenda chegou na portaria de ${condoName}. Código: ${finalPickupCode}${batchLabel}`;
       try {
@@ -1612,7 +1281,7 @@ export default function PackageNew({ user }: PackageNewProps) {
           'disponivel',
           undefined,
           undefined,
-          whatsappPhotoUrl,
+          finalPhotoUrl,
           isLargePackage
         );
         if (prepared) directMessage = prepared;
@@ -1620,60 +1289,53 @@ export default function PackageNew({ user }: PackageNewProps) {
         console.error("Erro ao preparar mensagem:", e);
       }
 
-      // 4. Montar objetos das encomendas (suporte a registro unitário ou lote)
+      // 4. Montar objeto da encomenda (Campos mínimos obrigatórios e estáveis)
       const hasValidPhone = !!(targetResident.telefone && targetResident.telefone.replace(/\D/g, '').length >= 10);
       const shouldOpenWhatsAppNow = hasValidPhone && !notifyAfter;
       
-      const packagesToInsert: any[] = [];
-      for (let i = 0; i < batchCount; i++) {
-        const itemPhoto = resolvedPhotos[i] || resolvedPhotos[0] || finalPhotoUrl || '';
-        const itemPkgData: any = {
-          condominium_id: condoId,
-          recipient_id: targetResident.id,
-          unit_number: unitNumber || targetResident.unidade || '',
-          carrier: carrier || '',
-          tracking_code: trackingNumber || '',
-          notes: batchCount > 1 ? (notes ? `${notes} (Volume ${i + 1}/${batchCount})` : `Lote (Volume ${i + 1}/${batchCount})`) : (finalNotes || ''),
-          photo_url: itemPhoto,
-          recebido_por: (currentPorterState && currentPorterState !== 'Selecione o Porteiro') ? currentPorterState : (user?.full_name || 'Porteiro'),
-          porter_name: (currentPorterState && currentPorterState !== 'Selecione o Porteiro') ? currentPorterState : (user?.full_name || 'Porteiro'),
-          received_at: new Date(Date.now() + i * 150).toISOString(),
-          pickup_code: finalPickupCode,
-          pickup_token: finalPickupToken,
-          status: 'received',
-          whatsapp_notified: shouldOpenWhatsAppNow, 
-          whatsapp_sent: shouldOpenWhatsAppNow,
-          whatsapp_status: shouldOpenWhatsAppNow ? 'enviado' : (targetResident.telefone ? 'pending' : 'no_recipient'),
-          whatsapp_message: directMessage
-        };
+      const packageData: any = {
+        condominium_id: condoId,
+        recipient_id: targetResident.id,
+        unit_number: unitNumber || targetResident.unidade || '',
+        carrier: carrier || '',
+        tracking_code: trackingNumber || '',
+        notes: finalNotes || '',
+        photo_url: finalPhotoUrl || '',
+        recebido_por: (currentPorterState && currentPorterState !== 'Selecione o Porteiro') ? currentPorterState : (user?.full_name || 'Porteiro'),
+        porter_name: (currentPorterState && currentPorterState !== 'Selecione o Porteiro') ? currentPorterState : (user?.full_name || 'Porteiro'),
+        received_at: new Date().toISOString(),
+        pickup_code: finalPickupCode,
+        pickup_token: finalPickupToken,
+        status: 'received',
+        whatsapp_notified: shouldOpenWhatsAppNow, 
+        whatsapp_sent: shouldOpenWhatsAppNow,
+        whatsapp_status: shouldOpenWhatsAppNow ? 'enviado' : (targetResident.telefone ? 'pending' : 'no_recipient'),
+        whatsapp_message: directMessage
+      };
 
-        if (validProfileId) {
-          itemPkgData.received_by = validProfileId;
-          itemPkgData.registered_by = validProfileId;
-        }
-
-        packagesToInsert.push(itemPkgData);
+      if (validProfileId) {
+        packageData.received_by = validProfileId;
+        packageData.registered_by = validProfileId;
       }
 
-      console.log("[SALVAMENTO] Objetos finais:", packagesToInsert);
+      console.log("[SALVAMENTO] Objeto final:", packageData);
 
       let insertResult = await supabase
         .from('packages')
-        .insert(packagesToInsert)
-        .select('*');
+        .insert([packageData])
+        .select('*')
+        .single();
 
       if (insertResult.error && (insertResult.error.code === '23503' || insertResult.error.message?.includes('foreign key constraint'))) {
         console.warn("[FALLBACK] Falha de chave estrangeira em received_by/registered_by. Tentando salvar com autor em texto:", insertResult.error);
-        const fallbackData = packagesToInsert.map(p => {
-          const cp = { ...p };
-          delete cp.received_by;
-          delete cp.registered_by;
-          return cp;
-        });
+        const fallbackData = { ...packageData };
+        delete fallbackData.received_by;
+        delete fallbackData.registered_by;
         insertResult = await supabase
           .from('packages')
-          .insert(fallbackData)
-          .select('*');
+          .insert([fallbackData])
+          .select('*')
+          .single();
       }
 
       if (insertResult.error) {
@@ -1681,10 +1343,9 @@ export default function PackageNew({ user }: PackageNewProps) {
         throw new Error(insertResult.error.message);
       }
 
-      const newPackages = insertResult.data || [];
-      const firstPackage = newPackages[0] || {};
+      const newPackage = insertResult.data;
 
-      console.log("[SUCESSO] Encomendas salvas:", newPackages.length);
+      console.log("[SUCESSO] Encomenda salva com ID:", newPackage.id);
 
       // 5. Notificação via WhatsApp Z-API (Se configurado)
       if (!notifyAfter && targetResident.telefone) {
@@ -1699,23 +1360,20 @@ export default function PackageNew({ user }: PackageNewProps) {
               api_token: condoSettings?.api_token,
               instance_id: condoSettings?.instance_id,
               whatsapp_provider: condoSettings?.whatsapp_provider,
-              photo_url: whatsappPhotoUrl
+              photo_url: finalPhotoUrl
             });
             
-            const pkgIds = newPackages.map((p: any) => p.id);
-            if (pkgIds.length > 0) {
-              await supabase
-                .from('packages')
-                .update({ 
-                  whatsapp_status: 'enviado', 
-                  whatsapp_notified: true, 
-                  whatsapp_sent: true,
-                  notified_at: new Date().toISOString(),
-                  last_notification_at: new Date().toISOString(),
-                  whatsapp_sent_at: new Date().toISOString()
-                })
-                .in('id', pkgIds);
-            }
+            await supabase
+              .from('packages')
+              .update({ 
+                whatsapp_status: 'enviado', 
+                whatsapp_notified: true,
+                whatsapp_sent: true,
+                notified_at: new Date().toISOString(),
+                last_notification_at: new Date().toISOString(),
+                whatsapp_sent_at: new Date().toISOString()
+              })
+              .eq('id', newPackage.id);
           } catch (err) {
             console.error('Erro no envio automático:', err);
           }
@@ -1732,11 +1390,9 @@ export default function PackageNew({ user }: PackageNewProps) {
           tipo_evento: 'ENCOMENDA_CADASTRADA',
           acao: 'CREATE',
           tabela_afetada: 'encomendas',
-          registro_id: firstPackage.id || '',
-          descricao: batchCount > 1 
-            ? `Lote de ${batchCount} encomendas registrado para ${targetResident.nome} - ${targetResident.unidade}` 
-            : `Encomenda registrada para ${targetResident.nome} - ${targetResident.unidade}`,
-          metodo: resolvedPhotos.length > 0 ? 'FOTO' : 'MANUAL'
+          registro_id: newPackage.id,
+          descricao: `Encomenda registrada para ${targetResident.nome} - ${targetResident.unidade}`,
+          metodo: finalPhotoUrl ? 'FOTO' : 'MANUAL'
         });
       } catch (logErr) {
         console.warn('Erro ao logar ação:', logErr);
@@ -1744,7 +1400,7 @@ export default function PackageNew({ user }: PackageNewProps) {
 
       // 7. Sucesso e Feedback
       playSuccessSound();
-      toast.success(batchCount > 1 ? `Lote de ${batchCount} encomendas registrado com sucesso!` : 'Encomenda registrada com sucesso!', { id: toastId, icon: '📦' });
+      toast.success('Encomenda registrada com sucesso!', { id: toastId, icon: '📦' });
       
       // ENVIO AUTOMÁTICO VIA LINK (SOLICITAÇÃO DO USUÁRIO)
       if (shouldOpenWhatsAppNow) {
@@ -1752,7 +1408,7 @@ export default function PackageNew({ user }: PackageNewProps) {
           whatsAppOpenedTimeRef.current = Date.now();
           hasBeenHiddenRef.current = false;
           setIsWaitingForReturn(true);
-          const link = getWhatsAppLink(targetResident.telefone, directMessage, whatsappPhotoUrl);
+          const link = getWhatsAppLink(targetResident.telefone, directMessage, finalPhotoUrl);
           window.open(link, '_blank');
         } catch (linkErr) {
           console.error('Erro ao abrir link do WhatsApp:', linkErr);
@@ -1837,205 +1493,6 @@ export default function PackageNew({ user }: PackageNewProps) {
         </div>
 
         <div className={`flex-1 px-4 py-6 ${isUnitInputFocused ? 'pb-[400px]' : ''}`}>
-          {/* Container de Câmera Persistente: Mantém o nó DOM <video> e o stream MediaStream montados durante todo o lote */}
-          <div className={step === 'camera' ? 'space-y-6' : 'fixed -top-[9999px] -left-[9999px] w-[300px] h-[400px] opacity-0 pointer-events-none -z-50'}>
-            <div className="bg-white rounded-3xl shadow-xl border border-gray-100 overflow-hidden">
-              <div className="aspect-[3/4] bg-gray-900 flex flex-col items-center justify-center relative">
-                <video 
-                  ref={videoRef} 
-                  autoPlay 
-                  playsInline 
-                  muted
-                  className="w-full h-full object-cover"
-                />
-                {/* Flash Effect na Captura */}
-                <AnimatePresence>
-                  {isCapturing && (
-                    <motion.div 
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      exit={{ opacity: 0 }}
-                      transition={{ duration: 0.1 }}
-                      className="absolute inset-0 bg-white z-[100]"
-                    />
-                  )}
-                </AnimatePresence>
-
-                {/* Feedback "Foto Capturada" */}
-                <AnimatePresence>
-                  {showCaptureFeedback && (
-                    <motion.div 
-                      initial={{ opacity: 0, scale: 0.8 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      exit={{ opacity: 0, scale: 1.1 }}
-                      className="absolute inset-0 z-[110] flex items-center justify-center bg-emerald-500/90 backdrop-blur-sm"
-                    >
-                      <div className="flex flex-col items-center gap-3 text-white">
-                        <div className="w-20 h-20 bg-white/20 rounded-full flex items-center justify-center">
-                          <CheckCircle className="w-10 h-10" />
-                        </div>
-                        <p className="text-xl font-black uppercase tracking-widest">Foto capturada ✔</p>
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-
-                {/* Camera Error Message */}
-                {cameraError && (
-                  <div className="absolute inset-0 z-30 flex items-end sm:items-center justify-center bg-gray-900/80 backdrop-blur-sm p-4 sm:p-8 pb-20 sm:pb-8">
-                    <div className="bg-white rounded-3xl p-6 shadow-2xl max-w-xs w-full text-center space-y-6 transform -translate-y-12 sm:translate-y-0">
-                      <div className="w-16 h-16 bg-red-50 rounded-full flex items-center justify-center mx-auto">
-                        <AlertCircle className="w-10 h-10 text-red-500" />
-                      </div>
-                      <p className="text-gray-900 font-bold leading-tight">{cameraError}</p>
-                      <div className="space-y-3">
-                        {window.self !== window.top && (
-                          <a
-                            href={window.location.href}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="w-full py-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl font-bold flex items-center justify-center gap-2 shadow-lg shadow-emerald-100 transition-all active:scale-95 text-sm cursor-pointer"
-                          >
-                            <ExternalLink className="w-5 h-5" />
-                            ABRIR EM NOVA ABA
-                          </a>
-                        )}
-                        <button
-                          onClick={startCamera}
-                          className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-bold flex items-center justify-center gap-2 shadow-lg shadow-indigo-100 transition-all active:scale-95 text-sm"
-                        >
-                          <Zap className="w-5 h-5" />
-                          TENTAR ABRIR CÂMERA
-                        </button>
-                        <button
-                          onClick={() => {
-                            fileInputRef.current?.click();
-                          }}
-                          className="w-full py-4 bg-emerald-600 text-white rounded-2xl font-bold flex items-center justify-center gap-2 shadow-lg shadow-emerald-100 transition-all active:scale-95 text-sm"
-                        >
-                          <Camera className="w-5 h-5" />
-                          TIRAR FOTO PELO DISPOSITIVO
-                        </button>
-                        <button
-                          onClick={() => {
-                            setCameraError(null);
-                            setStep('manual');
-                          }}
-                          className="w-full py-4 bg-gray-100 text-gray-700 rounded-2xl font-bold flex items-center justify-center gap-2 hover:bg-gray-200 transition-all active:scale-95 text-sm"
-                        >
-                          <FileText className="w-5 h-5" />
-                          USAR MODO MANUAL
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {!cameraActive && !cameraError && (
-                  <div className="absolute inset-0 bg-gray-900 flex items-center justify-center overflow-hidden">
-                    <div className="absolute inset-0 opacity-20 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-indigo-500 via-transparent to-transparent animate-pulse" />
-                    <div className="text-center relative z-10 px-8">
-                      <div className="w-20 h-20 bg-indigo-500/20 rounded-full flex items-center justify-center mx-auto mb-6">
-                        <Camera className="w-10 h-10 text-indigo-400" />
-                      </div>
-                      <h3 className="text-white font-black text-xl uppercase tracking-widest mb-2">Pronto para Capturar</h3>
-                      <p className="text-indigo-200 text-sm opacity-60">Toque no botão abaixo para iniciar a câmera</p>
-                    </div>
-                  </div>
-                )}
-
-                {batchPhotos.length > 0 && (
-                  <div className="absolute top-4 left-4 px-3 py-1.5 bg-black/60 backdrop-blur-md rounded-full text-white text-xs font-bold flex items-center gap-2 z-20 border border-white/20">
-                    <Truck className="w-4 h-4 text-indigo-400" />
-                    <span>Foto {batchPhotos.length + 1} do Lote</span>
-                  </div>
-                )}
-
-                {batchPhotos.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={handleFinishBatchCapture}
-                    className="absolute top-4 right-16 px-3 py-1.5 bg-indigo-600/90 backdrop-blur-md hover:bg-indigo-600 rounded-full text-white text-xs font-bold flex items-center gap-1.5 z-20 shadow-lg active:scale-95 transition-all"
-                  >
-                    <Check className="w-4 h-4" />
-                    Concluir ({batchPhotos.length})
-                  </button>
-                )}
-
-                {cameraActive && (
-                  <button
-                    onClick={toggleFlash}
-                    className="absolute top-4 right-4 p-3 bg-black/50 backdrop-blur-sm rounded-full text-white hover:bg-black/70 transition-colors z-20"
-                    type="button"
-                  >
-                    {flashOn ? <Zap className="w-6 h-6 text-yellow-400 fill-yellow-400" /> : <ZapOff className="w-6 h-6" />}
-                  </button>
-                )}
-
-                <div className="absolute bottom-8 left-0 right-0 flex justify-center px-8 gap-4">
-                  <motion.button
-                    onClick={cameraActive ? capturePhoto : startCamera}
-                    animate={isHighlighting ? { scale: [1, 1.1, 1], boxShadow: ["0 0 0px rgba(79,70,229,0)", "0 0 20px rgba(79,70,229,0.5)", "0 0 0px rgba(79,70,229,0)"] } : {}}
-                    transition={{ duration: 0.5, repeat: 1 }}
-                    disabled={isCapturing || isSaving}
-                    className={`w-28 h-28 bg-white rounded-full flex flex-col items-center justify-center shadow-2xl active:scale-95 transition-all border-8 border-gray-100 ${
-                      isCapturing || isSaving ? 'opacity-50' : 'opacity-100'
-                    } ${isHighlighting ? 'ring-4 ring-indigo-500 ring-offset-4' : ''}`}
-                  >
-                    {(isCapturing || isSaving) ? (
-                       <div className="w-10 h-10 border-4 border-gray-100 rounded-full border-t-indigo-600 animate-spin" />
-                    ) : (
-                       <>
-                         <Camera className={`w-8 h-8 mb-1 ${cameraActive ? 'text-indigo-600' : 'text-gray-900'}`} />
-                         <span className="text-[10px] font-black text-gray-900 uppercase tracking-tighter">
-                           {cameraActive ? (batchPhotos.length > 0 ? `FOTO ${batchPhotos.length + 1}` : 'CAPTURAR') : 'TIRAR FOTO'}
-                         </span>
-                       </>
-                    )}
-                  </motion.button>
-                </div>
-
-                <canvas ref={canvasRef} className="hidden" />
-                <input
-                  type="file"
-                  ref={fileInputRef}
-                  onChange={handleFileUpload}
-                  accept="image/*"
-                  capture="environment"
-                  className="hidden"
-                />
-              </div>
-              
-              <div className="p-6 bg-gray-50 flex items-center justify-between">
-                <button
-                  onClick={() => {
-                    setLoading(false);
-                    setIsSaving(false);
-                    setIsOcrLoading(false);
-                    setStep('manual');
-                  }}
-                  className="text-gray-500 font-medium hover:text-gray-700 flex items-center gap-2"
-                >
-                  <FileText className="w-5 h-5" />
-                  Pular para Busca
-                </button>
-                <div className="flex items-center gap-2 text-indigo-600 font-semibold">
-                  <Zap className="w-5 h-5" />
-                  Assistente IA
-                </div>
-              </div>
-            </div>
-
-            <div className="bg-amber-50 border border-amber-100 rounded-2xl p-4 flex gap-3">
-              <Info className="w-5 h-5 text-amber-600 shrink-0" />
-              <div className="flex-1">
-                <p className="text-sm text-amber-800 font-medium">
-                  Certifique-se de que o nome do morador e a unidade estejam bem visíveis na foto.
-                </p>
-              </div>
-            </div>
-          </div>
-
         <AnimatePresence mode="wait">
           {step === 'analyzing' && (
             <motion.div
@@ -2078,6 +1535,180 @@ export default function PackageNew({ user }: PackageNewProps) {
             </motion.div>
           )}
 
+          {step === 'camera' && (
+            <motion.div
+              key="camera"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="space-y-6"
+            >
+              <div className="bg-white rounded-3xl shadow-xl border border-gray-100 overflow-hidden">
+                <div className="aspect-[3/4] bg-gray-900 flex flex-col items-center justify-center relative">
+                  <video 
+                    ref={videoRef} 
+                    autoPlay 
+                    playsInline 
+                    muted
+                    className="w-full h-full object-cover"
+                  />
+                  {/* Flash Effect na Captura */}
+                  <AnimatePresence>
+                    {isCapturing && (
+                      <motion.div 
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        transition={{ duration: 0.1 }}
+                        className="absolute inset-0 bg-white z-[100]"
+                      />
+                    )}
+                  </AnimatePresence>
+
+                  {/* Feedback "Foto Capturada" */}
+                  <AnimatePresence>
+                    {showCaptureFeedback && (
+                      <motion.div 
+                        initial={{ opacity: 0, scale: 0.8 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0, scale: 1.1 }}
+                        className="absolute inset-0 z-[110] flex items-center justify-center bg-emerald-500/90 backdrop-blur-sm"
+                      >
+                        <div className="flex flex-col items-center gap-3 text-white">
+                          <div className="w-20 h-20 bg-white/20 rounded-full flex items-center justify-center">
+                            <CheckCircle className="w-10 h-10" />
+                          </div>
+                          <p className="text-xl font-black uppercase tracking-widest">Foto capturada ✔</p>
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+
+                  {/* Camera Error Message */}
+                  {cameraError && (
+                    <div className="absolute inset-0 z-30 flex items-end sm:items-center justify-center bg-gray-900/80 backdrop-blur-sm p-4 sm:p-8 pb-20 sm:pb-8">
+                      <div className="bg-white rounded-3xl p-6 shadow-2xl max-w-xs w-full text-center space-y-6 transform -translate-y-12 sm:translate-y-0">
+                        <div className="w-16 h-16 bg-red-50 rounded-full flex items-center justify-center mx-auto">
+                          <AlertCircle className="w-10 h-10 text-red-500" />
+                        </div>
+                        <p className="text-gray-900 font-bold leading-tight">{cameraError}</p>
+                        <div className="space-y-3">
+                          {window.self !== window.top && (
+                            <a
+                              href={window.location.href}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="w-full py-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl font-bold flex items-center justify-center gap-2 shadow-lg shadow-emerald-100 transition-all active:scale-95 text-sm cursor-pointer"
+                            >
+                              <ExternalLink className="w-5 h-5" />
+                              ABRIR EM NOVA ABA
+                            </a>
+                          )}
+                          <button
+                            onClick={startCamera}
+                            className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-bold flex items-center justify-center gap-2 shadow-lg shadow-indigo-100 transition-all active:scale-95 text-sm"
+                          >
+                            <Zap className="w-5 h-5" />
+                            TENTAR ABRIR CÂMERA
+                          </button>
+                          <button
+                            onClick={() => {
+                              setCameraError(null);
+                              setStep('manual');
+                            }}
+                            className="w-full py-4 bg-gray-100 text-gray-700 rounded-2xl font-bold flex items-center justify-center gap-2 hover:bg-gray-200 transition-all active:scale-95 text-sm"
+                          >
+                            <FileText className="w-5 h-5" />
+                            USAR MODO MANUAL
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {!cameraActive && !cameraError && (
+                    <div className="absolute inset-0 bg-gray-900 flex items-center justify-center overflow-hidden">
+                      <div className="absolute inset-0 opacity-20 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-indigo-500 via-transparent to-transparent animate-pulse" />
+                      <div className="text-center relative z-10 px-8">
+                        <div className="w-20 h-20 bg-indigo-500/20 rounded-full flex items-center justify-center mx-auto mb-6">
+                          <Camera className="w-10 h-10 text-indigo-400" />
+                        </div>
+                        <h3 className="text-white font-black text-xl uppercase tracking-widest mb-2">Pronto para Capturar</h3>
+                        <p className="text-indigo-200 text-sm opacity-60">Toque no botão abaixo para iniciar a câmera</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {cameraActive && (
+                    <button
+                      onClick={toggleFlash}
+                      className="absolute top-4 right-4 p-3 bg-black/50 backdrop-blur-sm rounded-full text-white hover:bg-black/70 transition-colors z-20"
+                      type="button"
+                    >
+                      {flashOn ? <Zap className="w-6 h-6 text-yellow-400 fill-yellow-400" /> : <ZapOff className="w-6 h-6" />}
+                    </button>
+                  )}
+
+                  {/* Overlay removido conforme solicitação */}
+
+
+                  <div className="absolute bottom-8 left-0 right-0 flex justify-center px-8 gap-4">
+                    <motion.button
+                      onClick={cameraActive ? capturePhoto : startCamera}
+                      animate={isHighlighting ? { scale: [1, 1.1, 1], boxShadow: ["0 0 0px rgba(79,70,229,0)", "0 0 20px rgba(79,70,229,0.5)", "0 0 0px rgba(79,70,229,0)"] } : {}}
+                      transition={{ duration: 0.5, repeat: 1 }}
+                      disabled={(cameraActive && (isCameraStabilizing || isOcrLoading)) || isSaving}
+                      className={`w-28 h-28 bg-white rounded-full flex flex-col items-center justify-center shadow-2xl active:scale-95 transition-all border-8 border-gray-100 ${
+                        (cameraActive && (isCameraStabilizing || isOcrLoading)) || isSaving ? 'opacity-50' : 'opacity-100'
+                      } ${isHighlighting ? 'ring-4 ring-indigo-500 ring-offset-4' : ''}`}
+                    >
+                      {(cameraActive && (isCameraStabilizing || isOcrLoading)) ? (
+                         <div className="w-10 h-10 border-4 border-gray-100 rounded-full border-t-indigo-600 animate-spin" />
+                      ) : (
+                         <>
+                           <Camera className={`w-8 h-8 mb-1 ${cameraActive ? 'text-indigo-600' : 'text-gray-900'}`} />
+                           <span className="text-[10px] font-black text-gray-900 uppercase tracking-tighter">
+                             {cameraActive ? 'CAPTURAR' : 'TIRAR FOTO'}
+                           </span>
+                         </>
+                      )}
+                    </motion.button>
+                  </div>
+
+                  <canvas ref={canvasRef} className="hidden" />
+                </div>
+                
+                  <div className="p-6 bg-gray-50 flex items-center justify-between">
+                    <button
+                      onClick={() => {
+                        setLoading(false);
+                        setIsSaving(false);
+                        setIsOcrLoading(false);
+                        setStep('manual');
+                      }}
+                      className="text-gray-500 font-medium hover:text-gray-700 flex items-center gap-2"
+                    >
+                      <FileText className="w-5 h-5" />
+                      Pular para Busca
+                    </button>
+                    <div className="flex items-center gap-2 text-indigo-600 font-semibold">
+                      <Zap className="w-5 h-5" />
+                      Assistente IA
+                    </div>
+                  </div>
+              </div>
+
+              <div className="bg-amber-50 border border-amber-100 rounded-2xl p-4 flex gap-3">
+                <Info className="w-5 h-5 text-amber-600 shrink-0" />
+                <div className="flex-1">
+                  <p className="text-sm text-amber-800 font-medium">
+                    Certifique-se de que o nome do morador e a unidade estejam bem visíveis na foto.
+                  </p>
+                </div>
+              </div>
+            </motion.div>
+          )}
+
           {(step === 'confirmation' || step === 'manual') && (
             <motion.div
               key="form"
@@ -2086,42 +1717,7 @@ export default function PackageNew({ user }: PackageNewProps) {
               className="space-y-6"
             >
               {/* Photo Preview or Capture option */}
-              {batchPhotos.length > 1 ? (
-                <div className="bg-white rounded-2xl p-4 border border-gray-200 shadow-sm space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <Truck className="w-4 h-4 text-indigo-600" />
-                      <span className="text-xs font-bold text-gray-800 uppercase tracking-tight">Fotos do Lote ({batchPhotos.length} registradas)</span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={handleAddBatchPackage}
-                      className="text-xs font-bold text-indigo-600 hover:text-indigo-700 flex items-center gap-1 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-xl transition-all"
-                    >
-                      <Camera className="w-3.5 h-3.5" />
-                      + Adicionar Foto
-                    </button>
-                  </div>
-                  <div className="grid grid-cols-3 gap-2">
-                    {batchPhotos.map((item, idx) => (
-                      <div key={item.id || idx} className="relative aspect-video rounded-xl overflow-hidden bg-gray-100 border border-gray-200 group">
-                        <img src={item.url} alt={`Foto ${idx + 1}`} className="w-full h-full object-cover" />
-                        <span className="absolute bottom-1 left-1 px-1.5 py-0.5 bg-black/60 rounded text-[9px] text-white font-bold">
-                          {idx + 1}/{batchPhotos.length}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => handleRemoveBatchPhoto(item.id)}
-                          className="absolute top-1 right-1 p-1 bg-red-600/90 hover:bg-red-600 text-white rounded-md shadow-md transition-all"
-                          title="Remover foto"
-                        >
-                          <X className="w-3 h-3" />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : photoUrl ? (
+              {photoUrl ? (
                 <div className="relative rounded-2xl overflow-hidden aspect-video bg-gray-100 border border-gray-200 shadow-sm">
                   <img 
                     src={photoUrl} 
@@ -2241,37 +1837,35 @@ export default function PackageNew({ user }: PackageNewProps) {
                         </button>
                       </div>
 
-                      {/* Registro em Lote por Adição de Encomenda */}
-                      <div className="bg-gradient-to-r from-indigo-50/80 to-blue-50/80 border border-indigo-100 rounded-2xl p-4 mb-4 space-y-3">
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2.5">
-                            <div className="w-8 h-8 bg-indigo-600 text-white rounded-xl flex items-center justify-center shadow-sm">
-                              <Truck className="w-4 h-4" />
-                            </div>
-                            <div>
-                              <p className="text-xs font-black text-indigo-950 uppercase tracking-tight">Registro em Lote</p>
-                              <p className="text-[11px] text-indigo-700 font-medium">
-                                {batchPhotos.length > 1
-                                  ? `${batchPhotos.length} encomendas registradas no lote`
-                                  : 'Várias encomendas para o mesmo morador'}
-                              </p>
-                            </div>
+                      {/* Batch Registration Selector */}
+                      <div className="bg-indigo-50 border border-indigo-100 rounded-2xl p-4 mb-4 flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <Truck className="w-5 h-5 text-indigo-600" />
+                          <div>
+                            <p className="text-xs font-bold text-indigo-900 uppercase tracking-tight">Registro em Lote</p>
+                            <p className="text-[10px] text-indigo-600">Várias encomendas juntas</p>
                           </div>
-                          {batchPhotos.length > 1 && (
-                            <span className="px-2.5 py-1 bg-indigo-600 text-white font-black text-xs rounded-lg shadow-sm">
-                              {batchPhotos.length} un.
-                            </span>
-                          )}
                         </div>
-
-                        <button
-                          type="button"
-                          onClick={handleAddBatchPackage}
-                          className="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold text-xs flex items-center justify-center gap-2 shadow-md shadow-indigo-200 active:scale-[0.98] transition-all cursor-pointer"
-                        >
-                          <Camera className="w-4 h-4" />
-                          <span>+ ADICIONAR MAIS UMA ENCOMENDA</span>
-                        </button>
+                        <div className="flex items-center gap-3">
+                          <button
+                            type="button"
+                            onClick={() => setBatchQuantity(Math.max(1, batchQuantity - 1))}
+                            className="w-10 h-10 bg-white border border-indigo-200 rounded-xl flex items-center justify-center text-indigo-600 font-bold active:scale-90"
+                          >
+                            -
+                          </button>
+                          <span className="text-xl font-black text-indigo-900 w-6 text-center">{batchQuantity}</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setBatchQuantity(batchQuantity + 1);
+                              setIsBatch(true);
+                            }}
+                            className="w-10 h-10 bg-white border border-indigo-200 rounded-xl flex items-center justify-center text-indigo-600 font-bold active:scale-90"
+                          >
+                            +
+                          </button>
+                        </div>
                       </div>
 
                       <div ref={residentsSectionRef} className="relative mb-6">

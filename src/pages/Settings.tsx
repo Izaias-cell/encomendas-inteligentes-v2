@@ -12,9 +12,7 @@ import {
   EyeOff,
   Copy,
   Check,
-  Zap,
-  Users,
-  Trash2
+  Zap
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { Profile, CondominiumSettings } from '../types';
@@ -22,8 +20,6 @@ import toast from 'react-hot-toast';
 import { motion } from 'motion/react';
 import { testZApiConnection } from '../services/whatsappService';
 import SecurityCenter from '../components/SecurityCenter';
-import ClearDataSection from '../components/ClearDataSection';
-import UserManagement from './UserManagement';
 
 interface SettingsProps {
   user: Profile;
@@ -40,12 +36,8 @@ export default function Settings({ user }: SettingsProps) {
   const [showToken, setShowToken] = useState(false);
   const [copiedField, setCopiedField] = useState<string | null>(null);
   
-  const [activeSettingTab, setActiveSettingTab] = useState<'whatsapp' | 'users' | 'cleardata' | 'security'>(() => {
-    const tabParam = queryParams.get('tab');
-    if (tabParam === 'users') return 'users';
-    if (tabParam === 'cleardata' || tabParam === 'clear' || tabParam === 'limpeza') return 'cleardata';
-    if (tabParam === 'security') return 'security';
-    return 'whatsapp';
+  const [activeSettingTab, setActiveSettingTab] = useState<'whatsapp' | 'security'>(() => {
+    return queryParams.get('tab') === 'security' ? 'security' : 'whatsapp';
   });
 
   const [settings, setSettings] = useState<Partial<CondominiumSettings>>({
@@ -190,19 +182,18 @@ export default function Settings({ user }: SettingsProps) {
   }
 
   return (
-    <div className={`p-6 ${activeSettingTab === 'users' ? 'max-w-6xl' : 'max-w-4xl'} mx-auto space-y-8`}>
+    <div className="p-6 max-w-4xl mx-auto space-y-8">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
           <button 
             onClick={() => navigate('/dashboard')}
             className="p-2 hover:bg-zinc-200 rounded-xl transition-all"
-            title="Voltar para o Painel"
           >
             <ArrowLeft className="w-6 h-6 text-zinc-600" />
           </button>
           <div>
             <h1 className="text-2xl font-bold text-zinc-900">Configurações</h1>
-            <p className="text-zinc-500">Ajustes do sistema, usuários, manutenção e integrações</p>
+            <p className="text-zinc-500">Ajustes do sistema e integrações</p>
           </div>
         </div>
         {activeSettingTab === 'whatsapp' && (
@@ -219,69 +210,35 @@ export default function Settings({ user }: SettingsProps) {
 
       {/* Tabs Menu inside Configurações */}
       {user.role === 'admin' && (
-        <div className="flex border-b border-zinc-200 gap-2 sm:gap-6 overflow-x-auto pb-1">
+        <div className="flex border-b border-zinc-200 gap-6">
           <button
             id="tab-btn-whatsapp"
             onClick={() => setActiveSettingTab('whatsapp')}
-            className={`pb-3.5 px-2 text-sm font-bold border-b-2 transition-all whitespace-nowrap flex items-center gap-2 ${
+            className={`pb-4 px-2 text-sm font-bold border-b-2 transition-all ${
               activeSettingTab === 'whatsapp' 
                 ? 'border-emerald-600 text-emerald-700' 
                 : 'border-transparent text-zinc-500 hover:text-zinc-800'
             }`}
           >
-            <MessageSquare className="w-4 h-4 text-emerald-600" />
             Integração WhatsApp
           </button>
-
-          <button
-            id="tab-btn-users"
-            onClick={() => setActiveSettingTab('users')}
-            className={`pb-3.5 px-2 text-sm font-bold border-b-2 transition-all whitespace-nowrap flex items-center gap-2 ${
-              activeSettingTab === 'users' 
-                ? 'border-emerald-600 text-emerald-700' 
-                : 'border-transparent text-zinc-500 hover:text-zinc-800'
-            }`}
-          >
-            <Users className="w-4 h-4 text-indigo-600" />
-            Gestão de Usuários
-          </button>
-
-          <button
-            id="tab-btn-cleardata"
-            onClick={() => setActiveSettingTab('cleardata')}
-            className={`pb-3.5 px-2 text-sm font-bold border-b-2 transition-all whitespace-nowrap flex items-center gap-2 ${
-              activeSettingTab === 'cleardata' 
-                ? 'border-emerald-600 text-emerald-700' 
-                : 'border-transparent text-zinc-500 hover:text-zinc-800'
-            }`}
-          >
-            <Trash2 className="w-4 h-4 text-amber-600" />
-            Limpeza de Dados
-          </button>
-
           <button
             id="tab-btn-security"
             onClick={() => setActiveSettingTab('security')}
-            className={`pb-3.5 px-2 text-sm font-bold border-b-2 transition-all whitespace-nowrap flex items-center gap-2 ${
+            className={`pb-4 px-2 text-sm font-bold border-b-2 transition-all flex items-center gap-2 ${
               activeSettingTab === 'security' 
                 ? 'border-emerald-600 text-emerald-700' 
                 : 'border-transparent text-zinc-500 hover:text-zinc-800'
             }`}
           >
             <Shield className="w-4 h-4 text-emerald-600" />
-            Central de Segurança
+            Central de Segurança do Sistema
           </button>
         </div>
       )}
 
       {activeSettingTab === 'security' && user.role === 'admin' ? (
         <SecurityCenter user={user} />
-      ) : activeSettingTab === 'users' && user.role === 'admin' ? (
-        <div className="-mx-6 -my-6">
-          <UserManagement user={user} />
-        </div>
-      ) : activeSettingTab === 'cleardata' && user.role === 'admin' ? (
-        <ClearDataSection user={user} />
       ) : (
         <>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-8">

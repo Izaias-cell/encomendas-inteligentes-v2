@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { api } from '../lib/apiClient';
@@ -8,7 +8,7 @@ import {
   Users, Package, Edit2, Trash2, Power, Key, X, Filter, 
   Check, Copy, AlertTriangle, Phone, Mail, Calendar, 
   ArrowUpDown, Shield, User, FileText, CheckCircle2, XCircle,
-  MoreVertical, Eye, UserPlus, QrCode
+  MoreVertical, Eye, UserPlus
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { registrarAuditoria } from '../services/auditService';
@@ -84,109 +84,22 @@ export default function CondominiumList({ user }: CondominiumListProps) {
   const [regenerateConfirmCondo, setRegenerateConfirmCondo] = useState<Condominium | null>(null);
   const [regeneratingLoading, setRegeneratingLoading] = useState(false);
 
-  const generateUniquePortariaCode = async (condoName: string): Promise<string> => {
-    const base = (condoName || 'CONDO')
-      .toUpperCase()
-      .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-      .replace(/^CONDOMINIO\s+/i, '')
-      .replace(/[^A-Z0-9]/g, '');
-    
-    const prefix = base.length > 0 ? base.substring(0, 10) : 'PORTARIA';
-    let code = '';
-    let attempts = 0;
-
-    do {
-      attempts++;
-      const num = Math.floor(1000 + Math.random() * 9000);
-      code = `${prefix}-${num}`;
-      
-      try {
-        const { data: existing } = await supabase
-          .from('condominium_settings')
-          .select('id')
-          .eq('portaria_access_code', code)
-          .limit(1);
-
-        if (!existing || existing.length === 0) {
-          break;
-        }
-      } catch {
-        break;
-      }
-    } while (attempts < 50);
-
-    return code;
-  };
-
   const handleRegeneratePortariaCode = async (condo: Condominium) => {
     setRegeneratingLoading(true);
     try {
       const res = await api.post(`/api/admin/condominiums/${condo.id}/regenerate-portaria-code`);
-      if (res && res.ok && res.data && res.data.success && res.data.portaria_access_code) {
-        const newCode = res.data.portaria_access_code;
-        const portariaName = res.data.portaria_name || condo.name;
-        toast.success(`Novo código de acesso gerado com sucesso: ${newCode}`);
-        const updated = condos.map(c => c.id === condo.id ? { ...c, portaria_access_code: newCode, portaria_name: portariaName } : c);
+      if (res && res.data && res.data.success) {
+        toast.success(`Novo Código Gerado: ${res.data.portaria_access_code}`);
+        const updated = condos.map(c => c.id === condo.id ? { ...c, portaria_access_code: res.data.portaria_access_code, portaria_name: res.data.portaria_name } : c);
         setCondos(updated);
         if (selectedCondo && selectedCondo.id === condo.id) {
-          setSelectedCondo({ ...selectedCondo, portaria_access_code: newCode, portaria_name: portariaName });
+          setSelectedCondo({ ...selectedCondo, portaria_access_code: res.data.portaria_access_code, portaria_name: res.data.portaria_name });
         }
-        return;
+      } else {
+        toast.error(res?.data?.error || res?.error || 'Erro ao regenerar código.');
       }
-      throw new Error(res?.data?.error || res?.error || 'Falha na resposta da API Express');
-    } catch (apiError: any) {
-      console.warn('[CondominiumList] API indisponível para regeneração de código, executando fallback direto no Supabase:', apiError);
-      try {
-        const newCode = await generateUniquePortariaCode(condo.name);
-        const portariaName = condo.name;
-        const oldCode = condo.portaria_access_code || selectedCondo?.portaria_access_code;
-
-        const { error: upsertError } = await supabase
-          .from('condominium_settings')
-          .upsert({
-            condominium_id: condo.id,
-            portaria_name: portariaName,
-            portaria_access_code: newCode,
-            active_portaria_token: null,
-            updated_at: new Date().toISOString()
-          }, { onConflict: 'condominium_id' });
-
-        if (upsertError) {
-          console.warn('[CondominiumList] Aviso ao persistir configurações da portaria no Supabase:', upsertError.message);
-          if (!upsertError.message?.toLowerCase().includes('column') && !upsertError.message?.toLowerCase().includes('schema cache')) {
-            throw upsertError;
-          }
-        }
-
-        try {
-          await registrarAuditoria({
-            condominio_id: condo.id,
-            usuario_id: user?.id || 'admin',
-            usuario_nome: user?.full_name || 'Administrador',
-            usuario_perfil: 'admin',
-            tipo_evento: 'CODIGO_PORTARIA_REGERADO',
-            acao: 'UPDATE',
-            tabela_afetada: 'condominium_settings',
-            registro_id: condo.id,
-            descricao: `Código de acesso da portaria regenerado para o condomínio ${condo.name}. Novo código: ${newCode}`,
-            metodo: 'FRONTEND_FALLBACK',
-            dados_antes: { portaria_access_code: oldCode },
-            dados_depois: { portaria_access_code: newCode }
-          });
-        } catch (auditErr) {
-          console.warn('[CondominiumList] Falha ao registrar auditoria de regeneração:', auditErr);
-        }
-
-        toast.success(`Novo código de acesso gerado com sucesso: ${newCode}`);
-        const updated = condos.map(c => c.id === condo.id ? { ...c, portaria_access_code: newCode, portaria_name: portariaName } : c);
-        setCondos(updated);
-        if (selectedCondo && selectedCondo.id === condo.id) {
-          setSelectedCondo({ ...selectedCondo, portaria_access_code: newCode, portaria_name: portariaName });
-        }
-      } catch (fallbackError: any) {
-        console.error('Erro ao regenerar código no Supabase:', fallbackError);
-        toast.error(fallbackError.message || 'Erro ao regenerar código da portaria.');
-      }
+    } catch (err: any) {
+      toast.error(err.message || 'Erro ao regenerar código da portaria.');
     } finally {
       setRegeneratingLoading(false);
       setRegenerateConfirmCondo(null);
@@ -239,166 +152,43 @@ export default function CondominiumList({ user }: CondominiumListProps) {
 
   const navigate = useNavigate();
 
-  const isMountedRef = useRef(true);
-  const activeExecutionIdRef = useRef(0);
-
-  const withTimeout = <T,>(promise: PromiseLike<T>, ms: number, timeoutMsg: string): Promise<T> => {
-    let timer: any;
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(timeoutMsg)), ms);
-    });
-    return Promise.race([
-      Promise.resolve(promise),
-      timeoutPromise
-    ]).finally(() => {
-      if (timer) clearTimeout(timer);
-    });
-  };
-
   useEffect(() => {
-    isMountedRef.current = true;
     fetchCondominiums();
-    return () => {
-      isMountedRef.current = false;
-      activeExecutionIdRef.current += 1;
-    };
   }, []);
 
   const getValidSession = async () => {
     try {
-      const { data, error } = await supabase.auth.getSession();
-      if (error) {
-        const msg = error.message || '';
-        if (msg.includes('Invalid Refresh Token') || msg.includes('Refresh Token Not Found')) {
-          await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
-        }
-        return { access_token: 'MOCK_TOKEN' } as any;
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session && session.access_token) return session;
+
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        const { data: { session: refreshed } } = await supabase.auth.getSession();
+        if (refreshed) return refreshed;
       }
-      if (data?.session && data.session.access_token) return data.session;
 
       return { access_token: 'MOCK_TOKEN' } as any;
-    } catch (err: any) {
-      const msg = err?.message || String(err || '');
-      if (msg.includes('Invalid Refresh Token') || msg.includes('Refresh Token Not Found')) {
-        await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
-      }
+    } catch (err) {
       return { access_token: 'MOCK_TOKEN' } as any;
     }
   };
 
   const fetchCondominiums = async () => {
-    activeExecutionIdRef.current += 1;
-    const executionId = activeExecutionIdRef.current;
-    const isCurrent = () => isMountedRef.current && activeExecutionIdRef.current === executionId;
-
     setLoading(true);
     try {
-      const res = await withTimeout(
-        api.get('/api/admin/condominiums', { timeoutMs: 9000, retries: 1 }),
-        12000,
-        'Tempo limite esgotado ao aguardar resposta da API Express.'
-      );
-
-      if (!isCurrent()) return;
-
-      if (res && res.ok && res.data?.condominiums && Array.isArray(res.data.condominiums)) {
-        setCondos(res.data.condominiums);
-        if (res.data.summary) {
-          setSummary(res.data.summary);
-        }
-        return;
+      const res = await api.get('/api/admin/condominiums');
+      if (!res.ok) {
+        throw new Error(res.error || 'Erro ao carregar condomínios');
       }
-      throw new Error(res?.error || 'Falha na resposta da API Express');
-    } catch (apiError: any) {
-      if (!isCurrent()) return;
-      console.warn('[CondominiumList] API indisponível, executando fallback direto no Supabase:', apiError);
-      try {
-        const condoQuery = supabase
-          .from('condominiums')
-          .select('*')
-          .order('created_at', { ascending: false });
-
-        const { data: dbCondos, error: condoError } = await withTimeout(
-          condoQuery,
-          10000,
-          'Tempo limite esgotado ao buscar condomínios no Supabase.'
-        );
-
-        if (!isCurrent()) return;
-
-        if (condoError) {
-          throw condoError;
-        }
-
-        if (dbCondos) {
-          const queries = Promise.all([
-            supabase.from('profiles').select('id, condominium_id, active'),
-            supabase.from('packages').select('id, condominium_id, status'),
-            supabase.from('moradores').select('id, condominium_id'),
-            supabase.from('condominium_settings').select('condominium_id, portaria_access_code, portaria_name')
-          ]);
-
-          const [profilesRes, packagesRes, moradoresRes, settingsRes] = await withTimeout(
-            queries,
-            10000,
-            'Tempo limite esgotado ao carregar dados complementares no Supabase.'
-          );
-
-          if (!isCurrent()) return;
-
-          const allProfiles = profilesRes.data || [];
-          const allPackages = packagesRes.data || [];
-          const allMoradores = moradoresRes.data || [];
-          const allSettings = settingsRes.data || [];
-
-          const enrichedCondos: Condominium[] = dbCondos.map((c: any) => {
-            const condoProfiles = allProfiles.filter(p => p.condominium_id === c.id);
-            const condoPackages = allPackages.filter(p => p.condominium_id === c.id);
-            const condoMoradores = allMoradores.filter(m => m.condominium_id === c.id);
-            const condoSetting = allSettings.find(s => s.condominium_id === c.id);
-
-            return {
-              ...c,
-              active: c.active !== false,
-              user_count: condoProfiles.length,
-              unit_count: condoMoradores.length,
-              package_count: condoPackages.length,
-              portaria_access_code: condoSetting?.portaria_access_code || c.portaria_access_code,
-              portaria_name: condoSetting?.portaria_name || c.portaria_name || c.name
-            };
-          });
-
-          setCondos(enrichedCondos);
-          setSelectedCondo(prev => {
-            if (!prev) return null;
-            const match = enrichedCondos.find(c => c.id === prev.id);
-            return match ? { ...prev, ...match } : prev;
-          });
-
-          const totalCondos = enrichedCondos.length;
-          const activeCondos = enrichedCondos.filter(c => c.active !== false).length;
-          const inactiveCondos = totalCondos - activeCondos;
-
-          setSummary({
-            total_condos: totalCondos,
-            active_condos: activeCondos,
-            inactive_condos: inactiveCondos,
-            total_users: allProfiles.length,
-            total_packages: allPackages.length
-          });
-        }
-      } catch (fallbackError: any) {
-        if (!isCurrent()) return;
-        console.error('Erro ao buscar condomínios no Supabase:', fallbackError);
-        const errMsg = typeof fallbackError?.message === 'string'
-          ? fallbackError.message
-          : 'Não foi possível carregar os condomínios no momento. Verifique sua conexão e tente novamente.';
-        toast.error(errMsg);
+      setCondos(res.data?.condominiums || []);
+      if (res.data?.summary) {
+        setSummary(res.data.summary);
       }
+    } catch (error: any) {
+      console.error('Erro ao buscar condomínios:', error);
+      toast.error(error.message || 'Erro ao carregar condomínios');
     } finally {
-      if (isCurrent()) {
-        setLoading(false);
-      }
+      setLoading(false);
     }
   };
 
@@ -406,26 +196,13 @@ export default function CondominiumList({ user }: CondominiumListProps) {
     setUsersLoading(true);
     try {
       const res = await api.get(`/api/admin/condominiums/${condoId}/users`);
-      if (res && res.ok && res.data?.profiles && Array.isArray(res.data.profiles)) {
-        setCondoUsers(res.data.profiles);
-        return;
+      if (!res.ok) {
+        throw new Error(res.error || 'Erro ao carregar usuários do condomínio');
       }
-      throw new Error(res?.error || 'API de usuários indisponível');
-    } catch (apiError: any) {
-      console.warn('[CondominiumList] API /users indisponível, buscando perfis no Supabase:', apiError);
-      try {
-        const { data: dbUsers, error: userError } = await supabase
-          .from('profiles')
-          .select('*')
-          .eq('condominium_id', condoId)
-          .order('created_at', { ascending: false });
-
-        if (userError) throw userError;
-        setCondoUsers(dbUsers || []);
-      } catch (fallbackError: any) {
-        console.error("Erro ao buscar usuários do condomínio:", fallbackError);
-        toast.error(fallbackError.message || 'Erro ao carregar usuários');
-      }
+      setCondoUsers(res.data?.profiles || []);
+    } catch (error: any) {
+      console.error("Erro ao buscar usuários do condomínio:", error);
+      toast.error(error.message || 'Erro ao carregar usuários');
     } finally {
       setUsersLoading(false);
     }
@@ -930,18 +707,16 @@ export default function CondominiumList({ user }: CondominiumListProps) {
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-3">
-          <button
-            onClick={() => {
-              resetCondoForm();
-              setShowCreateModal(true);
-            }}
-            className="bg-emerald-600 hover:bg-emerald-700 text-white px-6 py-3.5 rounded-2xl font-bold shadow-lg shadow-emerald-600/20 transition-all flex items-center justify-center gap-2.5 text-sm shrink-0"
-          >
-            <Plus className="w-5 h-5" />
-            <span>+ Adicionar Novo Condomínio</span>
-          </button>
-        </div>
+        <button
+          onClick={() => {
+            resetCondoForm();
+            setShowCreateModal(true);
+          }}
+          className="bg-emerald-600 hover:bg-emerald-700 text-white px-6 py-3.5 rounded-2xl font-bold shadow-lg shadow-emerald-600/20 transition-all flex items-center justify-center gap-2.5 text-sm shrink-0"
+        >
+          <Plus className="w-5 h-5" />
+          <span>+ Adicionar Novo Condomínio</span>
+        </button>
       </div>
 
       {/* PAINEL RESUMO (INDICATORS) */}

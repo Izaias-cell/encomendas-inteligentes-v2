@@ -19,6 +19,7 @@ export interface Profile {
   must_change_password?: boolean;
   horario_inicio?: string;
   horario_fim?: string;
+  escala_tipo?: 'impar' | 'par' | 'todos' | null;
   created_by?: string;
   updated_by?: string;
   created_at: string;
