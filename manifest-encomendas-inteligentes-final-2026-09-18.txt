@@ -1,0 +1,86 @@
+================================================================================
+MANIFESTO CRIPTOGRÁFICO DE INTEGRIDADE — ENCOMENDAS INTELIGENTES
+Estado: Versão Final Validada e Aprovada (Controle de Acesso + Signup Desativado)
+Data: 2026-09-18
+Arquivo ZIP: encomendas-inteligentes-final-validado-2026-09-18.zip
+SHA-256 do ZIP: 3c9d8461fef70c85de102241b7af924f898e723bab8f61f4e29d05994d605a57
+================================================================================
+
+CAMINHO RELATIVO                                   | TAMANHO (BYTES) | SHA-256                                                         
+---------------------------------------------------------------------------------------------------------------------------------------
+.env.example                                       | 369             | 4eac26369f318e45e45161110085cc80e0402dee72c8cdd58e28e28bc140a7d0
+.gitignore                                         | 73              | db691f14fcf678985362a42c6aedb581e42cd6bb99962ce1b44aea460fb2a4df
+ChatGPT Image 7 de jul. de 2026, 01_08_56 (5).png  | 289185          | 5fa76b14480d7d5b3046f226ef9c31a74aa16fefb7f3f19778e4a7ef6b39e5a0
+WhatsApp Image 2026-04-15 at 05.55.40.jpeg         | 25359           | 37e9b0735eedff3f6430de206b2d6376dc57c3efed071b54b8fa73e0cc9af3fd
+api/index.js                                       | 83842           | 324a1f53251fcc0af576f4046eff48e0c11278915be9b76c3df89e1e4a61f7b7
+bun.lock                                           | 117984          | b69e61edbc3395043dce1890c4199a98b27b80e243eb8c7e4247453d0ee3b3d0
+icon-192.png                                       | 52828           | 8be42ca3985485fd76c952a82bd005a672ae2a46e4f7cdcec70a646412f51d87
+index.html                                         | 1038            | 28c7852cd9e973f5ad0014665e511071730771d8b3a7a8e19de2b7611e3c8690
+metadata.json                                      | 296             | c9ed4f603eafeea4a28489b0054d0bce91068c2a812a50ef5a6cc0c2244ef235
+package-lock.json                                  | 247365          | 14287735ee12a7b182202c0409d3d569ef7116796830034358e9d030e2e52a3a
+package.json                                       | 1685            | db16435ee44719ba4eeb78af57cb40f0a132a5422f034c172a637a492eae0fa4
+public/icon-192.png                                | 52828           | 8be42ca3985485fd76c952a82bd005a672ae2a46e4f7cdcec70a646412f51d87
+public/icon-512.png                                | 259194          | a6f4e2afa9ec00518699651d4320378f4b18551fc404ff0989a8e19dc9b57cce
+public/manifest.json                               | 547             | 5545178afe4ec9fd97041eaef52971ab8c3dd75a51bfcb4b06d1f9be1802fd53
+public/sw.js                                       | 2443            | 963ed92c4d9347f94f50a60d94e17ab0b477f552d509ad315e9126e47b385285
+server.ts                                          | 96747           | 6d87db5f9ac10a7d62b00def5c8f9409560adbd891e163b8d257d1e6f3637601
+src/App.tsx                                        | 119564          | f2447392be6111a7947c1eee01b70a4bb9d3aee461ff0731c3ca4089b98dd08b
+src/components/ResidentImporterModal.tsx           | 50690           | 3ff5375c4256ba2eb258ca9c71c7470d6953422fde0cf3df520ab6c6fd80b493
+src/components/ResidentPortal.tsx                  | 15971           | 7be9aa0053b1e205f6024e97788159d196e7f5c4a3e20ab70d75e7dd36fca3a8
+src/components/SecurityCenter.tsx                  | 86948           | 2eb827d29bfb5ce38a44be19b40a3425fea315d105b23112f177f8fdd57c9734
+src/components/SyndicPanel.tsx                     | 118836          | f8f5ab25d58f1bfeb5451d1db1b0867cc760b07274a70a9876fdc42532ca8834
+src/components/UserFormModal.tsx                   | 28423           | 1bdc4d1a8b4308101e0c600ef7057f31e49128d56ce97d77e59c1f696e151208
+src/components/portaria/PackageItem.tsx            | 10949           | 21346d9da8869de5fd8e5c18270f6640b061b1062fa731a8fdd821f7d803277b
+src/components/portaria/ResidentCard.tsx           | 7174            | 66df0ce4f610a7ac4dba9fe660b5bd70889c0443a44cf882754bef9881af9910
+src/index.css                                      | 243             | c2ff4432117b9222ff01bb3b9729f32c2189d2c9b34c42d506ea5a9f25d6fdeb
+src/lib/apiClient.ts                               | 7069            | 3301f2f43fc8ecef4456c486cd65c309bd142293227a61d3fb26654008fad837
+src/lib/authUtils.ts                               | 170             | f2c40b235d2434533a3d3adf528cfec52f48f8be5cf13943c5a31a9097edbcc0
+src/lib/dateUtils.ts                               | 1102            | a09e12f0724e81957a405678f2dac442165f37c6a9b1952dc0b0c11b152fb374
+src/lib/feedback.ts                                | 3127            | 3dbcb398b5968acf6abf09b244b3899aaa162d7cdbbc38bf00c5055c5b4f5768
+src/lib/imageUtils.ts                              | 1116            | e40c97229659f85b1a35194d5ba4d74d94de60cc7518116a8cf2286a0be20411
+src/lib/plantaoUtils.ts                            | 3612            | 470e6475f2e9767b54274a878ce1bb5e56e4bd94a27f3f38e84a293219177c18
+src/lib/porterUtils.ts                             | 2131            | 5fc9a03cda62b10303ef4c923d3964abb40f11355427013a6a461d511f76ec89
+src/lib/residentUtils.ts                           | 3062            | 640a3872db1465471ebf3fd93ac3bff7fee3f9083d0f0ce8f8a923b5ebb0dbc5
+src/lib/supabase.ts                                | 732             | 88b4e19d85480fd90fac32d8b16973168e898db214a4a781d6dd7172600ceeba
+src/main.tsx                                       | 1544            | e1c901d55619f2a64e0bf3368e1e343e66ad0f7b8bcca218bccc7df0c4f7db72
+src/pages/AuditLogs.tsx                            | 13684           | 76f315f984849c9603aa13f7429a381936e2e70c86cc2c6486b63eb1b4a25aa5
+src/pages/ChangePassword.tsx                       | 5546            | 85dcee9d57b19241085a1f50d31980728141c56f13521a758028c83fdda54970
+src/pages/CondominiumList.tsx                      | 90250           | 74936d13a50a0fd02be9e658b343ca2f80e123567d35caf5b6c3ca2966881d7c
+src/pages/CondominiumNew.tsx                       | 3704            | 3c414a8cdee76e8a8e2ae1518952ca986ac62d3f81c633a83f4b4be9fa3e6140
+src/pages/Dashboard.tsx                            | 39393           | b57e68d5c09be3434ad635548e5f4b77fafa698c24dd9324a083e12bed364d26
+src/pages/PackageList.tsx                          | 17555           | 63c699cf5ce0314491d8e85dcea52d700d9ca9eb8f68550510447ab9eeec9dc5
+src/pages/PackageNew.tsx                           | 105327          | 3511a2b220122116d15d67fd3042b1cb075cb51692c88e0f399c8019c8426ea0
+src/pages/Portaria.tsx                             | 170682          | d0761829d0aa6840ea8bb16e8e29c8c2449d58451bea6a2d3a8a7689d117828a
+src/pages/ProfileList.tsx                          | 28663           | 349f6e2fb021484c9077d92fd3006d9a949e3c7a97abaf94cfadf699180f9630
+src/pages/ProfileNew.tsx                           | 8210            | 31b4dc253d72645768ced4aba8948624a7daba00f8e9ff23670af2e9849b4454
+src/pages/Retirada.tsx                             | 12850           | a719172966b0389e851ce2b84b7a1f89d1ac6439cb4546d0673661886a2cf383
+src/pages/SelectCondominium.tsx                    | 6360            | 77b1f7c4ff612f019e603c71d474b08958337de0415ad2ec3d0b003d1179dfb9
+src/pages/Settings.tsx                             | 14610           | 377feee939e70cc6a21eb93d6b411b3c07145a10765bd8f935d025a6b1e58c64
+src/pages/UserManagement.tsx                       | 49846           | 1194d50c674eeed90179fcf7f0e400d349fbc68e4feabe354ad3fa2769fc766c
+src/services/auditService.ts                       | 3804            | 4d8e2242fab25961acf90131d1a551263266d31eabba637d79f0bd21cd5343dc
+src/services/geminiService.ts                      | 8887            | f952b564183a1e72e92f3667bf5c945bb6d9d2c64c7ff8c714e26c01fe7098ff
+src/services/labelParser.ts                        | 3699            | f9a215b0edcfee62846b5924951150df81dedf5cde3df67cafa65eb40e54eb8b
+src/services/residentImporter.ts                   | 18728           | 3bcadf59d1209eac9c431c843e764be71fa420f9e28c96e4388241ac8c204d5b
+src/services/residentMatcher.ts                    | 10832           | fde1969883ba8905b169d5369964a862c5ebe9977a212a88afd887461b1e7241
+src/services/residentModeService.ts                | 1792            | e26133fac9394ed0200bab4f4bc9b6140c2c0001138366d3e68e9d123d6436a4
+src/services/whatsappService.ts                    | 10574           | 5a8d54a6c1caec4471de7b0a2251addb76fab8fa5bfe082b37b239445b101c92
+src/tests/condominiums.test.ts                     | 5841            | 50408d12ea0b35c4c136a5589a67aeb1446eb0e5552bab61942fcc2a34cf1b9d
+src/tests/persistence-integrity.test.ts            | 7132            | b4a9afe9c670ce92f10ca6d1098f48586043881ac353d58b77f61259a532e9e3
+src/tests/resident-importer.test.ts                | 7372            | ee47cfd1d3c95109adce32415856d04bdfa3882b3238297605f014d07ff02772
+src/types.ts                                       | 6434            | 9d4fc5b35e12c83a1d2c6720444e2f4882f5441b3635fcff930740e97839ec17
+src/utils/imageCollage.ts                          | 9258            | 10ea758507ed0de12a2a9a3164f98087786878cc98c956816d503b1de77c95a7
+supabase_schema.sql                                | 13269           | c95ffcfab5c9cfcc7a228aaee93efc3d382ccd52b187f97332e7462743f5277f
+tsconfig.json                                      | 546             | 891adb576b0417828cc2d1dcdc0fe2312fa379b7d6b32cb70546d4024d12fc5d
+vercel.json                                        | 190             | f35b13ae52e06dcc049574c206e6dd16730a1801404123b752847ff65f67f214
+vite.config.ts                                     | 705             | 36dc668d5acdd80c4aeb3c40c95e311d8eba8512af283cb9344355caa8269f4c
+---------------------------------------------------------------------------------------------------------------------------------------
+
+RESUMO DA EXPORTAÇÃO:
+- Quantidade total de arquivos: 65
+- Tamanho do arquivo ZIP: 1059516 bytes
+- SHA-256 do ZIP: 3c9d8461fef70c85de102241b7af924f898e723bab8f61f4e29d05994d605a57
+- Commit base de origem: df2ba4aa63b1d16c4faf18cd7935b0eb3b9cb893
+- Branch de referência: deploy-checkpoint-8db689c-stable
+- Identificação do estado exportado: ESTADO AUDITADO E APROVADO (Admin-only access control, público desativado, sem segredos)
+
+================================================================================

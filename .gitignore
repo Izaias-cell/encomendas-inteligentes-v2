@@ -1,0 +1,13 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+public/downloads/
+/encomendas-inteligentes-final-validado-2026-09-18.zip
+/encomendas-inteligentes-deploy/
+/*.zip
+/public/*.zip
