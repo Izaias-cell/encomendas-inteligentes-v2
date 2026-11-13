@@ -1,0 +1,29 @@
+@import "tailwindcss";
+
+html, body {
+  width: 100%;
+  max-width: 100vw;
+  overflow-x: hidden;
+  position: relative;
+  -webkit-text-size-adjust: 100%;
+  touch-action: manipulation;
+}
+
+/* Evita auto-zoom indesejado do iOS Safari e Android ao focar em inputs */
+input, select, textarea {
+  font-size: 16px;
+}
+
+#qr-reader video {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: cover !important;
+}
+
+#qr-reader {
+  border: none !important;
+}
+
+.qr-scanner-frame {
+  box-shadow: 0 0 0 1000px rgba(0, 0, 0, 0.5);
+}
