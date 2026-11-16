@@ -1,10 +1,11 @@
 import { getPackageItemCount } from '../lib/packageUtils';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
+import { api } from '../lib/apiClient';
 import { toast } from 'react-hot-toast';
 import { Profile, Package } from '../types';
-import { formatSafeDateTime } from '../lib/dateUtils';
+import { formatSafeDateTime, formatSafeDate } from '../lib/dateUtils';
 import { 
   LayoutDashboard, 
   Package as PackageIcon, 
@@ -24,7 +25,8 @@ import {
   History,
   Trash2,
   AlertTriangle,
-  X
+  X,
+  RefreshCw
 } from 'lucide-react';
 
 import { normalizeRole } from '../lib/authUtils';
@@ -39,6 +41,12 @@ export default function Dashboard({ user }: DashboardProps) {
     pending: 0,
     delivered: 0
   });
+  const [historyStartDate, setHistoryStartDate] = useState<string | null>(null);
+  const [periodRange, setPeriodRange] = useState<{ start: string | null; end: string | null }>({ start: null, end: null });
+  const [undatedPackagesCount, setUndatedPackagesCount] = useState<number>(0);
+  const [statsError, setStatsError] = useState<string | null>(null);
+  const activeCondoIdRef = useRef<string | null>(user.condominium_id || null);
+  const activeRequestIdRef = useRef<number>(0);
   const [loading, setLoading] = useState(true);
   const [showClearModal, setShowClearModal] = useState(false);
   const [clearType, setClearType] = useState<'options' | 'test' | 'inactive' | 'report' | 'allPackages'>('options');
@@ -93,21 +101,8 @@ export default function Dashboard({ user }: DashboardProps) {
 
     setCondoLoading(true);
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      
-      const response = await fetch('/api/condominiums/create', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session?.access_token || 'MOCK_TOKEN'}`
-        },
-        body: JSON.stringify(condoFormData)
-      });
-
-      if (!response.ok) {
-        const err = await response.json();
-        throw new Error(err.error || 'Erro ao cadastrar condomínio');
-      }
+      const res = await api.post('/api/condominiums/create', condoFormData);
+      if (!res.ok) throw new Error(res.error || 'Erro ao cadastrar condomínio');
 
       toast.success('Condomínio cadastrado com sucesso');
       setShowCondoModal(false);
@@ -122,7 +117,7 @@ export default function Dashboard({ user }: DashboardProps) {
         rules: '',
         internal_notes: '',
         active: true,
-        porters: [{ name: '', phone: '' }]
+        porters: [{ name: '', phone: '', email: '' }]
       });
     } catch (error: any) {
       console.error('Erro ao cadastrar condomínio:', error);
@@ -133,52 +128,67 @@ export default function Dashboard({ user }: DashboardProps) {
   };
 
   useEffect(() => {
+    // Ao trocar de condomínio: limpa imediatamente os indicadores e o período anterior
+    setStats({ total: 0, pending: 0, delivered: 0 });
+    setHistoryStartDate(null);
+    setPeriodRange({ start: null, end: null });
+    setUndatedPackagesCount(0);
+    setStatsError(null);
+    setLoading(true);
+
+    activeCondoIdRef.current = user.condominium_id || null;
+
+    if (!user.condominium_id) {
+      setLoading(false);
+      return;
+    }
+
     fetchStats();
     fetchCondoName();
 
-    // Atualização em tempo real ao focar ou retornar para a aba
+    // Atualização ao focar ou retornar para a aba
     const handleFocus = () => {
       fetchStats();
     };
 
     window.addEventListener('focus', handleFocus);
-    document.addEventListener('visibilitychange', () => {
+    const handleVisibility = () => {
       if (document.visibilityState === 'visible') {
         fetchStats();
       }
-    });
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
 
     // Inscrição no canal Realtime do Supabase para alterações na tabela packages
     let channel: any = null;
     try {
-      if (user.condominium_id) {
-        channel = supabase
-          .channel(`dashboard-package-counts-${user.condominium_id}`)
-          .on(
-            'postgres_changes',
-            {
-              event: '*',
-              schema: 'public',
-              table: 'packages',
-              filter: `condominium_id=eq.${user.condominium_id}`
-            },
-            () => {
-              fetchStats();
-            }
-          )
-          .subscribe();
-      }
+      channel = supabase
+        .channel(`dashboard-package-counts-${user.condominium_id}`)
+        .on(
+          'postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'packages',
+            filter: `condominium_id=eq.${user.condominium_id}`
+          },
+          () => {
+            fetchStats();
+          }
+        )
+        .subscribe();
     } catch (e) {
       console.warn('Realtime channel error in Dashboard:', e);
     }
 
-    // Intervalo suave de sincronização periódica (a cada 15 segundos)
+    // Intervalo suave de sincronização periódica (a cada 20 segundos)
     const interval = setInterval(() => {
       fetchStats();
-    }, 15000);
+    }, 20000);
 
     return () => {
       window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleVisibility);
       clearInterval(interval);
       if (channel) {
         supabase.removeChannel(channel);
@@ -188,143 +198,97 @@ export default function Dashboard({ user }: DashboardProps) {
 
   const fetchCondoName = async () => {
     if (!user.condominium_id) return;
+    const currentCondoId = user.condominium_id;
     try {
-      const { data, error } = await supabase
-        .from('condominiums')
-        .select('name')
-        .eq('id', user.condominium_id)
-        .maybeSingle();
-      
-      if (error) throw error;
-      if (data) setCondoName(data.name);
+      const res = await api.get<{ condominium?: { name?: string } | null }>(
+        `/api/operational/context?condominiumId=${encodeURIComponent(currentCondoId)}`
+      );
+      if (res.ok && res.data?.condominium?.name && activeCondoIdRef.current === currentCondoId) {
+        setCondoName(res.data.condominium.name);
+      }
     } catch (error) {
       console.error('Erro ao buscar nome do condomínio:', error);
     }
   };
 
   const fetchStats = async () => {
-    if (!user.condominium_id) return;
+    const targetCondoId = user.condominium_id;
+    if (!targetCondoId) {
+      setLoading(false);
+      return;
+    }
+
+    const thisRequestId = ++activeRequestIdRef.current;
+
     try {
-      // 1. Contagens exatas de registros no banco (preserva a integridade e precisão)
-      const [allRes, pendingRes, deliveredRes, batchRes] = await Promise.all([
-        supabase
-          .from('packages')
-          .select('*', { count: 'exact', head: true })
-          .eq('condominium_id', user.condominium_id),
-        supabase
-          .from('packages')
-          .select('*', { count: 'exact', head: true })
-          .eq('condominium_id', user.condominium_id)
-          .neq('status', 'delivered'),
-        supabase
-          .from('packages')
-          .select('*', { count: 'exact', head: true })
-          .eq('condominium_id', user.condominium_id)
-          .eq('status', 'delivered'),
-        // 2. Busca ultra leve somente das notas dos lotes com múltiplos itens
-        supabase
-          .from('packages')
-          .select('notes, status')
-          .eq('condominium_id', user.condominium_id)
-          .or('notes.ilike.%[QTD:%,notes.ilike.%lote de %')
-      ]);
+      const res = await api.get<{
+        condominium?: { name?: string } | null;
+        stats?: { total: number; pending: number; delivered: number };
+        periodRange?: { start: string | null; end: string | null };
+        undatedPackagesCount?: number;
+        testCounts?: { residents: number; porters: number; packages: number; testPending: number; testDelivered: number };
+      }>(`/api/operational/dashboard?condominiumId=${encodeURIComponent(targetCondoId)}`);
 
-      if (allRes.error) console.error('Erro ao buscar todas:', allRes.error);
-      if (pendingRes.error) console.error('Erro ao buscar pendentes:', pendingRes.error);
-      if (deliveredRes.error) console.error('Erro ao buscar retiradas:', deliveredRes.error);
-
-      // Calcula os itens adicionais de cada lote (ex: Lote de 3 = 1 registro base + 2 adicionais)
-      let additionalPending = 0;
-      let additionalDelivered = 0;
-
-      if (batchRes.data && batchRes.data.length > 0) {
-        batchRes.data.forEach((p: any) => {
-          const qty = getPackageItemCount(p);
-          if (qty > 1) {
-            const extra = qty - 1;
-            if (p.status === 'delivered') {
-              additionalDelivered += extra;
-            } else {
-              additionalPending += extra;
-            }
-          }
-        });
+      if (!res.ok) {
+        throw new Error(res.error || 'Erro ao carregar painel');
       }
 
-      const baseTotal = allRes.count ?? (allRes.data?.length || 0);
-      const basePending = pendingRes.count ?? (pendingRes.data?.length || 0);
-      const baseDelivered = deliveredRes.count ?? (deliveredRes.data?.length || 0);
+      if (
+        activeCondoIdRef.current !== targetCondoId ||
+        activeRequestIdRef.current !== thisRequestId
+      ) {
+        return;
+      }
 
-      setStats({ 
-        total: baseTotal + additionalPending + additionalDelivered, 
-        pending: basePending + additionalPending, 
-        delivered: baseDelivered + additionalDelivered 
-      });
-    } catch (error) {
-      console.error('Erro ao buscar estatísticas:', error);
+      const payload = res.data;
+      if (payload?.condominium?.name) {
+        setCondoName(payload.condominium.name);
+      }
+      if (payload?.stats) {
+        setStats(payload.stats);
+      }
+      const start = payload?.periodRange?.start || null;
+      const end = payload?.periodRange?.end || null;
+      setHistoryStartDate(start);
+      setPeriodRange({ start, end });
+      setUndatedPackagesCount(payload?.undatedPackagesCount ?? 0);
+      if (payload?.testCounts) {
+        setTestCounts(payload.testCounts);
+      }
+      setStatsError(null);
+    } catch (error: any) {
+      if (
+        activeCondoIdRef.current === targetCondoId &&
+        activeRequestIdRef.current === thisRequestId
+      ) {
+        console.error('Erro ao buscar estatísticas do Dashboard:', error);
+        setStatsError('Não foi possível atualizar os indicadores do condomínio no momento.');
+      }
     } finally {
-      setLoading(false);
+      if (
+        activeCondoIdRef.current === targetCondoId &&
+        activeRequestIdRef.current === thisRequestId
+      ) {
+        setLoading(false);
+      }
     }
   };
 
   const handleClearTestData = async () => {
     if (!user.condominium_id) return;
-    
-    // Security check: Only admin can execute
     if (normalizeRole(user.role) !== 'admin') {
       toast.error('Apenas administradores podem realizar esta ação.');
       return;
     }
-    
+
     setClearing(true);
     try {
-      // 1. Logs de retirada
-      const { error: logsError } = await supabase
-        .from('retrieval_logs')
-        .delete()
-        .eq('condominium_id', user.condominium_id);
-      
-      if (logsError) console.warn('Erro ao limpar logs:', logsError);
-
-      // 2. Encomendas de teste
-      // Encomendas: is_teste = true OR notas contém teste
-      const { data: pkgs, error: pkgError } = await supabase
-        .from('packages')
-        .delete()
-        .eq('condominium_id', user.condominium_id)
-        .eq('is_teste', true)
-        .select('id');
-
-      if (pkgError) throw pkgError;
-
-      // 3. Moradores de teste
-      // Moradores: is_teste = true OR nome contém teste OR observacoes contém teste
-      const { data: residents, error: resError } = await supabase
-        .from('moradores')
-        .delete()
-        .eq('condominium_id', user.condominium_id)
-        .or('nome.ilike.%teste%,observacoes.ilike.%teste%')
-        .select('id');
-
-      if (resError) console.warn('Erro ao limpar moradores de teste:', resError);
-
-      // 4. Porteiros (profiles) de teste
-      // Porteiros: full_name contém teste
-      const { data: profiles, error: profileError } = await supabase
-        .from('profiles')
-        .delete()
-        .eq('condominium_id', user.condominium_id)
-        .ilike('full_name', '%teste%')
-        .select('id');
-
-      if (profileError) console.warn('Erro ao limpar porteiros de teste:', profileError);
-
-      setClearReport({
-        residents: residents?.length || 0,
-        porters: profiles?.length || 0,
-        packages: pkgs?.length || 0
-      });
-      
+      const res = await api.post<{ report?: { residents: number; porters: number; packages: number } }>(
+        '/api/operational/packages/clear',
+        { condominiumId: user.condominium_id, mode: 'test' }
+      );
+      if (!res.ok) throw new Error(res.error || 'Erro ao limpar dados de teste');
+      setClearReport(res.data?.report || { residents: 0, porters: 0, packages: 0 });
       setClearType('report');
       fetchStats();
     } catch (error: any) {
@@ -341,32 +305,19 @@ export default function Dashboard({ user }: DashboardProps) {
       toast.error('Apenas administradores podem realizar esta ação.');
       return;
     }
-    
+
     if (confirmationPhrase !== 'LIMPAR') {
       toast.error('Por favor, digite LIMPAR para confirmar.');
       return;
     }
-    
+
     setClearing(true);
     try {
-      // Deletar logs de retirada primeiro para evitar erros de FK se existirem
-      const { data: pkgs } = await supabase
-        .from('packages')
-        .select('id')
-        .eq('condominium_id', user.condominium_id);
-      
-      const pkgIds = pkgs?.map(p => p.id) || [];
-      if (pkgIds.length > 0) {
-        await supabase.from('retrieval_logs').delete().in('package_id', pkgIds);
-      }
-      
-      // Deletar todas as encomendas
-      const { error } = await supabase
-        .from('packages')
-        .delete()
-        .eq('condominium_id', user.condominium_id);
-      
-      if (error) throw error;
+      const res = await api.post('/api/operational/packages/clear', {
+        condominiumId: user.condominium_id,
+        mode: 'all_packages'
+      });
+      if (!res.ok) throw new Error(res.error || 'Erro ao excluir encomendas');
 
       toast.success('Todas as encomendas foram excluídas com sucesso.');
       setShowClearModal(false);
@@ -383,44 +334,36 @@ export default function Dashboard({ user }: DashboardProps) {
     setClearType('options');
     setConfirmationPhrase('');
     setShowClearModal(true);
-    
-    // Buscar contagens prévias
+
     if (user.condominium_id) {
-      const [resC, porterC, pkgC, pkgPendingC, pkgDeliverC] = await Promise.all([
-        supabase.from('moradores').select('id', { count: 'exact', head: true }).eq('condominium_id', user.condominium_id).or('nome.ilike.%teste%,observacoes.ilike.%teste%'),
-        supabase.from('profiles').select('id', { count: 'exact', head: true }).eq('condominium_id', user.condominium_id).ilike('full_name', '%teste%'),
-        supabase.from('packages').select('id', { count: 'exact', head: true }).eq('condominium_id', user.condominium_id),
-        supabase.from('packages').select('id', { count: 'exact', head: true }).eq('condominium_id', user.condominium_id).neq('status', 'delivered'),
-        supabase.from('packages').select('id', { count: 'exact', head: true }).eq('condominium_id', user.condominium_id).eq('status', 'delivered')
-      ]);
-      
-      setTestCounts({
-        residents: resC.count || 0,
-        porters: porterC.count || 0,
-        packages: pkgC.count || 0,
-        testPending: pkgPendingC.count || 0,
-        testDelivered: pkgDeliverC.count || 0
-      });
+      try {
+        const res = await api.get<{
+          testCounts?: { residents: number; porters: number; packages: number; testPending: number; testDelivered: number };
+        }>(`/api/operational/dashboard?condominiumId=${encodeURIComponent(user.condominium_id)}`);
+        if (res.ok && res.data?.testCounts) {
+          setTestCounts(res.data.testCounts);
+        }
+      } catch (e) {
+        console.warn('Erro ao buscar contagens prévias:', e);
+      }
     }
   };
 
   const handleClearInactiveResidents = async () => {
     if (!user.condominium_id) return;
-    
+
     if (normalizeRole(user.role) !== 'admin') {
       toast.error('Apenas administradores podem realizar esta ação.');
       return;
     }
-    
+
     setClearing(true);
     try {
-      const { error } = await supabase
-        .from('moradores')
-        .delete()
-        .eq('condominium_id', user.condominium_id)
-        .eq('ativo', false);
-
-      if (error) throw error;
+      const res = await api.post('/api/operational/packages/clear', {
+        condominiumId: user.condominium_id,
+        mode: 'inactive'
+      });
+      if (!res.ok) throw new Error(res.error || 'Erro ao remover moradores desativados');
 
       toast.success('Moradores desativados removidos com sucesso.');
       setShowClearModal(false);
@@ -476,38 +419,97 @@ export default function Dashboard({ user }: DashboardProps) {
         {(() => {
           const role = normalizeRole(user.role);
           if (role === 'sindico') {
-            return <h1 className="text-3xl font-bold text-zinc-900 mb-2">{condoName || 'Carregando...'}</h1>;
+            return (
+              <>
+                <h1 className="text-3xl font-bold text-zinc-900 mb-1">{condoName || 'Carregando...'}</h1>
+                {historyStartDate && stats.total > 0 && (
+                  <p className="text-sm font-medium text-zinc-500">
+                    Primeiro registro com data disponível: {formatSafeDate(historyStartDate)}.
+                  </p>
+                )}
+              </>
+            );
           }
           return (
             <>
-              <h1 className="text-3xl font-bold text-zinc-900 mb-2">Olá, {user.full_name}!</h1>
-              {role === 'admin' && <p className="text-zinc-500">Gerenciamento completo do sistema</p>}
-              {role === 'porteiro' && <p className="text-zinc-500">Agilidade no registro, recebimento e entrega!</p>}
+              <h1 className="text-3xl font-bold text-zinc-900 mb-1">Olá, {user.full_name}!</h1>
+              {condoName && (
+                <p className="text-base font-semibold text-emerald-800 mb-1 flex items-center gap-1.5">
+                  <Building2 className="w-4 h-4 text-emerald-600 inline" />
+                  {condoName}
+                </p>
+              )}
+              {historyStartDate && stats.total > 0 && (
+                <p className="text-sm font-medium text-zinc-500 mb-1">
+                  Primeiro registro com data disponível: {formatSafeDate(historyStartDate)}.
+                </p>
+              )}
+              {role === 'admin' && <p className="text-zinc-500 text-xs">Gerenciamento completo do sistema</p>}
+              {role === 'porteiro' && <p className="text-zinc-500 text-xs">Agilidade no registro, recebimento e entrega!</p>}
             </>
           );
         })()}
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
-        <StatCard 
-          title="Total de Pacotes" 
-          value={stats.total} 
-          icon={PackageIcon} 
-          color="bg-blue-100 text-blue-600" 
-        />
-        <StatCard 
-          title="Pacotes Pendentes" 
-          value={stats.pending} 
-          icon={Clock} 
-          color="bg-amber-100 text-amber-600" 
-        />
-        <StatCard 
-          title="Pacotes Entregues" 
-          value={stats.delivered} 
-          icon={CheckCircle} 
-          color="bg-emerald-100 text-emerald-600" 
-        />
-      </div>
+      {statsError ? (
+        <div className="mb-8 p-4 bg-amber-50 border border-amber-200 rounded-2xl flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0" />
+            <p className="text-sm font-medium text-amber-900">{statsError}</p>
+          </div>
+          <button
+            onClick={() => { setLoading(true); fetchStats(); }}
+            className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold transition-all shrink-0 flex items-center gap-1.5 cursor-pointer"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            Tentar novamente
+          </button>
+        </div>
+      ) : (
+        <div className="mb-12">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <StatCard 
+              title="Total de Pacotes" 
+              value={stats.total} 
+              icon={PackageIcon} 
+              color="bg-blue-100 text-blue-600" 
+            />
+            <StatCard 
+              title="Pacotes Pendentes" 
+              value={stats.pending} 
+              icon={Clock} 
+              color="bg-amber-100 text-amber-600" 
+            />
+            <StatCard 
+              title="Pacotes Entregues" 
+              value={stats.delivered} 
+              icon={CheckCircle} 
+              color="bg-emerald-100 text-emerald-600" 
+            />
+          </div>
+
+          {stats.total > 0 && (
+            <div className="mt-3 px-1 space-y-0.5 text-right md:text-left">
+              {periodRange.start && periodRange.end ? (
+                <p className="text-xs text-zinc-500 font-medium">
+                  {undatedPackagesCount > 0 
+                    ? `Datas disponíveis: ${formatSafeDate(periodRange.start)} até ${formatSafeDate(periodRange.end)}`
+                    : `Período dos indicadores: ${formatSafeDate(periodRange.start)} até ${formatSafeDate(periodRange.end)}`}
+                </p>
+              ) : (
+                <p className="text-xs text-zinc-400 italic font-medium">
+                  Não há datas de recebimento disponíveis.
+                </p>
+              )}
+              {undatedPackagesCount > 0 && (
+                <p className="text-[11px] text-zinc-400 font-medium">
+                  {undatedPackagesCount} {undatedPackagesCount === 1 ? 'registro sem data de recebimento' : 'registros sem data de recebimento'}
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       <h2 className="text-2xl font-bold text-zinc-900 mb-6">Ações Rápidas</h2>
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">

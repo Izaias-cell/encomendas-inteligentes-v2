@@ -98,3 +98,35 @@ export const normalizeResidentPhone = (
 
   return { phone: digits, isValid: false, isIncomplete: true };
 };
+
+/**
+ * Função canônica para processar/filtrar encomendas que necessitam de notificação.
+ * Garante que uma encomenda permaneça pendente até confirmação válida do envio.
+ */
+export const getPackagesNeedingNotification = (
+  pkgList: any[],
+  residents: any[] = [],
+  includeIncompletePhone: boolean = true
+): any[] => {
+  if (!Array.isArray(pkgList) || pkgList.length === 0) return [];
+  return pkgList.filter(p => {
+    // Regra 1: Se já foi notificado com confirmação válida, sai da fila
+    if (p.whatsapp_notified === true || p.whatsapp_sent === true) return false;
+    // Regra 2: Se já foi entregue, sai da fila
+    if (p.status === 'delivered' || p.delivered_at) return false;
+    // Regra 3: Se não tem destinatário vinculado, não pode enviar
+    if (!p.recipient_id) return false;
+    
+    // Resolução do morador
+    const resident = residents.find(r => r.id === p.recipient_id) || (p as any).moradores;
+    if (!resident) {
+      return true; // Mantém na fila até que os dados sejam carregados
+    }
+    
+    const phoneCheck = normalizeResidentPhone(resident.telefone);
+    if (includeIncompletePhone) {
+      return true;
+    }
+    return phoneCheck.isValid;
+  });
+};

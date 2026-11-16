@@ -1,5 +1,5 @@
 import * as XLSX from 'xlsx';
-import { supabase } from '../lib/supabase';
+import { api } from '../lib/apiClient';
 import { Morador } from '../types';
 import { registrarAuditoria } from './auditService';
 import { ImportMode, formatObservacoesWithMode } from './residentModeService';
@@ -467,21 +467,22 @@ export async function executeResidentImport({
     });
   }
 
-  // 1. Executa Inserções em Lotes (Chunks de 50)
+  // 1. Executa Inserções em Lotes via API operacional (Chunks de 50)
   const CHUNK_SIZE = 50;
   for (let i = 0; i < toInsertList.length; i += CHUNK_SIZE) {
     const chunk = toInsertList.slice(i, i + CHUNK_SIZE);
     try {
-      const { data, error } = await supabase
-        .from('moradores')
-        .insert(chunk)
-        .select('id');
-
-      if (error) {
-        throw error;
+      const res = await api.post<{ success?: boolean; insertedCount?: number; errors?: string[] }>(
+        '/api/operational/moradores/batch',
+        { condominiumId, inserts: chunk }
+      );
+      if (!res.ok) {
+        throw new Error(res.error || 'Falha de gravação em lote');
       }
-
-      successCount += data ? data.length : chunk.length;
+      successCount += typeof res.data?.insertedCount === 'number' ? res.data.insertedCount : chunk.length;
+      if (Array.isArray(res.data?.errors) && res.data.errors.length > 0) {
+        errors.push(...res.data.errors);
+      }
     } catch (err: any) {
       console.error('Erro ao inserir lote de moradores:', err);
       errors.push(`Erro no lote ${Math.floor(i / CHUNK_SIZE) + 1}: ${err.message || 'Falha de gravação'}`);
@@ -497,18 +498,23 @@ export async function executeResidentImport({
     }
   }
 
-  // 2. Executa Atualizações (se houver)
-  for (const item of toUpdateList) {
+  // 2. Executa Atualizações (se houver) em lote via API operacional
+  if (toUpdateList.length > 0) {
+    const updatePayload = toUpdateList.map((item) => ({ id: item.id, ...item.data }));
     try {
-      const { error } = await supabase
-        .from('moradores')
-        .update(item.data)
-        .eq('id', item.id);
-
-      if (error) throw error;
-      updatedCount++;
+      const res = await api.post<{ updatedCount?: number; errors?: string[] }>(
+        '/api/operational/moradores/batch',
+        { condominiumId, updates: updatePayload }
+      );
+      if (!res.ok) {
+        throw new Error(res.error || 'Falha na atualização em lote');
+      }
+      updatedCount += typeof res.data?.updatedCount === 'number' ? res.data.updatedCount : toUpdateList.length;
+      if (Array.isArray(res.data?.errors) && res.data.errors.length > 0) {
+        errors.push(...res.data.errors);
+      }
     } catch (err: any) {
-      errors.push(`Erro ao atualizar morador ID ${item.id}: ${err.message}`);
+      errors.push(`Erro ao atualizar moradores em lote: ${err.message}`);
     }
   }
 

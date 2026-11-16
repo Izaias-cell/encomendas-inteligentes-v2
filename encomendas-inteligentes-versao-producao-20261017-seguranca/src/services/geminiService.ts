@@ -4,6 +4,8 @@
  * no backend (/api/ocr/*), mantendo a chave GEMINI_API_KEY protegida fora do navegador/bundle.
  */
 
+import { getValidAuthToken } from '../lib/apiClient';
+
 async function callWithRetry<T>(fn: () => Promise<T>, maxRetries = 3, signal?: AbortSignal): Promise<T> {
   let lastError: any;
   for (let i = 0; i < maxRetries; i++) {
@@ -49,9 +51,13 @@ export async function extractBasicText(base64Image: string, signal?: AbortSignal
   try {
     if (signal?.aborted) return null;
     return await callWithRetry(async () => {
+      const token = await getValidAuthToken();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
       const res = await fetch('/api/ocr/extract-basic', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ image: base64Image }),
         signal
       });
@@ -62,6 +68,10 @@ export async function extractBasicText(base64Image: string, signal?: AbortSignal
       }
 
       const json = await res.json();
+      if (json?.quotaExceeded) {
+        console.info("[OCR Client] Quota diária de leitura por IA atingida no backend. Modo manual disponível.");
+        return null;
+      }
       return json?.data || null;
     }, 2, signal);
   } catch (e) {
@@ -75,9 +85,13 @@ export async function analyzePackageLabel(base64Image: string, residentList?: st
   try {
     if (signal?.aborted) return null;
     return await callWithRetry(async () => {
+      const token = await getValidAuthToken();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
       const res = await fetch('/api/ocr/analyze-label', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ image: base64Image, residentList }),
         signal
       });
@@ -88,6 +102,10 @@ export async function analyzePackageLabel(base64Image: string, residentList?: st
       }
 
       const json = await res.json();
+      if (json?.quotaExceeded) {
+        console.info("[OCR Client] Quota diária de leitura por IA atingida no backend. Modo manual disponível.");
+        return null;
+      }
       return json?.data || null;
     }, 2, signal);
   } catch (e) {

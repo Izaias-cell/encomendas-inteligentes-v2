@@ -1,10 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { supabase } from '../lib/supabase';
+import { api } from '../lib/apiClient';
+import { normalizeRole } from '../lib/authUtils';
 import { Package, Profile } from '../types';
-import { Package as PackageIcon, Plus, Loader2, Search, User, Home, Truck, Calendar, CheckCircle, Clock, QrCode, Hash, MessageSquare, MessageCircle, AlertCircle, ArrowRight } from 'lucide-react';
+import { Package as PackageIcon, Plus, Loader2, Search, User, Home, Truck, Calendar, CheckCircle, Clock, QrCode, Hash, MessageSquare, MessageCircle, AlertCircle, ArrowRight, ChevronLeft, ChevronRight } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { formatDate, formatSafeDateTime } from '../lib/dateUtils';
+import { getPackageItemCount, sumPackageItems } from '../lib/packageUtils';
 import { formatResidentAddress, formatPackageUnit } from '../lib/residentUtils';
 import { ptBR } from 'date-fns/locale';
 import { motion } from 'motion/react';
@@ -41,32 +43,32 @@ export default function PackageList({ user }: PackageListProps) {
   const [selectedPkg, setSelectedPkg] = useState<Package | null>(null);
   const [viewPhotoUrl, setViewPhotoUrl] = useState<string | null>(null);
 
+  const [currentPage, setCurrentPage] = useState(1);
+  const pageSize = 50;
+  const [totalCount, setTotalCount] = useState(0);
+
   useEffect(() => {
-    fetchPackages();
-  }, [user.condominium_id, user.id]);
+    fetchPackages(currentPage);
+  }, [user.condominium_id, user.id, currentPage]);
 
-  const fetchPackages = async () => {
-    if (!user.condominium_id) return;
+  const fetchPackages = async (targetPage = currentPage) => {
+    const isResident = normalizeRole(user.role) === 'resident';
+    if (!user.condominium_id && !isResident) return;
+    setLoading(true);
     try {
-      const { data, error } = await supabase
-        .from('packages')
-        .select('*, moradores(nome, unidade, unit_type, block, street), package_id:id, unit_label:unit_number')
-        .eq('condominium_id', user.condominium_id)
-        .order('received_at', { ascending: false });
+      const from = (targetPage - 1) * pageSize;
+      const endpoint = isResident
+        ? `/api/portal/my-packages?offset=${from}&limit=${pageSize}`
+        : `/api/operational/packages?status=all&offset=${from}&limit=${pageSize}${user.condominium_id ? `&condominiumId=${encodeURIComponent(user.condominium_id)}` : ''}`;
 
-      if (error) throw error;
-      
-      let pkgs = data || [];
-      
-      if (user.role === 'resident') {
-        // Filter by recipient_id or unit
-        pkgs = pkgs.filter((p: any) => 
-          p.recipient_id === user.id || 
-          p.unit_label === (user.unit || user.unidade || '')
-        );
+      const res = await api.get<{ packages?: Package[]; totalCount?: number }>(endpoint);
+      if (!res.ok) {
+        throw new Error(res.error || 'Erro ao carregar encomendas');
       }
-
-      setPackages(pkgs);
+      setPackages(res.data?.packages || []);
+      if (typeof res.data?.totalCount === 'number') {
+        setTotalCount(res.data.totalCount);
+      }
     } catch (error) {
       console.error('Erro ao buscar encomendas:', error);
     } finally {
@@ -99,7 +101,7 @@ export default function PackageList({ user }: PackageListProps) {
         ...group[0],
         isGroup: true,
         packages: group,
-        count: group.length
+        count: sumPackageItems(group)
       };
     });
 
@@ -107,6 +109,7 @@ export default function PackageList({ user }: PackageListProps) {
   };
 
   const filteredPackages = getFilteredPackages();
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
 
   const getStatusBadge = (status: string) => {
     const variants: any = {
@@ -204,6 +207,7 @@ export default function PackageList({ user }: PackageListProps) {
           <Loader2 className="w-10 h-10 animate-spin text-emerald-600" />
         </div>
       ) : filteredPackages.length > 0 ? (
+        <>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {filteredPackages.map((pkg: any) => (
             <div 
@@ -228,7 +232,7 @@ export default function PackageList({ user }: PackageListProps) {
                     )}
                   </div>
                   <span className={`absolute -top-3 -right-3 text-white text-sm font-bold w-9 h-9 rounded-full flex items-center justify-center border-2 border-white shadow-lg z-10 group-hover:scale-110 transition-transform ${pkg.status === 'delivered' ? 'bg-emerald-500 shadow-[0_4px_12px_rgba(16,185,129,0.3)]' : 'bg-red-500 shadow-[0_4px_12px_rgba(239,68,68,0.3)]'}`}>
-                    {pkg.isGroup ? pkg.count : 1}
+                    {pkg.isGroup ? pkg.count : getPackageItemCount(pkg)}
                   </span>
                 </div>
                 <div className="flex items-center gap-2">
@@ -347,6 +351,38 @@ export default function PackageList({ user }: PackageListProps) {
             </div>
           ))}
         </div>
+
+        {totalCount > pageSize && (
+          <div className="flex flex-col sm:flex-row items-center justify-between gap-4 mt-8 pt-6 border-t border-zinc-200">
+            <p className="text-sm text-zinc-500 font-medium">
+              Exibindo {Math.min((currentPage - 1) * pageSize + 1, totalCount)} a {Math.min(currentPage * pageSize, totalCount)} de {totalCount} encomendas
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                disabled={currentPage <= 1 || loading}
+                className="px-4 py-2 rounded-xl border border-zinc-200 text-zinc-700 font-semibold text-sm hover:bg-zinc-50 disabled:opacity-40 disabled:cursor-not-allowed transition-all flex items-center gap-1.5"
+              >
+                <ChevronLeft className="w-4 h-4" />
+                Anterior
+              </button>
+              <span className="px-3.5 py-1.5 bg-zinc-100 rounded-xl text-xs font-bold text-zinc-700">
+                Página {currentPage} de {totalPages}
+              </span>
+              <button
+                type="button"
+                onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                disabled={currentPage >= totalPages || loading}
+                className="px-4 py-2 rounded-xl border border-zinc-200 text-zinc-700 font-semibold text-sm hover:bg-zinc-50 disabled:opacity-40 disabled:cursor-not-allowed transition-all flex items-center gap-1.5"
+              >
+                Próxima
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        )}
+        </>
       ) : (
         <div className="bg-white rounded-3xl border border-zinc-100 p-20 text-center">
           <div className="w-20 h-20 bg-zinc-50 text-zinc-300 rounded-full flex items-center justify-center mx-auto mb-6">

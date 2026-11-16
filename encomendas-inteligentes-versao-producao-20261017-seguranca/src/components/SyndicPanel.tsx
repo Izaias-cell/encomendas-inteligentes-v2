@@ -173,33 +173,27 @@ const Dashboard = ({ user, residents = [], logs = [], systemStatus }: any) => {
   }, [user.condominium_id]);
 
   const fetchStats = async () => {
+    if (!user?.condominium_id) {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     try {
       const today = formatDate(new Date(), 'yyyy-MM-dd');
+      const condoIdEnc = encodeURIComponent(user.condominium_id);
       
-      // Fetch packages to calculate stats and exact pending count
-      const [{ data: packages, error }, { count: pendingExactCount }] = await Promise.all([
-        supabase
-          .from('packages')
-          .select(`
-            *, 
-            moradores(nome, unidade, block, street),
-            package_id:id, 
-            unit_label:unit_number
-          `)
-          .eq('condominium_id', user.condominium_id)
-          .order('received_at', { ascending: false })
-          .limit(1000),
-        supabase
-          .from('packages')
-          .select('*', { count: 'exact', head: true })
-          .eq('condominium_id', user.condominium_id)
-          .neq('status', 'delivered')
+      // Fetch packages and authoritative counts via backend API
+      const [pkgsRes, dashRes] = await Promise.all([
+        api.get(`/api/operational/packages?status=all&limit=1000&condominiumId=${condoIdEnc}`),
+        api.get(`/api/operational/dashboard?condominiumId=${condoIdEnc}`)
       ]);
 
-      if (error) {
-        console.error('Erro RPC stats:', error);
+      if (!pkgsRes.ok) {
+        console.error('Erro API stats:', pkgsRes.error);
       }
+
+      const packages = pkgsRes.ok ? (pkgsRes.data?.packages || []) : [];
+      const pendingExactCount = dashRes.ok ? dashRes.data?.counts?.pending : undefined;
 
       const pkgs = packages || [];
       
@@ -451,13 +445,10 @@ const PackagesList = ({ user, counts: externalCounts, condoName: propCondoName }
     if (propCondoName) {
       setCondoName(propCondoName);
     } else if (user?.condominium_id) {
-      supabase
-        .from('condominiums')
-        .select('name')
-        .eq('id', user.condominium_id)
-        .single()
-        .then(({ data }) => {
-          if (data?.name) setCondoName(data.name);
+      api
+        .get(`/api/operational/context?condominiumId=${encodeURIComponent(user.condominium_id)}`)
+        .then((res) => {
+          if (res.ok && res.data?.condominium?.name) setCondoName(res.data.condominium.name);
         });
     }
   }, [propCondoName, user?.condominium_id]);
@@ -493,23 +484,16 @@ const PackagesList = ({ user, counts: externalCounts, condoName: propCondoName }
 
   const uploadDeliveryPhoto = async (base64: string) => {
     try {
-      const res = await fetch(base64);
-      const blob = await res.blob();
-      const file = new File([blob], `delivery_${Date.now()}.jpg`, { type: "image/jpeg" });
-      const fileName = `${Math.random()}.jpg`;
-      const filePath = `delivery-photos/${fileName}`;
+      const uploadRes = await api.post('/api/operational/upload-photo', {
+        imageBase64: base64,
+        folder: 'delivery-photos'
+      });
 
-      const { error: uploadError } = await supabase.storage
-        .from('packages')
-        .upload(filePath, file);
+      if (!uploadRes.ok || !uploadRes.data?.publicUrl) {
+        throw new Error(uploadRes.error || 'Erro ao enviar foto');
+      }
 
-      if (uploadError) throw uploadError;
-
-      const { data: { publicUrl } } = supabase.storage
-        .from('packages')
-        .getPublicUrl(filePath);
-
-      return publicUrl;
+      return uploadRes.data.publicUrl;
     } catch (err) {
       console.error("Erro no upload da foto:", err);
       throw err;
@@ -555,34 +539,31 @@ const isValidUuid = (id?: string | null): boolean => {
         finalMethod = 'CÓDIGO';
       }
 
-      const { data: { user: authUser } } = await supabase.auth.getUser();
-      const validDeliveredBy = (authUser?.id && isValidUuid(authUser.id)) 
-        ? authUser.id 
-        : (user?.id && isValidUuid(user.id) ? user.id : null);
+      const porterNameToSave = (getCurrentPorter() && getCurrentPorter() !== 'Selecione o Porteiro') ? getCurrentPorter() : user.full_name;
+      const deliverRes = await api.post('/api/operational/packages/deliver', {
+        packageId: targetId,
+        condominiumId: user.condominium_id,
+        pickupToken: pkgForDelivery.pickup_token,
+        pickupCode: pkgForDelivery.pickup_code,
+        recipientId: pkgForDelivery.recipient_id,
+        deliveryMethod: finalMethod,
+        deliveredToName: 'Morador (Confirmado)',
+        porterName: porterNameToSave,
+        deliveryPhotoUrl: deliveryPhoto ? finalPhotoUrl : undefined,
+      });
 
-      const { error } = await supabase
-        .from('packages')
-        .update({ 
-          status: 'delivered', 
-          delivered_at: new Date().toISOString(),
-          delivered_by: validDeliveredBy,
-          entregue_por: (getCurrentPorter() && getCurrentPorter() !== 'Selecione o Porteiro') ? getCurrentPorter() : user.full_name,
-          delivery_method: finalMethod,
-          delivery_photo_url: finalPhotoUrl
-        })
-        .eq('id', targetId);
-      
-      if (error) throw error;
+      if (!deliverRes.ok) throw new Error(deliverRes.error || 'Falha ao confirmar entrega');
       setIsDeliverySuccess(true);
-      
+
+      const updatedIds: string[] = deliverRes.data?.updatedIds || [targetId];
       // Update local state
-      setPackages(prev => prev.map(p => (p.package_id === targetId || p.id === targetId) ? { 
+      setPackages(prev => prev.map(p => (updatedIds.includes(p.id) || updatedIds.includes(p.package_id) || p.package_id === targetId || p.id === targetId) ? { 
         ...p, 
         status: 'delivered', 
-        delivered_at: new Date().toISOString(),
-        entregue_por: user.full_name,
-        delivery_method: finalMethod,
-        delivery_photo_url: finalPhotoUrl
+        delivered_at: deliverRes.data?.delivered_at || new Date().toISOString(),
+        entregue_por: deliverRes.data?.entregue_por || porterNameToSave,
+        delivery_method: deliverRes.data?.delivery_method || finalMethod,
+        delivery_photo_url: deliverRes.data?.delivery_photo_url || finalPhotoUrl
       } : p));
 
       fetchPackages();
@@ -615,26 +596,17 @@ const isValidUuid = (id?: string | null): boolean => {
     setLoading(true);
     setError(false);
     try {
-      const { data, error } = await supabase
-        .from('packages')
-        .select(`
-          *, 
-          moradores(nome, unidade, block, street),
-          registrar:received_by(full_name),
-          package_id:id, 
-          unit_label:unit_number
-        `)
-        .eq('condominium_id', user.condominium_id)
-        .order('received_at', { ascending: false });
+      const res = await api.get(
+        `/api/operational/packages?status=all&limit=1000&condominiumId=${encodeURIComponent(user.condominium_id)}`
+      );
 
-      if (error) {
-        // If it's a real error, log it and set error state
-        console.error('Erro Supabase ao buscar encomendas:', error);
+      if (!res.ok) {
+        console.error('Erro API ao buscar encomendas:', res.error);
         setError(true);
         return;
       }
 
-      const allData = data || [];
+      const allData = res.data?.packages || [];
       const pendingData = allData.filter(p => !p.delivered_at || p.status !== 'delivered');
       const deliveredData = allData.filter(p => p.status === 'delivered' || p.delivered_at);
 
@@ -675,33 +647,26 @@ const isValidUuid = (id?: string | null): boolean => {
   const handleResendNotification = async (pkg: any) => {
     setActionLoading(true);
     try {
-      const { data: resident } = await supabase
-        .from('moradores')
-        .select('telefone, nome')
-        .eq('id', pkg.recipient_id)
-        .maybeSingle();
+      const morRes = await api.get(
+        `/api/operational/moradores?includeInactive=true&condominiumId=${encodeURIComponent(user.condominium_id)}`
+      );
+      const resident = morRes.ok
+        ? (morRes.data?.moradores || []).find((r: any) => r.id === pkg.recipient_id)
+        : null;
 
       if (!resident?.telefone) {
         throw new Error("Morador não encontrado ou sem telefone cadastrado");
       }
 
-      const { data: { session } } = await supabase.auth.getSession();
-      const response = await fetch('/api/notify-resident', {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session?.access_token}`
-        },
-        body: JSON.stringify({
-          phone: resident.telefone, 
-          residentName: pkg.recipient_name,
-          unitNumber: formatPackageUnit(pkg),
-          carrier: pkg.carrier,
-          packageId: pkg.package_id
-        })
+      const notifyRes = await api.post('/api/notify-resident', {
+        phone: resident.telefone, 
+        residentName: pkg.recipient_name || resident.nome,
+        unitNumber: formatPackageUnit(pkg),
+        carrier: pkg.carrier,
+        packageId: pkg.package_id || pkg.id
       });
 
-      if (!response.ok) throw new Error("Falha ao enviar notificação");
+      if (!notifyRes.ok) throw new Error(notifyRes.error || "Falha ao enviar notificação");
       
       toast.success("Notificação reenviada com sucesso!");
     } catch (err: any) {
@@ -829,8 +794,11 @@ const isValidUuid = (id?: string | null): boolean => {
     
     setActionLoading(true);
     try {
-      const { error } = await supabase.from('packages').delete().eq('id', pkg.package_id);
-      if (error) throw error;
+      const targetId = pkg.package_id || pkg.id;
+      const delRes = await api.delete(
+        `/api/operational/packages/${encodeURIComponent(targetId)}?condominiumId=${encodeURIComponent(user.condominium_id)}`
+      );
+      if (!delRes.ok) throw new Error(delRes.error || "Erro ao excluir");
       toast.success("Registro excluído!");
       fetchPackages();
       setIsModalOpen(false);
@@ -1376,13 +1344,10 @@ const HistoryTab = ({ user, condoName: propCondoName }: any) => {
     if (propCondoName) {
       setCondoName(propCondoName);
     } else if (user?.condominium_id) {
-      supabase
-        .from('condominiums')
-        .select('name')
-        .eq('id', user.condominium_id)
-        .single()
-        .then(({ data }) => {
-          if (data?.name) setCondoName(data.name);
+      api
+        .get(`/api/operational/context?condominiumId=${encodeURIComponent(user.condominium_id)}`)
+        .then((res) => {
+          if (res.ok && res.data?.condominium?.name) setCondoName(res.data.condominium.name);
         });
     }
   }, [propCondoName, user?.condominium_id]);
@@ -1400,27 +1365,17 @@ const HistoryTab = ({ user, condoName: propCondoName }: any) => {
     
     setLoading(true);
     try {
-      const { data, error } = await supabase
-        .from('packages')
-        .select(`
-          *, 
-          moradores(nome, unidade, block, street),
-          registrar:received_by(full_name),
-          package_id:id,
-          unit_label:unit_number
-        `)
-        .eq('condominium_id', user.condominium_id)
-        .order('received_at', { ascending: false });
+      const res = await api.get(
+        `/api/operational/packages?status=all&limit=1000&condominiumId=${encodeURIComponent(user.condominium_id)}`
+      );
 
-      if (error) {
-        console.error('Erro Supabase ao buscar histórico:', error);
-        // We don't throw here to avoid the toast error for now, 
-        // but we could set a local error state if needed.
+      if (!res.ok) {
+        console.error('Erro API ao buscar histórico:', res.error);
         setPackages([]);
         return;
       }
       
-      setPackages(data || []);
+      setPackages(res.data?.packages || []);
     } catch (err) {
       console.error('Erro inesperado ao buscar histórico:', err);
       setPackages([]);
@@ -1707,17 +1662,18 @@ const ResidentsList = ({ user, residents = [], onUpdate }: any) => {
     setLoading(true);
     try {
       if (editingResident) {
-        const { error } = await supabase
-          .from('moradores')
-          .update(formData)
-          .eq('id', editingResident.id);
-        if (error) throw error;
+        const res = await api.patch(`/api/operational/moradores/${editingResident.id}`, {
+          ...formData,
+          condominiumId: user.condominium_id
+        });
+        if (!res.ok) throw new Error(res.error || 'Erro ao atualizar morador');
         toast.success("Morador atualizado!");
       } else {
-        const { error } = await supabase
-          .from('moradores')
-          .insert([{ ...formData, condominium_id: user.condominium_id }]);
-        if (error) throw error;
+        const res = await api.post('/api/operational/moradores', {
+          ...formData,
+          condominium_id: user.condominium_id
+        });
+        if (!res.ok) throw new Error(res.error || 'Erro ao cadastrar morador');
         toast.success("Morador cadastrado!");
       }
       onUpdate();
@@ -1736,19 +1692,13 @@ const ResidentsList = ({ user, residents = [], onUpdate }: any) => {
     try {
       const newStatus = !resident.ativo;
       
-      // Update moradores table
-      const { error: moradorError } = await supabase
-        .from('moradores')
-        .update({ ativo: newStatus })
-        .eq('id', resident.id);
+      // Update moradores table (and linked profile on server)
+      const statusRes = await api.patch(`/api/operational/moradores/${resident.id}`, {
+        ativo: newStatus,
+        condominiumId: user.condominium_id
+      });
 
-      if (moradorError) throw moradorError;
-
-      // Also update profiles table if it exists
-      await supabase
-        .from('profiles')
-        .update({ active: newStatus })
-        .eq('id', resident.id);
+      if (!statusRes.ok) throw new Error(statusRes.error || 'Erro ao alterar status');
 
       toast.success(`Morador ${newStatus ? 'ativado' : 'desativado'} com sucesso!`);
       
@@ -2288,23 +2238,20 @@ const SettingsPanel = ({ user, systemStatus, onUpdateUser }: any) => {
 
   const fetchData = async () => {
     if (!user.condominium_id) return;
-    const { data: condoData } = await supabase.from('condominiums').select('*').eq('id', user.condominium_id).single();
-    setCondo(condoData);
-
-    const { data: settingsData } = await supabase.from('condominium_settings').select('*').eq('condominium_id', user.condominium_id).maybeSingle();
-    if (settingsData) {
-      setSettings(settingsData);
-    } else {
-      // Default settings
-      setSettings({
-        id: '',
-        condominium_id: user.condominium_id,
-        notification_template: '📦 Nova encomenda recebida\n\nOlá, {{name}}\n\nUma encomenda chegou para sua unidade {{unit}}.\n\nVocê já pode retirar na portaria.',
-        reminder_48h_enabled: true,
-        reminder_72h_enabled: true,
-        contact_phone: '',
-        whatsapp_mode: 'manual_assistido'
-      });
+    const res = await api.get(`/api/operational/context?condominiumId=${encodeURIComponent(user.condominium_id)}`);
+    if (res.ok && res.data) {
+      setCondo(res.data.condominium || { id: user.condominium_id, name: '', address: '' });
+      if (res.data.settings) {
+        setSettings(res.data.settings);
+      } else {
+        setSettings({
+          id: '',
+          condominium_id: user.condominium_id,
+          notification_template: '📦 Nova encomenda recebida\n\nOlá, {{name}}\n\nUma encomenda chegou para sua unidade {{unit}}.\n\nVocê já pode retirar na portaria.',
+          contact_phone: '',
+          whatsapp_mode: 'manual_assistido'
+        } as any);
+      }
     }
   };
 
@@ -2333,16 +2280,14 @@ const SettingsPanel = ({ user, systemStatus, onUpdateUser }: any) => {
     e.preventDefault();
     setLoading(true);
     try {
-      // Update condo name/address
-      await supabase.from('condominiums').update({ name: condo.name, address: condo.address }).eq('id', condo.id);
+      const saveRes = await api.put('/api/operational/condominium-settings', {
+        condominiumId: user.condominium_id,
+        condoName: condo.name,
+        condoAddress: condo.address,
+        settings
+      });
 
-      // Upsert settings
-      const { error } = await supabase.from('condominium_settings').upsert({
-        ...settings,
-        condominium_id: user.condominium_id
-      }, { onConflict: 'condominium_id' });
-
-      if (error) throw error;
+      if (!saveRes.ok) throw new Error(saveRes.error || 'Erro ao salvar');
       toast.success("Configurações salvas!");
     } catch (err) {
       toast.error("Erro ao salvar");
@@ -2377,38 +2322,18 @@ const SettingsPanel = ({ user, systemStatus, onUpdateUser }: any) => {
   const handleClearTestData = async () => {
     setClearingData(true);
     try {
-      // Identificar registros de teste: nome contendo "teste", "demo", "test"
-      const { data: testPackages, error: fetchError } = await supabase
-        .from('packages')
-        .select('id')
-        .eq('condominium_id', user.condominium_id)
-        .or('notes.ilike.%teste%,notes.ilike.%demo%,notes.ilike.%test%');
-
-      if (fetchError) throw fetchError;
-
-      if (!testPackages || testPackages.length === 0) {
+      const res = await api.post('/api/operational/packages/clear', {
+        condominiumId: user.condominium_id,
+        mode: 'test'
+      });
+      if (!res.ok) throw new Error(res.error || 'Erro ao limpar dados');
+      const rep = res.data?.report || { packages: 0, residents: 0, porters: 0 };
+      const totalRemoved = (rep.packages || 0) + (rep.residents || 0) + (rep.porters || 0);
+      if (totalRemoved === 0) {
         toast.success("Nenhum registro de teste encontrado.");
-        setShowClearDataModal(false);
-        return;
+      } else {
+        toast.success(`${totalRemoved} registros de teste removidos com sucesso!`);
       }
-
-      const testIds = testPackages.map(p => p.id);
-
-      // 1. Apagar logs de retirada relacionados
-      await supabase
-        .from('retrieval_logs')
-        .delete()
-        .in('package_id', testIds);
-
-      // 2. Apagar os pacotes
-      const { error: deleteError } = await supabase
-        .from('packages')
-        .delete()
-        .in('id', testIds);
-
-      if (deleteError) throw deleteError;
-
-      toast.success(`${testIds.length} registros de teste removidos com sucesso!`);
       setShowClearDataModal(false);
     } catch (err: any) {
       toast.error("Erro ao limpar dados: " + err.message);
@@ -2582,26 +2507,6 @@ const SettingsPanel = ({ user, systemStatus, onUpdateUser }: any) => {
             />
             <p className="text-[10px] text-zinc-400 mt-1 uppercase font-bold">Variáveis: {"{{name}}"}, {"{{unit}}"}, {"{{carrier}}"}</p>
           </div>
-          <div className="flex flex-col gap-3">
-            <label className="flex items-center gap-3 cursor-pointer group">
-              <input 
-                type="checkbox" 
-                checked={settings.reminder_48h_enabled}
-                onChange={(e) => setSettings({...settings, reminder_48h_enabled: e.target.checked})}
-                className="w-5 h-5 rounded-lg border-zinc-300 text-emerald-600 focus:ring-emerald-500" 
-              />
-              <span className="text-sm text-zinc-700 group-hover:text-zinc-900 transition-colors">Ativar lembrete automático após 48h</span>
-            </label>
-            <label className="flex items-center gap-3 cursor-pointer group">
-              <input 
-                type="checkbox" 
-                checked={settings.reminder_72h_enabled}
-                onChange={(e) => setSettings({...settings, reminder_72h_enabled: e.target.checked})}
-                className="w-5 h-5 rounded-lg border-zinc-300 text-emerald-600 focus:ring-emerald-500" 
-              />
-              <span className="text-sm text-zinc-700 group-hover:text-zinc-900 transition-colors">Ativar lembrete automático após 72h</span>
-            </label>
-          </div>
         </div>
 
         {user.role === 'admin' && (
@@ -2745,48 +2650,40 @@ export default function SyndicPanel({ user, onLogout, onUpdateUser }: { user: Pr
     if (!user?.condominium_id) return;
 
     const fetchCounts = async () => {
-      // Contagem exata no banco sem limitação de 1000 registros
-      const [{ count: allCount }, { count: pendingCount }, { count: deliveredCount }] = await Promise.all([
-        supabase
-          .from('packages')
-          .select('*', { count: 'exact', head: true })
-          .eq('condominium_id', user.condominium_id),
-        supabase
-          .from('packages')
-          .select('*', { count: 'exact', head: true })
-          .eq('condominium_id', user.condominium_id)
-          .neq('status', 'delivered'),
-        supabase
-          .from('packages')
-          .select('*', { count: 'exact', head: true })
-          .eq('condominium_id', user.condominium_id)
-          .eq('status', 'delivered')
-      ]);
-
-      setPackageCounts({
-        all: allCount ?? 0,
-        pending: pendingCount ?? 0,
-        delivered: deliveredCount ?? 0
-      });
+      try {
+        const res = await api.get(`/api/operational/dashboard?condominiumId=${encodeURIComponent(user.condominium_id)}`);
+        if (res.ok && res.data?.counts) {
+          setPackageCounts(res.data.counts);
+        }
+      } catch {
+        // ignore transient refresh failure
+      }
     };
 
     fetchCounts();
 
     // Subscribe to changes
-    const channel = supabase
-      .channel('package-counts-syndic')
-      .on('postgres_changes', { 
-        event: '*', 
-        schema: 'public', 
-        table: 'packages',
-        filter: `condominium_id=eq.${user.condominium_id}`
-      }, () => {
-        fetchCounts();
-      })
-      .subscribe();
+    let channel: any = null;
+    try {
+      channel = supabase
+        .channel('package-counts-syndic')
+        .on('postgres_changes', { 
+          event: '*', 
+          schema: 'public', 
+          table: 'packages',
+          filter: `condominium_id=eq.${user.condominium_id}`
+        }, () => {
+          fetchCounts();
+        })
+        .subscribe();
+    } catch {
+      // ignore if realtime unavailable
+    }
 
     return () => {
-      supabase.removeChannel(channel);
+      if (channel) {
+        try { supabase.removeChannel(channel); } catch {}
+      }
     };
   }, [user?.condominium_id]);
 
@@ -2801,29 +2698,26 @@ export default function SyndicPanel({ user, onLogout, onUpdateUser }: { user: Pr
   };
 
   const fetchInitialData = async () => {
+    if (!user?.condominium_id) {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     try {
-      // Fetch Condo Name
-      const { data: condo } = await supabase.from('condominiums').select('name').eq('id', user.condominium_id).single();
-      if (condo) setCondoName(condo.name);
+      const condoIdEnc = encodeURIComponent(user.condominium_id);
+      const [ctxRes, dashRes] = await Promise.all([
+        api.get(`/api/operational/context?includeInactive=true&condominiumId=${condoIdEnc}`),
+        api.get(`/api/operational/dashboard?condominiumId=${condoIdEnc}`)
+      ]);
 
-      // Fetch Residents
-      const { data: res } = await supabase
-        .from('moradores')
-        .select('*')
-        .eq('condominium_id', user.condominium_id)
-        .order('nome');
-      if (res) setResidents(res);
+      if (ctxRes.ok && ctxRes.data) {
+        if (ctxRes.data.condominium?.name) setCondoName(ctxRes.data.condominium.name);
+        if (ctxRes.data.moradores) setResidents(ctxRes.data.moradores);
+      }
 
-      // Fetch Logs
-      const { data: messageLogs } = await supabase
-        .from('message_logs')
-        .select('*')
-        .eq('condominium_id', user.condominium_id)
-        .order('data_envio', { ascending: false })
-        .limit(100);
-      if (messageLogs) setLogs(messageLogs);
-
+      if (dashRes.ok && dashRes.data?.messageLogs) {
+        setLogs(dashRes.data.messageLogs);
+      }
     } catch (err) {
       console.error("Erro ao carregar dados do síndico:", err);
     } finally {

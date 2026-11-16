@@ -1,7 +1,6 @@
-import { getPackageItemCount, sumPackageItems, normalizeResidentPhone } from '../lib/packageUtils';
-import React, { useEffect, useState, useRef, useMemo } from 'react';
+import { getPackageItemCount, sumPackageItems, normalizeResidentPhone, getPackagesNeedingNotification as getPackagesNeedingNotificationUtil } from '../lib/packageUtils';
+import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { supabase } from '../lib/supabase';
 import { Package, Profile, Morador } from '../types';
 import { feedback } from '../lib/feedback';
 import { 
@@ -42,7 +41,8 @@ import {
   ChevronLeft,
   ChevronRight,
   Image as ImageIcon,
-  FileSpreadsheet
+  FileSpreadsheet,
+  Volume2
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { formatDate, formatSafeDateTime } from '../lib/dateUtils';
@@ -63,12 +63,15 @@ import toast from 'react-hot-toast';
 import { registrarAuditoria } from '../services/auditService';
 import { Html5Qrcode } from 'html5-qrcode';
 import { motion, AnimatePresence } from 'motion/react';
-import { sendWhatsAppMessage, getWhatsAppLink, generatePickupCode, prepareWhatsAppNotification } from '../services/whatsappService';
+import { getWhatsAppLink, generatePickupCode, prepareWhatsAppNotification } from '../services/whatsappService';
+import { executeManualSendConfirmation, executePortariaAutoSend } from '../services/whatsappConfirmationService';
+import { recordCondoActivity, fetchCondoActivity, subscribeCondoActivity, shouldShowInactivityAlert, CondoActivityAction, CondoActivitySubscription } from '../services/activitySyncService';
 import { CondominiumSettings } from '../types';
 
 import PackageItem from '../components/portaria/PackageItem';
 import ResidentCard from '../components/portaria/ResidentCard';
 import ResidentImporterModal from '../components/ResidentImporterModal';
+import { api, generateSecureToken } from '../lib/apiClient';
 
 interface PortariaProps {
   user: Profile;
@@ -107,6 +110,8 @@ export default function Portaria({ user }: PortariaProps) {
   }, [notifyAfter]);
 
   const [activeTab, setActiveTab] = useState<'pending' | 'delivered' | 'all' | 'residents'>('pending');
+  const [hasMoreDelivered, setHasMoreDelivered] = useState(true);
+  const [isLoadingMoreDelivered, setIsLoadingMoreDelivered] = useState(false);
   const [activeResidentMenu, setActiveResidentMenu] = useState<string | null>(null);
   const [isImporterOpen, setIsImporterOpen] = useState(false);
   const navigate = useNavigate();
@@ -136,6 +141,11 @@ export default function Portaria({ user }: PortariaProps) {
 
   // Substitution State (FASE 7)
   const [showSubstitutionModal, setShowSubstitutionModal] = useState<boolean>(false);
+  const [showSubstituteFormModal, setShowSubstituteFormModal] = useState<boolean>(false);
+  const [substituteFormName, setSubstituteFormName] = useState<string>('');
+  const [substituteFormDoc, setSubstituteFormDoc] = useState<string>('');
+  const [substituteFormPhone, setSubstituteFormPhone] = useState<string>('');
+  const [substituteFormObs, setSubstituteFormObs] = useState<string>('');
   const [selectedSubstituto, setSelectedSubstituto] = useState<Profile | null>(null);
   const [selectedSubstituido, setSelectedSubstituido] = useState<Profile | null>(null);
   const [motivoSubstituicao, setMotivoSubstituicao] = useState<string>('Troca de Turno');
@@ -180,15 +190,10 @@ export default function Portaria({ user }: PortariaProps) {
   const fetchPorteiros = async () => {
     if (!user?.condominium_id) return;
     try {
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('condominium_id', user.condominium_id)
-        .eq('role', 'porteiro')
-        .eq('active', true)
-        .order('full_name');
+      const res = await api.get(`/api/operational/context?condominiumId=${encodeURIComponent(user.condominium_id)}`);
+      const data = res.ok ? (res.data?.porters || []) : null;
 
-      if (!error && data) {
+      if (data) {
         setPorteirosList(data);
 
         // Identificação automática por escala (Ímpar/Par/Diário)
@@ -198,6 +203,8 @@ export default function Portaria({ user }: PortariaProps) {
           if (eligiblePorter && count === 1) {
             autoActivatePlantao(eligiblePorter);
           } else {
+            setActivePlantaoState(null);
+            setCurrentPorter('Selecione o Porteiro');
             setShowShiftModal(true);
           }
         }
@@ -227,6 +234,8 @@ export default function Portaria({ user }: PortariaProps) {
           if (eligiblePorter && count === 1) {
             autoActivatePlantao(eligiblePorter);
           } else {
+            setActivePlantaoState(null);
+            setCurrentPorter('Selecione o Porteiro');
             setIsShiftExpired(true);
             setShowShiftModal(true);
           }
@@ -238,10 +247,12 @@ export default function Portaria({ user }: PortariaProps) {
         if (eligiblePorter && count === 1) {
           autoActivatePlantao(eligiblePorter);
         } else {
+          setActivePlantaoState(null);
+          setCurrentPorter('Selecione o Porteiro');
           setShowShiftModal(true);
         }
       }
-    }, 30000);
+    }, 15000);
 
     return () => clearInterval(checkInterval);
   }, [user?.condominium_id, porteirosList]);
@@ -291,6 +302,74 @@ export default function Portaria({ user }: PortariaProps) {
     }).catch(() => {});
 
     toast.success(`Plantão iniciado com sucesso! Porteiro responsável: ${porteiro.full_name} 🕒`);
+  };
+
+  const handleConfirmSubstitutoTemporario = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanName = substituteFormName.trim();
+    const cleanDoc = substituteFormDoc.trim();
+
+    if (!cleanName) {
+      toast.error("Por favor, informe o Nome Completo do porteiro substituto.");
+      return;
+    }
+    if (!cleanDoc) {
+      toast.error("Por favor, informe o Documento (RG/CPF) do porteiro substituto.");
+      return;
+    }
+
+    const tempId = `sub_${Date.now()}`;
+    const now = new Date();
+    const currentHourStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+
+    const newPlantao: PlantaoAtivo = {
+      id: tempId,
+      condominium_id: user?.condominium_id || '',
+      porteiro_id: tempId,
+      porteiro_nome: cleanName,
+      horario_inicio: activePlantao?.horario_inicio || currentHourStr,
+      horario_fim: activePlantao?.horario_fim || '23:59',
+      started_at: now.toISOString(),
+      substituicao: {
+        is_substituicao: true,
+        substituido_id: activePlantao?.porteiro_id || undefined,
+        substituido_nome: activePlantao?.porteiro_nome || undefined,
+        motivo: 'Porteiro Substituto (Cobertura de Ausência)',
+        observacoes: `Doc: ${cleanDoc}${substituteFormPhone ? ` | Tel: ${substituteFormPhone}` : ''}${substituteFormObs ? ` | Obs: ${substituteFormObs}` : ''}`
+      }
+    };
+
+    saveActivePlantao(newPlantao);
+    setActivePlantaoState(newPlantao);
+    setCurrentPorter(cleanName);
+    setManualPorter(cleanName, user?.condominium_id);
+
+    setShowSubstituteFormModal(false);
+    setShowShiftModal(false);
+    setShowPorterModal(false);
+    setIsShiftExpired(false);
+
+    // Limpa formulário
+    setSubstituteFormName('');
+    setSubstituteFormDoc('');
+    setSubstituteFormPhone('');
+    setSubstituteFormObs('');
+
+    // Auditoria de segurança e rastreabilidade
+    registrarAuditoria({
+      condominio_id: user?.condominium_id || '',
+      usuario_id: user?.id || '',
+      usuario_nome: user?.full_name || 'Porteiro',
+      usuario_perfil: user?.role || 'porteiro',
+      tipo_evento: 'SUBSTITUICAO_PLANTAO',
+      acao: 'CREATE',
+      tabela_afetada: 'plantao_ativo',
+      registro_id: tempId,
+      descricao: `Porteiro Substituto assumiu o plantão: ${cleanName} (Doc: ${cleanDoc}). Titular anterior: ${activePlantao?.porteiro_nome || 'Nenhum'}. Operado por: ${user?.full_name || 'Usuário Autenticado'}.`,
+      metodo: 'SISTEMA'
+    }).catch(() => {});
+
+    toast.success(`Porteiro Substituto ${cleanName.toUpperCase()} assumiu o plantão com sucesso! 🔁`);
   };
 
   const handleConfirmSubstitution = () => {
@@ -366,31 +445,9 @@ export default function Portaria({ user }: PortariaProps) {
   }, []);
 
   // 7. Função única para processar/filtrar encomendas que precisam de aviso (sem descartar silenciosamente)
-  const getPackagesNeedingNotification = (pkgList: Package[], includeIncompletePhone: boolean = true) => {
-    if (!pkgList || pkgList.length === 0) return [];
-    return pkgList.filter(p => {
-      // Regra 1: Se já foi notificado com sucesso, sai da fila
-      if (p.whatsapp_notified === true || p.whatsapp_sent === true) return false;
-      // Regra 2: Se já foi entregue, sai da fila
-      if (p.status === 'delivered' || p.delivered_at) return false;
-      // Regra 3: Se não tem destinatário vinculado, não pode enviar
-      if (!p.recipient_id) return false;
-      
-      // Resolução do morador: busca no array ou usa o join já carregado na própria encomenda (moradores)
-      const resident = residents.find(r => r.id === p.recipient_id) || (p as any).moradores;
-      if (!resident) {
-        // Se ainda não temos o morador em memória, mantém na fila para não perder
-        return true;
-      }
-      
-      // Verifica o telefone usando normalização contextual sem alterar dados reais
-      const phoneCheck = normalizeResidentPhone(resident.telefone);
-      if (includeIncompletePhone) {
-        return true; // Mantém na fila mesmo com telefone incompleto para o porteiro poder corrigir
-      }
-      return phoneCheck.isValid;
-    });
-  };
+  const getPackagesNeedingNotification = useCallback((pkgList: Package[], includeIncompletePhone: boolean = true) => {
+    return getPackagesNeedingNotificationUtil(pkgList, residents, includeIncompletePhone);
+  }, [residents]);
 
   // Single Source of Truth for Pending Notifications (soma real de itens/encomendas)
   const pendingNoticesCount = useMemo(() => {
@@ -398,6 +455,193 @@ export default function Portaria({ user }: PortariaProps) {
     return sumPackageItems(list);
   }, [packages, residents]);
 
+  // ITEM 2: Contagem de MORADORES distintos pendentes de notificação
+  const pendingResidentsCount = useMemo(() => {
+    const list = getPackagesNeedingNotification(packages, true);
+    const distinctResidentIds = new Set<string>();
+    list.forEach(p => {
+      const resId = p.recipient_id || (p as any).moradores?.id;
+      if (resId) distinctResidentIds.add(resId);
+    });
+    return distinctResidentIds.size;
+  }, [packages]);
+
+  // ITEM 2: Rastreamento de inatividade compartilhado por condomínio no modo APÓS REGISTRO
+  const lastSendActivityTimestampRef = useRef<number>(Date.now());
+  const [showInactivityAlert, setShowInactivityAlert] = useState(false);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const activitySubRef = useRef<CondoActivitySubscription | null>(null);
+
+  const applyRemoteActivityTimestamp = useCallback((ts: number) => {
+    if (!Number.isFinite(ts) || ts <= 0) return;
+    if (ts > lastSendActivityTimestampRef.current) {
+      lastSendActivityTimestampRef.current = ts;
+      try {
+        localStorage.setItem('last_send_activity_timestamp', ts.toString());
+      } catch (e) {}
+    }
+    if (!shouldShowInactivityAlert({
+      lastActivityTimestamp: lastSendActivityTimestampRef.current,
+      now: Date.now(),
+      pendingCount: pendingResidentsCount,
+      notifyAfter
+    })) {
+      setShowInactivityAlert(false);
+    }
+  }, [pendingResidentsCount, notifyAfter]);
+
+  // Inicialização síncrona + sincronização compartilhada no servidor/Supabase por condomínio
+  useEffect(() => {
+    const saved = localStorage.getItem('last_send_activity_timestamp');
+    const parsed = saved ? parseInt(saved, 10) : NaN;
+    if (!isNaN(parsed) && parsed > 0) {
+      lastSendActivityTimestampRef.current = parsed;
+    } else {
+      try {
+        localStorage.setItem('last_send_activity_timestamp', lastSendActivityTimestampRef.current.toString());
+      } catch (e) {}
+    }
+
+    if (!user?.condominium_id) return;
+    fetchCondoActivity({ condominiumId: user.condominium_id }).then((res) => {
+      if (res.ok && res.lastActivityTimestamp) {
+        applyRemoteActivityTimestamp(res.lastActivityTimestamp);
+      }
+    }).catch(() => {});
+  }, [user?.condominium_id, applyRemoteActivityTimestamp]);
+
+  // Inscrição Realtime isolada por condominiumId (Broadcast de atividade + mudanças na tabela packages)
+  useEffect(() => {
+    if (!user?.condominium_id) return;
+    const sub = subscribeCondoActivity({
+      condominiumId: user.condominium_id,
+      onRemoteActivity: (ts) => {
+        applyRemoteActivityTimestamp(ts);
+      },
+      onPackagesChanged: () => {
+        fetchData(true);
+      }
+    });
+    activitySubRef.current = sub;
+    return () => {
+      sub.unsubscribe();
+      activitySubRef.current = null;
+    };
+  }, [user?.condominium_id, applyRemoteActivityTimestamp]);
+
+  // Helper síncrono + sincronização remota compartilhada (sem alterar status da encomenda)
+  const recordSendActivity = useCallback((action: CondoActivityAction = 'FILA_ACAO', packageId?: string) => {
+    const now = Date.now();
+    lastSendActivityTimestampRef.current = now;
+    try {
+      localStorage.setItem('last_send_activity_timestamp', now.toString());
+    } catch (e) {
+      console.warn('Erro ao salvar timestamp de atividade:', e);
+    }
+    setShowInactivityAlert(false);
+
+    if (user?.condominium_id) {
+      recordCondoActivity({
+        condominiumId: user.condominium_id,
+        action,
+        userId: user.id,
+        userName: (currentPorter && currentPorter !== 'Selecione o Porteiro') ? currentPorter : (user.full_name || 'Porteiro'),
+        userRole: user.role || 'porteiro',
+        packageId,
+        timestamp: now,
+        realtimeBroadcastFn: (payload) => activitySubRef.current?.broadcast(payload)
+      }).catch(() => {});
+    }
+  }, [user?.condominium_id, user?.id, user?.full_name, user?.role, currentPorter]);
+
+  // Estado da confirmação explícita de envio no WhatsApp
+  const [isConfirmingWhatsApp, setIsConfirmingWhatsApp] = useState(false);
+  const [confirmWhatsAppError, setConfirmWhatsAppError] = useState<string | null>(null);
+  const [pendingWhatsAppConfirm, setPendingWhatsAppConfirm] = useState<{
+    resident: any;
+    packageIds: string[];
+    residentName: string;
+    unit: string;
+    totalItems: number;
+    pickupCode: string;
+    pickupToken: string;
+    message: string;
+    isQueue?: boolean;
+    queueIndex?: number;
+  } | null>(null);
+
+  // PARTE 1: Nível de volume configurável com base no nível atual (ponto de partida = 1.0x, nunca reinicia do mínimo)
+  const [alertVolumeMultiplier, setAlertVolumeMultiplier] = useState<number>(() => {
+    const saved = localStorage.getItem('alert_sound_volume_multiplier');
+    const parsed = saved ? parseFloat(saved) : NaN;
+    return !isNaN(parsed) && parsed >= 1.0 ? parsed : 1.0;
+  });
+  const [showVolumePopup, setShowVolumePopup] = useState(false);
+  const bellClickTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const bellLastClickTimeRef = useRef<number>(0);
+
+  // Função para tocar alerta sonoro altamente perceptível (dupla sequência com volume encorpado ajustável)
+  const playAlertSound = useCallback((testMultiplier?: number) => {
+    try {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioCtx) return;
+      if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
+        audioContextRef.current = new AudioCtx();
+      }
+      const ctx = audioContextRef.current;
+      if (ctx.state === 'suspended') {
+        ctx.resume();
+      }
+
+      const mult = testMultiplier !== undefined ? testMultiplier : alertVolumeMultiplier;
+
+      const playChime = (freq: number, start: number, dur: number, baseVol = 0.50) => {
+        // Oscilador principal
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(freq, ctx.currentTime + start);
+
+        // Oscilador harmônico secundário (oitava fundamental suave) para dar corpo e penetração acústica na guarita
+        const subOsc = ctx.createOscillator();
+        const subGain = ctx.createGain();
+        subOsc.type = 'sine';
+        subOsc.frequency.setValueAtTime(freq / 2, ctx.currentTime + start);
+
+        // Aplica o multiplicador a partir do nível atual, com teto seguro de 0.98 para evitar distorção
+        const actualVol = Math.min(baseVol * mult, 0.98);
+        gain.gain.setValueAtTime(actualVol, ctx.currentTime + start);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + start + dur);
+
+        subGain.gain.setValueAtTime(actualVol * 0.35, ctx.currentTime + start);
+        subGain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + start + dur);
+
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        subOsc.connect(subGain);
+        subGain.connect(ctx.destination);
+
+        osc.start(ctx.currentTime + start);
+        osc.stop(ctx.currentTime + start + dur);
+        subOsc.start(ctx.currentTime + start);
+        subOsc.stop(ctx.currentTime + start + dur);
+      };
+      // Sequência 1 com timbre encorpado e cadência compassada
+      playChime(587.33, 0.00, 0.30, 0.50);  // D5
+      playChime(739.99, 0.28, 0.32, 0.55);  // F#5
+      playChime(880.00, 0.56, 0.58, 0.60);  // A5
+      // Sequência 2 (repetição de reforço com presença sonora nítida)
+      playChime(587.33, 1.00, 0.30, 0.50);  // D5
+      playChime(739.99, 1.28, 0.32, 0.55);  // F#5
+      playChime(880.00, 1.56, 0.70, 0.65);  // A5
+
+      if (typeof navigator !== 'undefined' && navigator.vibrate) {
+        navigator.vibrate([350, 200, 350, 200, 500]);
+      }
+    } catch (e) {
+      console.warn('Alerta sonoro não reproduzido:', e);
+    }
+  }, [alertVolumeMultiplier]);
   // Lista de encomendas com telefone incompleto
   const incompletePhoneCount = useMemo(() => {
     const list = getPackagesNeedingNotification(packages, true);
@@ -413,64 +657,167 @@ export default function Portaria({ user }: PortariaProps) {
     return pendingNoticesCount > 0;
   };
 
-  // Estado do Alerta Periódico (repete a cada 3 min, com silenciador de 10 min)
+  // Estado do Alerta Periódico (repete a cada 3 min, com silenciador de 5 min)
   const [isAlertSnoozed, setIsAlertSnoozed] = useState(false);
   const snoozeTimerRef = useRef<NodeJS.Timeout | null>(null);
 
+  // Silencia temporariamente por 5 minutos (Item 5)
   const handleSnoozeAlert = () => {
     setIsAlertSnoozed(true);
-    toast.success('Alertas de notificação silenciados por 10 minutos.', { icon: '🔕' });
+    toast.success('Alerta sonoro silenciado por 5 minutos.', { icon: '🔕' });
     if (snoozeTimerRef.current) clearTimeout(snoozeTimerRef.current);
     snoozeTimerRef.current = setTimeout(() => {
       setIsAlertSnoozed(false);
-    }, 10 * 60 * 1000); // 10 minutos
+    }, 5 * 60 * 1000); // 5 minutos exatos
   };
 
-  // Efeito de Alerta Sonoro e Vibração para a Portaria
-  useEffect(() => {
-    if (pendingNoticesCount === 0 || isAlertSnoozed) return;
+  // Cancela o silenciamento imediatamente e reativa o som (Item 4)
+  const handleUnSnoozeAlert = () => {
+    setIsAlertSnoozed(false);
+    if (snoozeTimerRef.current) {
+      clearTimeout(snoozeTimerRef.current);
+      snoozeTimerRef.current = null;
+    }
+    toast.success('Alerta sonoro reativado.', { icon: '🔔' });
+    // Se estiver em modo de alerta, reproduz o som imediatamente como confirmação
+    if (showInactivityAlert) {
+      playAlertSound();
+    }
+  };
 
-    const triggerPorterAlert = () => {
-      // 1. Som suave sintetizado (dois bips confortáveis)
+  // Alterna o silenciamento no toque simples (Item 4: 1º toque silencia, toque subsequente cancela)
+  const handleToggleSnooze = () => {
+    if (isAlertSnoozed) {
+      handleUnSnoozeAlert();
+    } else {
+      handleSnoozeAlert();
+    }
+  };
+
+  // Handler do Sininho com diferenciação de TOQUE SIMPLES (silenciar/reativar) e 2 TOQUES RÁPIDOS (controle de volume)
+  const handleBellClick = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const now = Date.now();
+    const DOUBLE_TAP_DELAY_MS = 350; // janela de duplo toque rápido
+    const timeSinceLast = now - bellLastClickTimeRef.current;
+
+    if (timeSinceLast < DOUBLE_TAP_DELAY_MS) {
+      // DUPLO TOQUE RÁPIDO DETECTADO: Abre controle pequeno de volume (Item 6)
+      if (bellClickTimerRef.current) {
+        clearTimeout(bellClickTimerRef.current);
+        bellClickTimerRef.current = null;
+      }
+      bellLastClickTimeRef.current = 0;
+      setShowVolumePopup(prev => !prev);
+    } else {
+      // PRIMEIRO TOQUE: Aguarda brevemente para verificar se é duplo toque rápido
+      bellLastClickTimeRef.current = now;
+      if (bellClickTimerRef.current) clearTimeout(bellClickTimerRef.current);
+      bellClickTimerRef.current = setTimeout(() => {
+        // TOQUE SIMPLES CONFIRMADO: Alterna entre Silenciar (5 min) e Reativar Som (Item 4 e 5)
+        handleToggleSnooze();
+        bellClickTimerRef.current = null;
+        bellLastClickTimeRef.current = 0;
+      }, DOUBLE_TAP_DELAY_MS);
+    }
+  };
+
+  const handleIncreaseVolume = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // Aumenta o volume a partir do nível atual (+25% por toque, até 2.25x máximo)
+    setAlertVolumeMultiplier(prev => {
+      const next = Math.min(Math.round((prev + 0.25) * 100) / 100, 2.25);
+      localStorage.setItem('alert_sound_volume_multiplier', next.toString());
+      toast.success('Volume do alerta: ' + Math.round(next * 100) + '% 🔊', { id: 'vol-toast', duration: 2500 });
+      // Toca bipe de teste no novo volume para confirmação auditiva imediata
+      playAlertSound(next);
+      return next;
+    });
+  };
+  // Observador de Inatividade de Envio no modo APÓS REGISTRO (3 min / 180.000 ms inatividade -> Alerta -> repete a cada 3 min)
+  useEffect(() => {
+    // Se não há moradores pendentes ou não está no modo APÓS REGISTRO, encerra completamente o ciclo
+    if (!notifyAfter || pendingResidentsCount === 0) {
+      setShowInactivityAlert(false);
       try {
-        const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-        const playBeep = (freq: number, start: number, dur: number) => {
-          const osc = audioCtx.createOscillator();
-          const gain = audioCtx.createGain();
-          osc.type = 'sine';
-          osc.frequency.setValueAtTime(freq, audioCtx.currentTime + start);
-          gain.gain.setValueAtTime(0.08, audioCtx.currentTime + start);
-          gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + start + dur);
-          osc.connect(gain);
-          gain.connect(audioCtx.destination);
-          osc.start(audioCtx.currentTime + start);
-          osc.stop(audioCtx.currentTime + start + dur);
-        };
-        playBeep(587.33, 0, 0.15); // D5
-        playBeep(880.00, 0.18, 0.25); // A5
-      } catch (err) {
-        // Navegador pode restringir áudio se não houve interação prévia
+        localStorage.removeItem('last_send_activity_timestamp');
+      } catch (e) {}
+      return;
+    }
+
+    const evaluateInactivity = () => {
+      let baseTs = lastSendActivityTimestampRef.current;
+      const savedTs = localStorage.getItem('last_send_activity_timestamp');
+      if (savedTs) {
+        const parsedTs = parseInt(savedTs, 10);
+        if (!isNaN(parsedTs) && parsedTs > baseTs) {
+          baseTs = parsedTs;
+          lastSendActivityTimestampRef.current = parsedTs;
+        }
       }
 
-      // 2. Vibração (mobile/tablet suportado)
-      try {
-        if (typeof navigator !== 'undefined' && navigator.vibrate) {
-          navigator.vibrate([150, 80, 150]);
-        }
-      } catch (err) {}
+      const active = shouldShowInactivityAlert({
+        lastActivityTimestamp: baseTs,
+        now: Date.now(),
+        pendingCount: pendingResidentsCount,
+        notifyAfter
+      });
+      setShowInactivityAlert(active);
     };
 
-    // Dispara uma vez ao detectar novas pendências
-    const initialTimer = setTimeout(triggerPorterAlert, 1000);
+    const syncAndCheckInactivity = async () => {
+      evaluateInactivity();
+      if (user?.condominium_id) {
+        const remote = await fetchCondoActivity({ condominiumId: user.condominium_id }).catch(() => null);
+        if (remote?.ok && remote.lastActivityTimestamp) {
+          applyRemoteActivityTimestamp(remote.lastActivityTimestamp);
+          evaluateInactivity();
+        }
+      }
+    };
 
-    // Repete a cada 3 minutos enquanto houver pendência
-    const interval = setInterval(triggerPorterAlert, 3 * 60 * 1000);
+    // Executa verificação imediata na montagem/retorno
+    syncAndCheckInactivity();
+
+    // ITEM 3: Reavaliação imediata quando a tela/aba volta a ficar visível (Page Visibility API e window focus)
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        syncAndCheckInactivity();
+      }
+    };
+    const handleWindowFocus = () => {
+      syncAndCheckInactivity();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleWindowFocus);
+
+    // Avaliação local a cada 5s e reconciliação remota periódica a cada 10s
+    const checkInterval = setInterval(evaluateInactivity, 5000);
+    const remoteSyncInterval = setInterval(syncAndCheckInactivity, 10000);
+
+    let repeatSoundInterval: NodeJS.Timeout | null = null;
+
+    // Se atingiu os 3 minutos (180.000 ms) de inatividade:
+    if (showInactivityAlert && !isAlertSnoozed) {
+      playAlertSound();
+      // Repete o alerta sonoro a cada 3 minutos se continuar sem envio
+      repeatSoundInterval = setInterval(() => {
+        playAlertSound();
+      }, 3 * 60 * 1000);
+    }
 
     return () => {
-      clearTimeout(initialTimer);
-      clearInterval(interval);
+      clearInterval(checkInterval);
+      clearInterval(remoteSyncInterval);
+      if (repeatSoundInterval) clearInterval(repeatSoundInterval);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleWindowFocus);
     };
-  }, [pendingNoticesCount, isAlertSnoozed]);
+  }, [notifyAfter, pendingResidentsCount, isAlertSnoozed, showInactivityAlert, playAlertSound, user?.condominium_id, applyRemoteActivityTimestamp]);
 
   // Notificar Todos queue state
   const [isNotifyingAll, setIsNotifyingAll] = useState(false);
@@ -504,19 +851,108 @@ export default function Portaria({ user }: PortariaProps) {
     };
   }, [isNotifyingAll, notifyIndex, notifyQueue.length]);
 
+  const handleConfirmWhatsAppSent = async (confirmData: {
+    resident: any;
+    packageIds: string[];
+    residentName: string;
+    unit: string;
+    totalItems: number;
+    pickupCode: string;
+    pickupToken: string;
+    message: string;
+    isQueue?: boolean;
+    queueIndex?: number;
+  }) => {
+    if (isConfirmingWhatsApp) return;
+    setIsConfirmingWhatsApp(true);
+    setConfirmWhatsAppError(null);
+
+    try {
+      const { packageIds, pickupCode, pickupToken, message, residentName, isQueue, queueIndex } = confirmData;
+
+      // 1 & 2. Persistência no Supabase com verificação completa do retorno — estado local e fila só atualizam APÓS confirmação do banco
+      const result = await executeManualSendConfirmation({
+        packageIds,
+        pickupCode,
+        pickupToken,
+        message,
+        onConfirmedLocalState: (fields) => {
+          setPackages(prev => prev.map(p => packageIds.includes(p.id) ? {
+            ...p,
+            ...fields
+          } : p));
+        }
+      });
+
+      if (!result.ok) {
+        const errMessage = result.error || 'Erro ao salvar confirmação no banco de dados. A encomenda permanece pendente.';
+        console.error('Erro ao atualizar pacotes no banco:', errMessage);
+        setConfirmWhatsAppError(errMessage);
+        toast.error(errMessage, { duration: 5000 });
+        return;
+      }
+
+      // 3. Registrar atividade compartilhada (condomínio isolado) e limpar alerta sonoro
+      recordSendActivity('WHATSAPP_CONFIRMADO', packageIds[0]);
+
+      // 4. Se estiver em fila, avança para o próximo ou encerra se for o último
+      if (isQueue && typeof queueIndex === 'number') {
+        const curIdx = queueIndex;
+        if (curIdx + 1 < notifyQueue.length) {
+          setNotifyIndex(prev => prev + 1);
+        } else {
+          setNotifyIndex(notifyQueue.length);
+          setTimeout(() => {
+            setIsNotifyingAll(false);
+            setModoEnvio(null);
+            toast.success('Todas as notificações foram confirmadas!');
+          }, 500);
+        }
+      }
+
+      setConfirmWhatsAppError(null);
+      setPendingWhatsAppConfirm(null);
+      toast.success(`Envio confirmado para ${residentName}! 💬`);
+      fetchData();
+    } catch (e: any) {
+      const errMessage = e instanceof Error ? e.message : 'Erro ao processar confirmação de envio';
+      console.error('Erro ao confirmar envio:', e);
+      setConfirmWhatsAppError(errMessage);
+      toast.error('Erro ao processar confirmação de envio. Tente novamente.');
+    } finally {
+      setIsConfirmingWhatsApp(false);
+    }
+  };
+
+  const handleCancelWhatsAppSent = () => {
+    if (isConfirmingWhatsApp) return;
+    // NÃO altera o banco de dados. A encomenda permanece estritamente no estado pendente.
+    // Apenas registra atividade compartilhada para evitar alerta falso durante operação ativa.
+    recordSendActivity('WHATSAPP_CANCELADO', pendingWhatsAppConfirm?.packageIds?.[0]);
+    setConfirmWhatsAppError(null);
+    setPendingWhatsAppConfirm(null);
+    toast('Envio não confirmado. A encomenda permanece pendente de aviso.', {
+      icon: 'ℹ️',
+      duration: 4000
+    });
+  };
+
   const processNextInQueue = async (currentIndex: number) => {
     const current = notifyQueue[currentIndex];
     if (!current) return;
 
     const { resident, packages: pkgBatch } = current;
     const pkgIds = pkgBatch.map((p: any) => p.id);
-    const now = new Date().toISOString();
 
     // Setup message and codes
     let groupCode = pkgBatch.find((p: any) => p.pickup_code)?.pickup_code;
     let groupToken = pkgBatch.find((p: any) => p.pickup_token)?.pickup_token;
     if (!groupCode) groupCode = generatePickupCode();
-    if (!groupToken) groupToken = Math.random().toString(36).substring(2, 15);
+    if (!groupToken) groupToken = generateSecureToken(16);
+
+    // Contagem física canônica (idêntica à bolinha da Portaria): soma de todas as pendências ativas do morador
+    const allPendingForResident = packages.filter((p: any) => p.recipient_id === resident.id && p.status !== 'delivered');
+    const totalPhysicalPending = sumPackageItems(allPendingForResident.length > 0 ? allPendingForResident : pkgBatch);
 
     const message = prepareWhatsAppNotification(
       resident,
@@ -524,7 +960,7 @@ export default function Portaria({ user }: PortariaProps) {
       groupCode,
       undefined,
       groupToken,
-      pkgBatch.length,
+      totalPhysicalPending || 1,
       'disponivel',
       undefined,
       undefined,
@@ -533,74 +969,39 @@ export default function Portaria({ user }: PortariaProps) {
 
     const link = getWhatsAppLink(resident.telefone, message, pkgBatch[0]?.photo_url);
 
-    // 1. Atualizar banco e estado local IMEDIATAMENTE (antes de abrir o link)
-    try {
-      const nowString = new Date().toISOString();
-      const pkgIds = pkgBatch.map(p => p.id);
-      console.log('pkgBatch:', pkgBatch);
-      console.log('pkgIds:', pkgIds);
-      const { error: updateError } = await supabase
-        .from('packages')
-        .update({ 
-          whatsapp_notified: true,
-          whatsapp_sent: true,
-          notified_at: nowString,
-          whatsapp_status: 'enviado',
-          last_notification_at: nowString,
-          whatsapp_sent_at: nowString,
-          whatsapp_message: message,
-          pickup_code: groupCode,
-          pickup_token: groupToken
-        })
-        .in('id', pkgIds);
-        console.log('updateError:', updateError);
-      
-      if (updateError) {
-        console.error('Erro ao atualizar pacotes no banco:', updateError);
-      } else {
-        console.log('Atualizado no banco:', pkgIds);
-      }
-      
-      // Atualizar estado local IMEDIATAMENTE
-      setPackages(prev => prev.map(p => pkgIds.includes(p.id) ? { 
-        ...p, 
-        whatsapp_status: 'enviado', 
-        whatsapp_notified: true,
-        whatsapp_sent: true,
-        notified_at: nowString,
-        whatsapp_sent_at: nowString,
-        last_notification_at: nowString, 
-        pickup_code: groupCode,
-        pickup_token: groupToken,
-        whatsapp_message: message
-      } : p));
-      
-      // Sincronizar com o banco para garantir sincronia total
-      // fetchData();
-    } catch (e) {
-      console.error('Exceção crítica no processo de notificação:', e);
-    }
-
-    // 2. Abrir WhatsApp após garantir atualização no banco (o catch não trava o window.open se o usuário preferir)
+    // 1. Abrir WhatsApp em nova aba (antes de qualquer await para evitar popup blocker)
     window.open(link, '_blank');
-    setNotifyQueue(prev =>
-  prev.filter((_, index) => index !== currentIndex)
-);
-    // REGRA OBRIGATÓRIA: Avançar ou fechar a fila imediatamente ao clicar, 
-    // garantindo que o item suma da "lista de notificações" instantaneamente
-    if (currentIndex + 1 < notifyQueue.length) {
-      setNotifyIndex(prev => prev + 1);
-    } else {
-      // Se era o último, encerramos a fila de visualização
-      setNotifyIndex(notifyQueue.length);
-      setTimeout(() => {
-        setIsNotifyingAll(false);
-        setModoEnvio(null);
-        toast.success('Todas as notificações foram processadas!');
-      }, 500);
-    }
+
+    // Registra atividade de abertura sem marcar encomenda como enviada
+    recordSendActivity('WHATSAPP_ABERTO', pkgIds[0]);
+
+    // 2. Exibir confirmação explícita — NÃO atualiza banco antes da confirmação do porteiro
+    setConfirmWhatsAppError(null);
+    setPendingWhatsAppConfirm({
+      resident,
+      packageIds: pkgIds,
+      residentName: resident.nome,
+      unit: formatPackageUnit(pkgBatch[0]),
+      totalItems: totalPhysicalPending || 1,
+      pickupCode: groupCode,
+      pickupToken: groupToken,
+      message,
+      isQueue: true,
+      queueIndex: currentIndex
+    });
 
     setIsWaitingForReturn(true);
+  };
+
+  // Regra 5: Ao clicar em AVISAR MORADOR, ir DIRETAMENTE para a lista de pendências sem modal intermediário
+  const handleGoToPendingResidents = () => {
+    // 1. Muda a aba para pendentes
+    setActiveTab('pending');
+    // 2. Limpa qualquer termo de busca para exibir todas as pendências
+    setSearchTerm('');
+    // 3. Rola suavemente até a lista de encomendas/moradores pendentes
+    window.scrollTo({ top: 350, behavior: 'smooth' });
+    toast('Lista de encomendas pendentes aberta para envio.', { icon: '📦' });
   };
 
   const handleNotifyAll = () => {
@@ -609,7 +1010,7 @@ export default function Portaria({ user }: PortariaProps) {
 
     if (pendentesAviso.length === 0) {
       feedback.error();
-      toast.info('Não há encomendas pendentes de aviso no momento.');
+      toast('Não há encomendas pendentes de aviso no momento.');
       return;
     }
 
@@ -682,14 +1083,9 @@ export default function Portaria({ user }: PortariaProps) {
   const fetchCondoName = async () => {
     if (!user.condominium_id) return;
     try {
-      const { data, error } = await supabase
-        .from('condominiums')
-        .select('name')
-        .eq('id', user.condominium_id)
-        .maybeSingle();
-      
-      if (error) throw error;
-      if (data) setCondoName(data.name);
+      const res = await api.get(`/api/operational/context?condominiumId=${encodeURIComponent(user.condominium_id)}`);
+      if (!res.ok) throw new Error(res.error || 'Erro ao buscar condomínio');
+      if (res.data?.condominium?.name) setCondoName(res.data.condominium.name);
     } catch (error) {
       console.error('Erro ao buscar nome do condomínio:', error);
     }
@@ -701,48 +1097,6 @@ export default function Portaria({ user }: PortariaProps) {
       fetchCondoName();
     }
   }, [user?.condominium_id]);
-
-  useEffect(() => {
-    // Migration: Set whatsapp_status to 'pendente' for all received packages that have null or 'pending' status
-    const migrateStatuses = async () => {
-      if (!user?.condominium_id) return;
-      try {
-        // 1. Migrar 'pending' e 'notified' de volta para 'received' (para compatibilidade com constraint do banco)
-        await supabase
-          .from('packages')
-          .update({ status: 'received' })
-          .eq('condominium_id', user.condominium_id)
-          .in('status', ['pending', 'notified']);
-
-        // 2. Inicializar whatsapp_notified para registros antigos baseados no whatsapp_status
-        const notifiedStatuses = ['sent', 'enviado', 'delivered', 'read'];
-        await supabase
-          .from('packages')
-          .update({ whatsapp_notified: true, whatsapp_sent: true })
-          .eq('condominium_id', user.condominium_id)
-          .in('whatsapp_status', notifiedStatuses)
-          .is('whatsapp_notified', null);
-        
-        await supabase
-          .from('packages')
-          .update({ whatsapp_notified: false, whatsapp_sent: false })
-          .eq('condominium_id', user.condominium_id)
-          .is('whatsapp_notified', null);
-
-        // 3. Manter compatibilidade com status legados
-        await supabase
-          .from('packages')
-          .update({ whatsapp_status: 'pending' })
-          .eq('condominium_id', user.condominium_id)
-          .in('status', ['received', 'pending'])
-          .is('whatsapp_status', null);
-          
-      } catch (err) {
-        console.error('Erro ao processar migração de status:', err);
-      }
-    };
-    migrateStatuses();
-  }, [user.condominium_id]);
 
   // Removed individualNotifyData state as per request for direct flows
   const handleDirectNotify = async (pkg: any) => {
@@ -777,7 +1131,11 @@ export default function Portaria({ user }: PortariaProps) {
       // Garante pickup_code/token
       let pickupCode = pkg.pickup_code;
       if (!pickupCode) pickupCode = generatePickupCode();
-      const pickupToken = pkg.pickup_token || Math.random().toString(36).substring(2, 8).toUpperCase();
+      const pickupToken = pkg.pickup_token || generateSecureToken(16);
+
+      // Contagem física canônica (idêntica à bolinha da Portaria): soma de todas as pendências ativas do morador
+      const allPendingForResident = packages.filter((p: any) => p.recipient_id === resident.id && p.status !== 'delivered');
+      const totalPhysicalPending = sumPackageItems(allPendingForResident.length > 0 ? allPendingForResident : moradorPackages);
 
       const message = prepareWhatsAppNotification(
         resident,
@@ -785,7 +1143,7 @@ export default function Portaria({ user }: PortariaProps) {
         pickupCode,
         undefined,
         pickupToken,
-        moradorPackages.length || 1,
+        totalPhysicalPending || 1,
         'disponivel',
         undefined,
         undefined,
@@ -795,49 +1153,31 @@ export default function Portaria({ user }: PortariaProps) {
       if (!message) throw new Error('Não foi possível preparar a mensagem');
 
       const pkgIds = moradorPackages.map(p => p.id);
-      const nowString = new Date().toISOString();
 
-      // REGRA OBRIGATÓRIA: Abrir WhatsApp imediatamente (antes do await para evitar bloqueio de popup)
+      // Abre WhatsApp imediatamente para evitar bloqueio de popup
       const whatsappLink = getWhatsAppLink(resident.telefone, message, pkg.photo_url);
       window.open(whatsappLink, '_blank');
-      
-      // REGRA OBRIGATÓRIA: Atualizar status no banco EM SEGUIDA
-      const { error } = await supabase
-        .from('packages')
-        .update({ 
-          whatsapp_notified: true,
-          whatsapp_sent: true,
-          notified_at: nowString,
-          whatsapp_status: 'enviado',
-          whatsapp_sent_at: nowString,
-          last_notification_at: nowString,
-          whatsapp_message: message,
-          pickup_code: pickupCode,
-          pickup_token: pickupToken
-        })
-        .in('id', pkgIds);
 
-      if (error) {
-        console.error('Erro ao atualizar pacotes no banco:', error);
-      }
+      // Registra atividade de abertura do WhatsApp sem marcar como enviada
+      recordSendActivity('WHATSAPP_ABERTO', pkg.id);
       
-      // Atualização local imediata
-      setPackages(prev => prev.map(p => pkgIds.includes(p.id) ? { 
-        ...p, 
-        whatsapp_status: 'enviado',
-        whatsapp_notified: true,
-        whatsapp_sent: true,
-        notified_at: nowString,
-        whatsapp_sent_at: nowString,
-        last_notification_at: nowString,
-        whatsapp_message: message,
-        pickup_code: pickupCode,
-        pickup_token: pickupToken
-      } : p));
+      // NÃO atualiza banco de dados nem estado local antes da confirmação do porteiro!
+      // Exibe modal explícito de confirmação de envio
+      setConfirmWhatsAppError(null);
+      setPendingWhatsAppConfirm({
+        resident,
+        packageIds: pkgIds,
+        residentName: resident.nome,
+        unit: formatPackageUnit(pkg),
+        totalItems: totalPhysicalPending || 1,
+        pickupCode,
+        pickupToken,
+        message,
+        isQueue: false
+      });
 
       setLastNotifiedPackageId(pkg.package_id || pkg.id);
       setIsWaitingForReturn(true);
-      toast.success('WhatsApp aberto para ' + resident.nome);
     } catch (e) {
       console.error(e);
       toast.error('Erro ao processar notificação');
@@ -916,6 +1256,7 @@ export default function Portaria({ user }: PortariaProps) {
       
       if (isWaitingForReturn) {
         setIsWaitingForReturn(false);
+        recordSendActivity('WHATSAPP_RETORNO', pendingWhatsAppConfirm?.packageIds?.[0] || lastNotifiedPackageId || undefined);
         
         if (isNotifyingAll) {
           // No modo queue, o avanço do index já acontece no clique. 
@@ -1025,7 +1366,11 @@ export default function Portaria({ user }: PortariaProps) {
             let pCode = pkg.pickup_code;
             let pToken = pkg.pickup_token;
             if (!pCode) pCode = generatePickupCode();
-            if (!pToken) pToken = Math.random().toString(36).substring(2, 15);
+            if (!pToken) pToken = generateSecureToken(16);
+
+            // Contagem física canônica (idêntica à bolinha da Portaria): soma de todas as pendências ativas do morador
+            const residentPending = packages.filter((p: any) => p.recipient_id === resident.id && p.status !== 'delivered');
+            const totalPhysicalPending = sumPackageItems(residentPending.length > 0 ? residentPending : [pkg]);
 
             const finalMessage = prepareWhatsAppNotification(
               resident,
@@ -1033,61 +1378,44 @@ export default function Portaria({ user }: PortariaProps) {
               pCode,
               pkg.carrier,
               pToken,
-              1,
+              totalPhysicalPending || 1,
               'disponivel',
               undefined,
               undefined,
               pkg.photo_url
             ) || pkg.whatsapp_message || `Olá, ${resident.nome}! Sua encomenda chegou na portaria. Código: ${pCode}`;
 
-            const result = await sendWhatsAppMessage(resident.telefone, finalMessage, user.condominium_id, {
-              api_url: condoSettings.api_url,
-              api_token: condoSettings.api_token,
-              instance_id: condoSettings.instance_id,
-              whatsapp_provider: condoSettings.whatsapp_provider,
-              photo_url: pkg.photo_url
-            });
-            
-            if (result.status_envio === 'sucesso') {
-              const nowString = new Date().toISOString();
-              // Atualização local imediata para o contador refletir na hora
-              setPackages(prev => prev.map(p => p.id === pkg.id ? { 
-                ...p, 
-                whatsapp_status: 'enviado', 
-                whatsapp_notified: true,
-                whatsapp_sent: true,
-                notified_at: nowString,
-                whatsapp_sent_at: nowString,
-                last_notification_at: nowString,
-                pickup_code: pCode,
-                pickup_token: pToken
-              } : p));
-              setPackages(prev =>
-  prev.filter(p => p.id ! == pkg.id)
-); 
-              const { error: updateError } = await supabase
-                .from('packages')
-                .update({ 
-                  whatsapp_notified: true,
-                  whatsapp_sent: true,
-                  notified_at: nowString,
-                  whatsapp_status: 'enviado',
-                  last_notification_at: nowString,
-                  whatsapp_sent_at: nowString,
-                  whatsapp_message: finalMessage,
-                  pickup_code: pCode,
-                  pickup_token: pToken
-                })
-                .eq('id', pkg.id);
-              
-              if (updateError) {
-                console.error('Erro ao atualizar pacote', updateError);
-                throw updateError;
+            // Sequência obrigatória (9 etapas):
+            // 1. API -> 2. Resposta -> 3. status_envio==='sucesso' -> 4. !error -> 5. HTTP 200/201 ->
+            // 6. Supabase update -> 7. Verificar error -> 8. Atualizar setPackages SOMENTE após confirmação -> 9. Sucesso
+            const autoResult = await executePortariaAutoSend({
+              phone: resident.telefone,
+              message: finalMessage,
+              condominiumId: user.condominium_id,
+              packageId: pkg.id,
+              pickupCode: pCode,
+              pickupToken: pToken,
+              config: {
+                api_url: condoSettings.api_url,
+                api_token: condoSettings.api_token,
+                instance_id: condoSettings.instance_id,
+                whatsapp_provider: condoSettings.whatsapp_provider,
+                photo_url: pkg.photo_url
+              },
+              onConfirmedLocalState: (fields) => {
+                setPackages(prev => prev.map(p => p.id === pkg.id ? {
+                  ...p,
+                  ...fields
+                } : p));
               }
+            });
+
+            if (autoResult.ok) {
               console.log('Atualizado no banco:', pkg.id);
+              recordSendActivity('WHATSAPP_CONFIRMADO', pkg.id);
               successCount++;
             } else {
-              throw new Error(result.error || 'Erro na resposta da API');
+              throw new Error(autoResult.error || 'Erro ou falha na confirmação do envio/banco de dados');
             }
           } catch (error) {
             console.error('Falha na API:', error);
@@ -1113,14 +1441,15 @@ export default function Portaria({ user }: PortariaProps) {
             break; // Interromper envio automático
           }
         } else {
-          const { error: updateError } = await supabase
-            .from('packages')
-            .update({ 
+          const waRes = await api.post('/api/operational/packages/whatsapp-status', {
+            packageIds: [pkg.id],
+            fields: {
               whatsapp_status: resident?.telefone ? 'error' : 'no_recipient'
-            })
-            .eq('id', pkg.id);
-          
-          if (updateError) console.error('Erro ao atualizar status de erro:', updateError);
+            },
+            condominiumId: user.condominium_id
+          });
+
+          if (!waRes.ok) console.error('Erro ao atualizar status de erro:', waRes.error);
           errorCount++;
         }
       }
@@ -1147,35 +1476,25 @@ export default function Portaria({ user }: PortariaProps) {
 
   const handleManualSent = async (pkgId: string) => {
     try {
-      const nowString = new Date().toISOString();
-      const { error } = await supabase
-        .from('packages')
-        .update({ 
-          whatsapp_notified: true,
-          whatsapp_sent: true,
-          notified_at: nowString,
-          whatsapp_status: 'enviado',
-          last_notification_at: nowString,
-          whatsapp_sent_at: nowString
-        })
-        .eq('id', pkgId);
-      
-      if (error) {
-        console.error('Erro ao atualizar pacote', error);
-      } else {
-        console.log('Atualizado no banco:', pkgId);
+      const result = await executeManualSendConfirmation({
+        packageIds: [pkgId],
+        onConfirmedLocalState: (fields) => {
+          setPackages(prev => prev.map(p => p.id === pkgId ? {
+            ...p,
+            ...fields
+          } : p));
+        }
+      });
+
+      if (!result.ok) {
+        console.error('Erro ao atualizar pacote', result.error);
+        toast.error(result.error || 'Erro ao salvar confirmação no banco de dados. A encomenda permanece pendente.');
+        return;
       }
-      
-      setPackages(prev => prev.map(p => p.id === pkgId ? { 
-        ...p, 
-        whatsapp_status: 'enviado', 
-        whatsapp_notified: true,
-        whatsapp_sent: true,
-        notified_at: nowString,
-        whatsapp_sent_at: nowString,
-        last_notification_at: nowString
-      } : p));
-      
+
+      console.log('Atualizado no banco:', pkgId);
+      recordSendActivity('WHATSAPP_CONFIRMADO', pkgId);
+
       if (manualIndex + 1 >= batchPackages.length) {
         toast.success('Todos os avisos foram processados!');
         setShowBatchModal(false);
@@ -1192,6 +1511,7 @@ export default function Portaria({ user }: PortariaProps) {
   };
 
   const handleSkipManual = () => {
+    recordSendActivity('WHATSAPP_CANCELADO', batchPackages[manualIndex]?.id);
     if (manualIndex + 1 >= batchPackages.length) {
       setBatchStep('finished');
     } else {
@@ -1320,17 +1640,15 @@ export default function Portaria({ user }: PortariaProps) {
         return;
       }
 
-      // The QR code contains the package ID, token or 4-digit pickup code
-      const { data: packagesFound, error: rpcError } = await supabase
-        .from('packages')
-        .select('*, moradores(nome, unidade, unit_type, block, street), registrar:received_by(full_name), package_id:id, unit_label:unit_number')
-        .eq('condominium_id', user.condominium_id)
-        .or(orParts.join(','))
-        .eq('status', 'received');
+      const lookupTerm = searchToken || searchCode || searchId;
+      // The QR code contains the package ID, token or pickup code
+      const lookupRes = await api.get(
+        `/api/operational/packages?status=pending&lookup=${encodeURIComponent(lookupTerm)}&condominiumId=${encodeURIComponent(user.condominium_id)}`
+      );
 
-      if (rpcError) {
-        console.error("Erro ao buscar encomenda por QR:", rpcError);
-        toast.error('Erro na busca: ' + rpcError.message);
+      if (!lookupRes.ok) {
+        console.error("Erro ao buscar encomenda por QR:", lookupRes.error);
+        toast.error('Erro na busca: ' + (lookupRes.error || 'Falha de comunicação'));
         setQrScanStatus('error');
         setTimeout(() => {
           setQrScanStatus('scanning');
@@ -1338,6 +1656,8 @@ export default function Portaria({ user }: PortariaProps) {
         }, 2000);
         return;
       }
+
+      const packagesFound = lookupRes.data?.packages || [];
 
       if (!packagesFound || packagesFound.length === 0) {
         setQrScanStatus('error');
@@ -1351,6 +1671,14 @@ export default function Portaria({ user }: PortariaProps) {
 
       const data = packagesFound[0];
       setQrPackage(data);
+
+      // REGRA DE SEGURANÇA MANDATÓRIA (ITEM 3): Bloquear baixa por código digitado ou scanner se a notificação ainda não foi enviada
+      if (!isPackageNotified(data)) {
+        setQrScanStatus('idle');
+        guideToNotification(data);
+        return;
+      }
+
       setQrScanStatus('success');
       
       // Requisito: passar o objeto diretamente para o handleDeliver para evitar estado "stale" e garantir baixa coletiva
@@ -1426,14 +1754,11 @@ export default function Portaria({ user }: PortariaProps) {
         // Corrigir registros 'apto' para 'Casa' ou 'Apartamento' se possível
         // Mas o pedido é específico: 'apto' -> 'casa' se for o caso
         // Aqui vamos seguir a instrução literal: update moradores set tipo_residencia = 'casa' where tipo_residencia = 'apto'
-        // Mas como usamos 'unit_type', o comando no supabase seria:
-        const { error } = await supabase
-          .from('moradores')
-          .update({ unit_type: 'Casa' })
-          .eq('condominium_id', user.condominium_id)
-          .eq('unit_type', 'apto');
+        const fixRes = await api.post('/api/operational/moradores/fix-unit-type', {
+          condominiumId: user.condominium_id
+        });
         
-        if (!error) {
+        if (fixRes.ok) {
           localStorage.setItem(key, 'true');
           console.log('Base de moradores corrigida com sucesso.');
           fetchData();
@@ -1471,19 +1796,12 @@ export default function Portaria({ user }: PortariaProps) {
       };
 
       if (editingResident) {
-        const { error } = await supabase
-          .from('moradores')
-          .update(moradorData)
-          .eq('id', editingResident.id);
-
-        if (error) throw error;
+        const res = await api.patch(`/api/operational/moradores/${editingResident.id}`, moradorData);
+        if (!res.ok) throw new Error(res.error || 'Erro ao atualizar morador');
         toast.success('Morador atualizado com sucesso!');
       } else {
-        const { error } = await supabase
-          .from('moradores')
-          .insert([moradorData]);
-
-        if (error) throw error;
+        const res = await api.post('/api/operational/moradores', moradorData);
+        if (!res.ok) throw new Error(res.error || 'Erro ao cadastrar morador');
         toast.success('Morador cadastrado com sucesso!');
       }
       
@@ -1522,19 +1840,13 @@ export default function Portaria({ user }: PortariaProps) {
     try {
       setLoading(true);
       
-      // Soft delete: inativa o morador na tabela moradores
-      const { error: errorMorador } = await supabase
-        .from('moradores')
-        .update({ ativo: false })
-        .eq('id', targetId);
+      // Soft delete: inativa o morador na tabela moradores (e perfil vinculado no servidor)
+      const delRes = await api.patch(`/api/operational/moradores/${targetId}`, {
+        ativo: false,
+        condominiumId: user.condominium_id
+      });
 
-      if (errorMorador) throw errorMorador;
-
-      // Também tenta inativar na tabela profiles caso exista um usuário vinculado
-      await supabase
-        .from('profiles')
-        .update({ active: false })
-        .eq('id', targetId);
+      if (!delRes.ok) throw new Error(delRes.error || 'Erro ao desativar morador');
 
       await registrarAuditoria({
         condominio_id: user.condominium_id || '',
@@ -1569,12 +1881,12 @@ export default function Portaria({ user }: PortariaProps) {
       setLoading(true);
       const newStatus = !resident.ativo;
       
-      const { error } = await supabase
-        .from('moradores')
-        .update({ ativo: newStatus })
-        .eq('id', resident.id);
+      const statusRes = await api.patch(`/api/operational/moradores/${resident.id}`, {
+        ativo: newStatus,
+        condominiumId: user.condominium_id
+      });
 
-      if (error) throw error;
+      if (!statusRes.ok) throw new Error(statusRes.error || 'Erro ao alterar status do morador');
 
       await registrarAuditoria({
         condominio_id: user.condominium_id || '',
@@ -1622,70 +1934,47 @@ export default function Portaria({ user }: PortariaProps) {
     try {
       if (!silent) setLoading(true);
       
-      // Primeiro busca as configurações para saber se o modo leve está ativado
-      const { data: settingsData } = await supabase
-        .from('condominium_settings')
-        .select('*')
-        .eq('condominium_id', user.condominium_id)
-        .maybeSingle();
-      
-      setCondoSettings(settingsData);
- 
-       // Busca encomendas: SEMPRE busca todas as pendentes prioritariamente + histórico recente de entregues
-       const pendingQuery = supabase
-         .from('packages')
-         .select('*, moradores(nome, unidade, unit_type, block, street), registrar:received_by(full_name), package_id:id, unit_label:unit_number')
-         .eq('condominium_id', user.condominium_id)
-         .neq('status', 'delivered')
-         .is('delivered_at', null)
-         .order('received_at', { ascending: false });
-
-       const deliveredQuery = supabase
-         .from('packages')
-         .select('*, moradores(nome, unidade, unit_type, block, street), registrar:received_by(full_name), package_id:id, unit_label:unit_number')
-         .eq('condominium_id', user.condominium_id)
-         .eq('status', 'delivered')
-         .order('delivered_at', { ascending: false })
-         .limit(1000);
- 
-       const [pendingResult, deliveredResult, resResult] = await Promise.all([
-        pendingQuery,
-        deliveredQuery,
-        supabase
-          .from('moradores')
-          .select('id, nome, unidade, unit_type, telefone, block, street, ativo')
-          .eq('condominium_id', user.condominium_id)
-          .eq('ativo', true)
-          .order('nome')
+      const condoIdEnc = encodeURIComponent(user.condominium_id);
+      const [ctxRes, pendingRes, deliveredRes] = await Promise.all([
+        api.get(`/api/operational/context?condominiumId=${condoIdEnc}`),
+        api.get(`/api/operational/packages?status=pending&limit=200&condominiumId=${condoIdEnc}`),
+        api.get(`/api/operational/packages?status=delivered&limit=50&condominiumId=${condoIdEnc}`)
       ]);
 
-      if (pendingResult.error) {
-        console.error('Erro ao buscar encomendas pendentes:', pendingResult.error);
+      if (ctxRes.ok && ctxRes.data) {
+        if (ctxRes.data.settings !== undefined) setCondoSettings(ctxRes.data.settings);
+        if (ctxRes.data.condominium?.name) setCondoName(ctxRes.data.condominium.name);
+        setResidents(ctxRes.data.moradores || []);
+      } else {
+        console.error('Erro ao buscar contexto operacional:', ctxRes.error);
       }
-      if (deliveredResult.error) {
-        console.error('Erro ao buscar encomendas entregues:', deliveredResult.error);
+
+      const pendingList = pendingRes.ok ? (pendingRes.data?.packages || []) : [];
+      const deliveredList = deliveredRes.ok ? (deliveredRes.data?.packages || []) : [];
+
+      if (!pendingRes.ok) {
+        console.error('Erro ao buscar encomendas pendentes:', pendingRes.error);
+      }
+      if (!deliveredRes.ok) {
+        console.error('Erro ao buscar encomendas entregues:', deliveredRes.error);
+      } else {
+        setHasMoreDelivered(deliveredList.length >= 50);
       }
 
       const pkgs = [
-        ...(pendingResult.data || []),
-        ...(deliveredResult.data || [])
+        ...pendingList,
+        ...deliveredList
       ];
       setPackages(pkgs);
 
-      if (resResult.error) {
-        console.error('Erro ao buscar moradores:', resResult.error);
-      } else {
-        setResidents(resResult.data || []);
-      }
-
-      // Só mostramos erro se ambos falharem
-      if (pendingResult.error && deliveredResult.error && resResult.error) {
+      // Só mostramos erro se todos falharem
+      if (!pendingRes.ok && !deliveredRes.ok && !ctxRes.ok) {
         toast.error('Erro ao carregar dados da portaria');
       }
 
       return {
         packages: pkgs,
-        residents: resResult.data || []
+        residents: ctxRes.data?.moradores || []
       };
 
     } catch (error) {
@@ -1693,6 +1982,34 @@ export default function Portaria({ user }: PortariaProps) {
       return { packages: [], residents: [] };
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadMoreDelivered = async () => {
+    if (!user?.condominium_id || isLoadingMoreDelivered) return;
+    setIsLoadingMoreDelivered(true);
+    try {
+      const currentDeliveredCount = packages.filter(p => p.status === 'delivered').length;
+      const res = await api.get(
+        `/api/operational/packages?status=delivered&offset=${currentDeliveredCount}&limit=50&condominiumId=${encodeURIComponent(user.condominium_id)}`
+      );
+
+      if (!res.ok) throw new Error(res.error || 'Erro ao carregar mais encomendas');
+      const data = res.data?.packages || [];
+      if (data.length > 0) {
+        setPackages(prev => {
+          const existingIds = new Set(prev.map(p => p.id));
+          return [...prev, ...data.filter((p: any) => !existingIds.has(p.id))];
+        });
+        setHasMoreDelivered(data.length >= 50);
+      } else {
+        setHasMoreDelivered(false);
+      }
+    } catch (e) {
+      console.error("Erro ao carregar mais entregues:", e);
+      toast.error("Erro ao carregar mais encomendas");
+    } finally {
+      setIsLoadingMoreDelivered(false);
     }
   };
 
@@ -1708,34 +2025,16 @@ export default function Portaria({ user }: PortariaProps) {
         console.warn('Falha ao comprimir imagem, enviando original:', err);
       }
 
-      // Converter base64 para Blob
-      const res = await fetch(finalBase64);
-      const blob = await res.blob();
-      
-      // Nome de arquivo único para evitar colisões
-      const fileName = `delivery_${Date.now()}_${Math.random().toString(36).substring(7)}.jpg`;
+      const uploadRes = await api.post('/api/operational/upload-photo', {
+        imageBase64: finalBase64,
+        folder: 'delivery-photos'
+      });
 
-      // Upload para a raiz do bucket 'packages' (mais seguro)
-      const { error: uploadError } = await supabase.storage
-        .from('packages')
-        .upload(fileName, blob, {
-          contentType: 'image/jpeg',
-          cacheControl: '3600',
-          upsert: false
-        });
-
-      if (uploadError) {
-        console.error("Erro no upload Supabase:", uploadError);
-        throw uploadError;
+      if (!uploadRes.ok || !uploadRes.data?.publicUrl) {
+        throw new Error(uploadRes.error || "Não foi possível gerar a URL pública da foto");
       }
 
-      const { data: { publicUrl } } = supabase.storage
-        .from('packages')
-        .getPublicUrl(fileName);
-
-      if (!publicUrl) throw new Error("Não foi possível gerar a URL pública da foto");
-
-      return publicUrl;
+      return uploadRes.data.publicUrl;
     } catch (err: any) {
       console.error("Erro detalhado no upload da foto:", err);
       throw new Error(err.message || "Falha ao enviar imagem para o servidor");
@@ -1778,6 +2077,60 @@ export default function Portaria({ user }: PortariaProps) {
     }
   };
 
+  // Regra de Segurança: Verifica se uma encomenda específica ou todas as encomendas de um lote já foram notificadas
+  const isPackageNotified = (pkg: any): boolean => {
+    if (!pkg) return false;
+    // Se for grupo/lote, todas as encomendas do lote devem ter sido notificadas
+    if (pkg.isGroup && Array.isArray(pkg.packages) && pkg.packages.length > 0) {
+      return pkg.packages.every((p: any) => p.whatsapp_notified === true || p.whatsapp_sent === true || ['sent', 'enviado', 'delivered', 'read'].includes((p.whatsapp_status || '').toLowerCase()));
+    }
+    return pkg.whatsapp_notified === true || pkg.whatsapp_sent === true || ['sent', 'enviado', 'delivered', 'read'].includes((pkg.whatsapp_status || '').toLowerCase());
+  };
+
+  // Item 8: Conduz o porteiro com precisão para o fluxo de notificação da encomenda bloqueada
+  const guideToNotification = (pkg: any) => {
+    feedback.error();
+    toast.error('POR FAVOR ENVIE A NOTIFICAÇÃO PARA DAR BAIXA DA ENCOMENDA', {
+      id: 'block-undelivered-notice',
+      duration: 6000,
+      icon: '⚠️'
+    });
+
+    // Se a encomenda tiver destinatário com telefone, oferece disparo imediato da notificação
+    const resident = residents.find(r => r.id === (pkg.recipient_id || pkg.packages?.[0]?.recipient_id));
+    if (resident && resident.telefone) {
+      setTimeout(() => {
+        toast((t) => (
+          <div className="flex flex-col gap-2">
+            <p className="text-xs font-bold text-zinc-900">
+              Deseja notificar {resident.nome} agora pelo WhatsApp?
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={() => {
+                  toast.dismiss(t.id);
+                  handleDirectNotify(pkg.packages ? pkg.packages[0] : pkg);
+                }}
+                className="px-3 py-1.5 bg-emerald-600 text-white text-xs font-bold rounded-xl hover:bg-emerald-700 shadow-sm"
+              >
+                Sim, Notificar Agora
+              </button>
+              <button
+                onClick={() => toast.dismiss(t.id)}
+                className="px-3 py-1.5 bg-zinc-100 text-zinc-600 text-xs font-bold rounded-xl hover:bg-zinc-200"
+              >
+                Voltar
+              </button>
+            </div>
+          </div>
+        ), { id: 'guide-notify-action', duration: 10000 });
+      }, 400);
+    } else {
+      // Direciona a aba para 'pending' para localizar os não notificados
+      setActiveTab('pending');
+    }
+  };
+
 const isValidUuid = (id?: string | null): boolean => {
   if (!id) return false;
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
@@ -1792,11 +2145,15 @@ const isValidUuid = (id?: string | null): boolean => {
     // Usar dados passados ou do estado
     const activePackage = packageData || qrPackage;
 
+    // REGRA DE SEGURANÇA MANDATÓRIA (PARTE 2 & ITEM 8): Bloquear baixa se a encomenda (ou lote) ainda NÃO foi notificada
+    if (activePackage && !isPackageNotified(activePackage)) {
+      guideToNotification(activePackage);
+      setQrScanStatus('idle');
+      return false;
+    }
+
     try {
       setQrScanStatus('validating');
-      
-      const { data: authData } = await supabase.auth.getUser();
-      const authUser = authData?.user;
       
       const photoToUse = photoOverride || deliveryPhoto;
       let finalPhotoUrl = null;
@@ -1819,40 +2176,13 @@ const isValidUuid = (id?: string | null): boolean => {
       const pickupToken = activePackage?.pickup_token;
       const pickupCode = activePackage?.pickup_code;
 
-      // Buscar IDs exatos do grupo ou correspondentes ao token/código e morador
-      let idsToUpdate: string[] = [pkgId];
+      let requestedIds: string[] = [pkgId];
       const activePkgAny = activePackage as any;
       if (activePkgAny?.isGroup && activePkgAny?.packages && activePkgAny.packages.length > 0) {
-        idsToUpdate = activePkgAny.packages.map((p: any) => p.id || p.package_id).filter(Boolean);
-      } else if (pickupToken) {
-        const { data: relatedPackages } = await supabase
-          .from('packages')
-          .select('id')
-          .eq('condominium_id', user.condominium_id)
-          .eq('pickup_token', pickupToken)
-          .neq('status', 'delivered')
-          .is('delivered_at', null);
-
-        if (relatedPackages && relatedPackages.length > 0) {
-          idsToUpdate = relatedPackages.map(p => p.id);
-        }
-      } else if (pickupCode && activePackage?.recipient_id) {
-        const { data: relatedPackages } = await supabase
-          .from('packages')
-          .select('id')
-          .eq('condominium_id', user.condominium_id)
-          .eq('pickup_code', pickupCode)
-          .eq('recipient_id', activePackage.recipient_id)
-          .neq('status', 'delivered')
-          .is('delivered_at', null);
-
-        if (relatedPackages && relatedPackages.length > 0) {
-          idsToUpdate = relatedPackages.map(p => p.id);
-        }
+        requestedIds = activePkgAny.packages.map((p: any) => p.id || p.package_id).filter(Boolean);
       }
-
-      if (!idsToUpdate.includes(pkgId)) {
-        idsToUpdate.push(pkgId);
+      if (!requestedIds.includes(pkgId)) {
+        requestedIds.push(pkgId);
       }
 
       const porterNameToSave = (currentPorter && currentPorter !== 'Selecione o Porteiro') ? currentPorter : user.full_name;
@@ -1872,43 +2202,38 @@ const isValidUuid = (id?: string | null): boolean => {
         }
       }
 
-      // Validar UUID para entregue_por/delivered_by para evitar erros de sintaxe 22P02 no Postgres
-      const validDeliveredBy = (authUser?.id && isValidUuid(authUser.id)) 
-        ? authUser.id 
-        : (user?.id && isValidUuid(user.id) ? user.id : null);
+      const deliverRes = await api.post('/api/operational/packages/deliver', {
+        packageId: pkgId,
+        packageIds: requestedIds,
+        condominiumId: user.condominium_id,
+        pickupToken,
+        pickupCode,
+        recipientId: activePackage?.recipient_id,
+        deliveryMethod: finalMethod,
+        deliveredToName: finalDeliveredToName,
+        porterName: porterNameToSave,
+        deliveryPhotoUrl: finalPhotoUrl,
+      });
 
-      const { error: updateError } = await supabase
-        .from('packages')
-        .update({ 
-          status: 'delivered',
-          delivered_at: new Date().toISOString(),
-          delivery_method: finalMethod,
-          delivered_by: validDeliveredBy,
-          entregue_por: porterNameToSave,
-          pickup_qr_code: 'used',
-          delivered_to_name: finalDeliveredToName,
-          ...(finalPhotoUrl ? { delivery_photo_url: finalPhotoUrl } : {}),
-          // Preserva notas existentes para não apagar a quantidade [QTD: X] dos lotes
-          ...(idsToUpdate.length > 1 ? {} : {})
-        })
-        .in('id', idsToUpdate);
-
-      if (updateError) {
-        console.error("Erro ao atualizar status da encomenda:", updateError);
-        throw updateError;
+      if (!deliverRes.ok) {
+        console.error("Erro ao atualizar status da encomenda:", deliverRes.error);
+        throw new Error(deliverRes.error || 'Falha ao confirmar entrega');
       }
-      
+
+      const idsToUpdate: string[] = deliverRes.data?.updatedIds || requestedIds;
+      const validDeliveredBy = deliverRes.data?.delivered_by ?? (user?.id && isValidUuid(user.id) ? user.id : null);
+      const now = deliverRes.data?.delivered_at || new Date().toISOString();
+
       // Atualização local imediata
-      const now = new Date().toISOString();
       setPackages(prev => prev.map(p => idsToUpdate.includes(p.id) ? { 
          ...p, 
          status: 'delivered',
          delivered_at: now,
-         delivery_method: finalMethod,
-         entregue_por: porterNameToSave,
+         delivery_method: deliverRes.data?.delivery_method || finalMethod,
+         entregue_por: deliverRes.data?.entregue_por || porterNameToSave,
          delivered_by: validDeliveredBy,
-         delivered_to_name: finalDeliveredToName,
-         delivery_photo_url: finalPhotoUrl || p.delivery_photo_url
+         delivered_to_name: deliverRes.data?.delivered_to_name || finalDeliveredToName,
+         delivery_photo_url: deliverRes.data?.delivery_photo_url || finalPhotoUrl || p.delivery_photo_url
        } : p));
 
       // REGISTRAR AUDITORIA PARA CADA ENCOMENDA ENTREGUE
@@ -2031,7 +2356,7 @@ const isValidUuid = (id?: string | null): boolean => {
           ...group[0],
           isGroup: true,
           packages: group,
-          count: group.length
+          count: sumPackageItems(group)
         };
       });
     }
@@ -2125,53 +2450,110 @@ const isValidUuid = (id?: string | null): boolean => {
             <Plus className="w-6 h-6" />
             TIRAR FOTO
           </motion.button>
-          {/* BOTÃO AVISAR MORADOR (ALERTA E DISPARO DE PENDÊNCIAS) */}
-          <div className="flex items-center gap-2">
-            <motion.button
-              type="button"
-              onClick={(e) => {
-                e.preventDefault();
-                handleNotifyAll();
-              }}
-              animate={pendingNoticesCount > 0 ? {
-                scale: [1, 1.03, 1],
-                boxShadow: [
-                  "0 4px 6px -1px rgba(234, 88, 12, 0.2)",
-                  "0 10px 15px -3px rgba(234, 88, 12, 0.4)",
-                  "0 4px 6px -1px rgba(234, 88, 12, 0.2)"
-                ]
-              } : {}}
-              transition={{ duration: 1.8, repeat: Infinity, ease: "easeInOut" }}
-              className={`px-6 py-4 rounded-2xl font-bold transition-all flex items-center justify-center gap-3 shadow-lg ${
-                pendingNoticesCount > 0 
-                  ? 'bg-orange-600 text-white hover:bg-orange-700 shadow-orange-200 ring-2 ring-orange-400 ring-offset-2' 
-                  : 'bg-zinc-100 text-zinc-400 hover:bg-zinc-200 cursor-default'
-              }`}
-            >
-              <MessageSquare className="w-6 h-6" />
-              <span>AVISAR MORADOR</span>
-              {pendingNoticesCount > 0 && (
-                <span className="bg-white text-orange-600 px-2 py-0.5 rounded-full text-xs font-black">
-                  {pendingNoticesCount}
-                </span>
-              )}
-            </motion.button>
+          {/* BOTÃO ÚNICO DE AVISAR MORADOR / ALERTA DE ESQUECIMENTO */}
+          {(() => {
+            // Regra 1: No modo APÓS REGISTRO, antes dos 5 minutos o botão NÃO aparece!
+            if (notifyAfter && !showInactivityAlert) {
+              return null;
+            }
 
-            {pendingNoticesCount > 0 && (
-              <button
-                type="button"
-                onClick={handleSnoozeAlert}
-                title={isAlertSnoozed ? "Alertas silenciados" : "Silenciar alertas por 10 minutos"}
-                className={`p-3 rounded-2xl border transition-all ${
-                  isAlertSnoozed 
-                    ? 'bg-amber-100 text-amber-800 border-amber-300' 
-                    : 'bg-white text-zinc-500 hover:text-zinc-800 border-zinc-200 hover:bg-zinc-50'
-                }`}
-              >
-                {isAlertSnoozed ? '🔕 10m' : '🔔 Silenciar'}
-              </button>
-            )}
-          </div>
+            // Se não há notificações pendentes, não exibe
+            if (pendingNoticesCount === 0) {
+              return null;
+            }
+
+            // Se o alerta de inatividade de 5min estiver ativo (ou pendência em modo imediato)
+            const isAlertMode = notifyAfter && showInactivityAlert;
+
+            return (
+              <div className="flex items-center gap-2">
+                <motion.button
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    // Regra 5: Leva DIRETAMENTE para a lista de moradores pendentes, sem modal intermediário
+                    handleGoToPendingResidents();
+                  }}
+                  animate={{
+                    scale: [1, 1.03, 1],
+                    boxShadow: isAlertMode ? [
+                      "0 0 0 0 rgba(239, 68, 68, 0.4)",
+                      "0 0 0 10px rgba(239, 68, 68, 0)",
+                      "0 0 0 0 rgba(239, 68, 68, 0.4)"
+                    ] : [
+                      "0 4px 6px -1px rgba(234, 88, 12, 0.2)",
+                      "0 10px 15px -3px rgba(234, 88, 12, 0.4)",
+                      "0 4px 6px -1px rgba(234, 88, 12, 0.2)"
+                    ]
+                  }}
+                  transition={{ duration: 1.5, repeat: Infinity, ease: "easeInOut" }}
+                  className={`px-6 py-4 rounded-2xl font-black transition-all flex items-center justify-center gap-3 shadow-xl ${isAlertMode ? "bg-red-600 hover:bg-red-700 text-white shadow-red-200 ring-4 ring-red-400/40 animate-pulse" : "bg-orange-600 hover:bg-orange-700 text-white shadow-orange-200 ring-2 ring-orange-400 ring-offset-2"}`}
+                  title={isAlertMode ? 'Clique para ir diretamente aos moradores pendentes' : 'Avisar moradores'}
+                >
+                  {isAlertMode ? <AlertCircle className="w-6 h-6 animate-bounce" /> : <MessageSquare className="w-6 h-6" />}
+                  <div className="text-left">
+                    <span className="block text-xs uppercase tracking-wide">
+                      {isAlertMode ? 'LEMBRETE! Envie as notificações aos moradores' : 'AVISAR MORADOR'}
+                    </span>
+                    <span className={`block text-[11px] font-medium ${isAlertMode ? "text-red-100" : "text-orange-100"}`}>
+                      {pendingResidentsCount} {pendingResidentsCount === 1 ? 'morador pendente' : 'moradores pendentes'} ({pendingNoticesCount} {pendingNoticesCount === 1 ? 'encomenda' : 'encomendas'})
+                    </span>
+                  </div>
+                </motion.button>
+
+                {/* Botão do Sininho com 1 toque (silenciar) e 2 toques (controle discreto de volume) */}
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={handleBellClick}
+                    title={isAlertSnoozed ? 'Som silenciado (toque para reativar, 2x para volume)' : '1 toque: Silenciar som (5m) | 2 toques: Ajustar volume'}
+                    className={`p-3 rounded-2xl border transition-all flex items-center gap-1.5 select-none ${
+                      isAlertSnoozed
+                        ? 'bg-amber-100 text-amber-800 border-amber-300 shadow-sm'
+                        : 'bg-white text-zinc-600 hover:text-zinc-900 border-zinc-200 hover:bg-zinc-50 shadow-sm'
+                    }`}
+                  >
+                    <span>{isAlertSnoozed ? '🔕' : '🔔'}</span>
+                    <span className="text-xs font-bold">{isAlertSnoozed ? 'Reativar (5m)' : 'Silenciar'}</span>
+                  </button>
+
+                  {/* Pequeno popover discreto de volume (abre somente no duplo toque) */}
+                  {showVolumePopup && (
+                    <div className="absolute right-0 top-full mt-2 z-50 bg-white border border-zinc-200 shadow-2xl rounded-2xl p-3 min-w-[210px] animate-in fade-in zoom-in-95 duration-150">
+                      <div className="flex items-center justify-between mb-2 pb-1.5 border-b border-zinc-100">
+                        <span className="text-[11px] font-black text-zinc-800 uppercase tracking-wider flex items-center gap-1">
+                          <Volume2 className="w-3.5 h-3.5 text-emerald-600" /> Volume Alerta
+                        </span>
+                        <span className="text-xs font-black text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full">
+                          {Math.round(alertVolumeMultiplier * 100)}%
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-zinc-500 mb-2.5 leading-tight">
+                        Aumenta a partir do nível atual do sistema.
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={handleIncreaseVolume}
+                          className="flex-1 py-2 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-black flex items-center justify-center gap-1.5 transition-colors shadow-sm"
+                        >
+                          <Volume2 className="w-3.5 h-3.5" /> AUMENTAR +
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setShowVolumePopup(false)}
+                          className="p-2 text-zinc-400 hover:text-zinc-600 rounded-xl hover:bg-zinc-100 transition-colors"
+                          title="Fechar"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
 
           {/* MODO DE NOTIFICAÇÃO - Versão padronizada: Altura igual aos botões superiores e mais compacta */}
           <div className="bg-white/90 backdrop-blur-md border border-zinc-100 py-2.5 px-6 rounded-2xl shadow-sm w-full sm:w-auto sm:min-w-[320px] flex-1 md:flex-none mt-2 md:mt-0 flex flex-col justify-center min-h-[64px]">
@@ -2342,6 +2724,7 @@ const isValidUuid = (id?: string | null): boolean => {
           </div>
         ) : activeTab !== 'residents' ? (
           filteredPackages.length > 0 ? (
+            <>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
               {filteredPackages.map((pkg: any) => (
                 <PackageItem
@@ -2350,6 +2733,10 @@ const isValidUuid = (id?: string | null): boolean => {
                   getWhatsAppBadge={getWhatsAppBadge}
                   getDeliveryMethodLabel={getDeliveryMethodLabel}
                   onDeliver={(p) => {
+                    if (!isPackageNotified(p)) {
+                      guideToNotification(p);
+                      return;
+                    }
                     setDeliveredToType('resident');
                     setAuthorizedName('');
                     setAuthorizedDoc('');
@@ -2358,6 +2745,10 @@ const isValidUuid = (id?: string | null): boolean => {
                     setShowConfirmDelivery(true);
                   }}
                   onDeliverWithPhoto={(p) => {
+                    if (!isPackageNotified(p)) {
+                      guideToNotification(p);
+                      return;
+                    }
                     setDeliveredToType('resident');
                     setAuthorizedName('');
                     setAuthorizedDoc('');
@@ -2367,6 +2758,10 @@ const isValidUuid = (id?: string | null): boolean => {
                     fileInputRef.current?.click();
                   }}
                   onCodeRetrieval={(p) => {
+                    if (!isPackageNotified(p)) {
+                      guideToNotification(p);
+                      return;
+                    }
                     setDeliveredToType('resident');
                     setAuthorizedName('');
                     setAuthorizedDoc('');
@@ -2377,17 +2772,23 @@ const isValidUuid = (id?: string | null): boolean => {
                     setQrScanStatus('idle');
                   }}
                   onViewPhotos={(p) => {
-                    const photos = p.packages
-                      .filter((item: any) => item.photo_url)
-                      .map((item: any) => ({
-                        url: item.photo_url,
-                        carrier: item.carrier,
-                        received_at: item.received_at,
-                        package: item
-                      }));
-                    
-                    if (photos.length > 0) {
-                      setViewGroupPhotos(photos);
+                    // AJUSTE 1: Exibir fotos únicas/distintas do grupo (evita repetição se o lote compartilhar a mesma foto)
+                    const seenUrls = new Set<string>();
+                    const distinctPhotos: any[] = [];
+                    (p.packages || []).forEach((item: any) => {
+                      if (item.photo_url && !seenUrls.has(item.photo_url)) {
+                        seenUrls.add(item.photo_url);
+                        distinctPhotos.push({
+                          url: item.photo_url,
+                          carrier: item.carrier,
+                          received_at: item.received_at,
+                          package: item
+                        });
+                      }
+                    });
+
+                    if (distinctPhotos.length > 0) {
+                      setViewGroupPhotos(distinctPhotos);
                     } else {
                       toast.error('Nenhuma etiqueta com foto neste grupo');
                     }
@@ -2402,6 +2803,27 @@ const isValidUuid = (id?: string | null): boolean => {
                 />
               ))}
             </div>
+
+            {activeTab === 'delivered' && hasMoreDelivered && (
+              <div className="pt-4 flex justify-center">
+                <button
+                  type="button"
+                  onClick={loadMoreDelivered}
+                  disabled={isLoadingMoreDelivered}
+                  className="px-6 py-3 rounded-2xl bg-zinc-900 hover:bg-zinc-800 text-white font-bold text-sm tracking-wide transition-all shadow-md active:scale-95 flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isLoadingMoreDelivered ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin text-emerald-400" />
+                      <span>Carregando mais entregues...</span>
+                    </>
+                  ) : (
+                    <span>Carregar mais entregues (+50)</span>
+                  )}
+                </button>
+              </div>
+            )}
+            </>
           ) : (
           <div className="text-center py-20 bg-white rounded-[3rem] border-2 border-dashed border-zinc-100">
             <div className="w-20 h-20 bg-zinc-50 text-zinc-300 rounded-full flex items-center justify-center mx-auto mb-6">
@@ -2700,13 +3122,23 @@ const isValidUuid = (id?: string | null): boolean => {
                     </p>
                     <div className="inline-flex items-center gap-2 px-3 py-1 bg-amber-50 text-amber-700 rounded-full text-[10px] font-bold uppercase tracking-wider">
                       <Clock className="w-3 h-3" />
-                      {notifyQueue[notifyIndex].packages.length} Encomendas Pendentes
+                      {(() => {
+                        const curResident = notifyQueue[notifyIndex]?.resident;
+                        const resPending = packages.filter((p: any) => p.recipient_id === curResident?.id && p.status !== 'delivered');
+                        const totalCount = sumPackageItems(resPending.length > 0 ? resPending : notifyQueue[notifyIndex].packages);
+                        return `${totalCount} ${totalCount > 1 ? 'Encomendas Pendentes' : 'Encomenda Pendente'}`;
+                      })()}
                     </div>
                   </div>
 
                   <div className="bg-emerald-50/50 p-4 rounded-xl border border-emerald-100/50">
                     <p className="text-xs text-emerald-800 font-medium italic">
-                      "Olá, {notifyQueue[notifyIndex].resident.nome}! Você possui {notifyQueue[notifyIndex].packages.length} {notifyQueue[notifyIndex].packages.length > 1 ? 'encomendas disponíveis' : 'encomenda disponível'} para retirada na portaria."
+                      {(() => {
+                        const curResident = notifyQueue[notifyIndex]?.resident;
+                        const resPending = packages.filter((p: any) => p.recipient_id === curResident?.id && p.status !== 'delivered');
+                        const totalCount = sumPackageItems(resPending.length > 0 ? resPending : notifyQueue[notifyIndex].packages);
+                        return `"Olá, ${curResident?.nome}! Você possui ${totalCount} ${totalCount > 1 ? 'encomendas disponíveis' : 'encomenda disponível'} para retirada na portaria."`;
+                      })()}
                     </p>
                   </div>
 
@@ -2854,16 +3286,51 @@ const isValidUuid = (id?: string | null): boolean => {
                         )}
 
                         <div className="grid grid-cols-1 gap-3">
-                          <a
-                            href={getWhatsAppLink(resident?.telefone || '', pkg.whatsapp_message || '')}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            onClick={() => handleManualSent(pkg.id)}
-                            className="w-full bg-emerald-600 text-white py-5 rounded-2xl font-bold hover:bg-emerald-700 transition-all flex items-center justify-center gap-3 shadow-lg shadow-emerald-200"
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const currentResident = residents.find(r => r.id === pkg.recipient_id) || pkg.moradores;
+                              if (currentResident) {
+                                const residentPending = packages.filter((p: any) => p.recipient_id === currentResident.id && p.status !== 'delivered');
+                                const totalPhysicalPending = sumPackageItems(residentPending.length > 0 ? residentPending : [pkg]);
+                                const pCode = pkg.pickup_code || generatePickupCode();
+                                const pToken = pkg.pickup_token || generateSecureToken(16);
+                                const freshMsg = prepareWhatsAppNotification(
+                                  currentResident,
+                                  condoName || 'Condomínio',
+                                  pCode,
+                                  undefined,
+                                  pToken,
+                                  totalPhysicalPending || 1,
+                                  'disponivel',
+                                  undefined,
+                                  undefined,
+                                  pkg.photo_url
+                                );
+                                if (freshMsg) {
+                                  const link = getWhatsAppLink(currentResident.telefone || '', freshMsg, pkg.photo_url);
+                                  window.open(link, '_blank');
+                                  recordSendActivity('WHATSAPP_ABERTO', pkg.id);
+                                  setConfirmWhatsAppError(null);
+                                  setPendingWhatsAppConfirm({
+                                    resident: currentResident,
+                                    packageIds: [pkg.id],
+                                    residentName: currentResident.nome,
+                                    unit: formatPackageUnit(pkg),
+                                    totalItems: totalPhysicalPending || 1,
+                                    pickupCode: pCode,
+                                    pickupToken: pToken,
+                                    message: freshMsg,
+                                    isQueue: false
+                                  });
+                                }
+                              }
+                            }}
+                            className="w-full bg-emerald-600 text-white py-5 rounded-2xl font-bold hover:bg-emerald-700 transition-all flex items-center justify-center gap-3 shadow-lg shadow-emerald-200 cursor-pointer"
                           >
                             <Send className="w-6 h-6" />
-                            ENVIAR PRÓXIMO
-                          </a>
+                            ENVIAR WHATSAPP
+                          </button>
                           <div className="grid grid-cols-2 gap-3">
                             <button
                               onClick={handleSkipManual}
@@ -2941,7 +3408,94 @@ const isValidUuid = (id?: string | null): boolean => {
         )}
       </AnimatePresence>
 
-      {/* Modal de Notificação Individual REMOVIDO para fluxo direto */}
+      {/* Modal de Confirmação Explícita de Envio no WhatsApp */}
+      <AnimatePresence>
+        {pendingWhatsAppConfirm && (
+          <div className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-zinc-950/75 backdrop-blur-sm">
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-white rounded-3xl shadow-2xl max-w-md w-full overflow-hidden border border-zinc-200"
+            >
+              <div className="p-6 bg-gradient-to-br from-emerald-500 to-teal-600 text-white text-center relative">
+                <div className="w-16 h-16 bg-white/20 rounded-2xl flex items-center justify-center mx-auto mb-3 backdrop-blur-md">
+                  <MessageSquare className="w-8 h-8 text-white" />
+                </div>
+                <h3 className="text-xl font-black">Confirmação de Envio</h3>
+                <p className="text-emerald-100 text-xs mt-1">
+                  O WhatsApp foi aberto no navegador
+                </p>
+              </div>
+
+              <div className="p-6 space-y-4">
+                <div className="bg-zinc-50 rounded-2xl p-4 border border-zinc-100">
+                  <div className="flex justify-between items-center mb-1">
+                    <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Destinatário</span>
+                    <span className="text-xs font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+                      {pendingWhatsAppConfirm.unit}
+                    </span>
+                  </div>
+                  <div className="text-base font-bold text-zinc-900">
+                    {pendingWhatsAppConfirm.residentName}
+                  </div>
+                  <div className="text-xs text-zinc-500 mt-1">
+                    {pendingWhatsAppConfirm.totalItems} {pendingWhatsAppConfirm.totalItems === 1 ? 'encomenda' : 'encomendas'} • Código: <span className="font-mono font-bold text-zinc-800">{pendingWhatsAppConfirm.pickupCode}</span>
+                  </div>
+                </div>
+
+                <div className="text-center py-1">
+                  <p className="text-sm font-bold text-zinc-800">
+                    A mensagem foi enviada com sucesso no WhatsApp?
+                  </p>
+                  <p className="text-xs text-zinc-500 mt-1">
+                    Se você cancelou ou fechou sem enviar, clique em "Não" para manter a encomenda na lista de pendências.
+                  </p>
+                </div>
+
+                {confirmWhatsAppError && (
+                  <div className="bg-red-50 border border-red-200 rounded-2xl p-3 text-left flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                    <div className="text-xs text-red-700">
+                      <p className="font-bold">Falha ao confirmar no banco de dados</p>
+                      <p className="mt-0.5">{confirmWhatsAppError} Tente novamente abaixo.</p>
+                    </div>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-2 gap-3 pt-2">
+                  <button
+                    type="button"
+                    disabled={isConfirmingWhatsApp}
+                    onClick={() => handleCancelWhatsAppSent()}
+                    className="w-full py-3.5 px-4 rounded-xl border border-zinc-200 text-zinc-700 font-bold hover:bg-zinc-100 disabled:opacity-60 transition-colors text-xs"
+                  >
+                    Não / Continuar Pendente
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isConfirmingWhatsApp}
+                    onClick={() => handleConfirmWhatsAppSent(pendingWhatsAppConfirm)}
+                    className="w-full py-3.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white font-black shadow-lg shadow-emerald-600/30 transition-all text-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    {isConfirmingWhatsApp ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Salvando...
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle className="w-4 h-4" />
+                        {confirmWhatsAppError ? 'Tentar Novamente' : 'Sim, Confirmar Envio'}
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* Input de arquivo oculto para captura de foto de entrega */}
       <input 
@@ -3153,53 +3707,71 @@ const isValidUuid = (id?: string | null): boolean => {
                     <div className="flex-1 overflow-y-auto px-6 py-2 space-y-4 text-center custom-scrollbar">
                       {packageToConfirm.isGroup && packageToConfirm.packages && packageToConfirm.packages.length > 0 ? (
                         <div className="w-full max-h-[50vh] overflow-y-auto space-y-4 px-1 py-1 mb-4 custom-scrollbar text-left">
-                          <p className="text-zinc-500 text-xs font-bold uppercase tracking-wider mb-2 text-center">
-                            {packageToConfirm.packages.length} {packageToConfirm.packages.length === 1 ? 'Encomenda Pendente' : 'Encomendas Pendentes'} no Grupo
-                          </p>
-                          {packageToConfirm.packages.map((pkgItem: any, idx: number) => {
-                            const itemCarrier = pkgItem.carrier || extractKnownCarrier(pkgItem.notes);
+                          <div className="bg-emerald-50/70 border border-emerald-100 rounded-2xl p-3 text-center mb-2">
+                            <p className="text-emerald-900 text-xs font-black uppercase tracking-wider">
+                              Lote Coletivo: {sumPackageItems(packageToConfirm.packages)} Encomendas
+                            </p>
+                            <p className="text-[11px] text-emerald-700 font-medium">
+                              Todas serão retiradas conjuntamente nesta operação.
+                            </p>
+                          </div>
+
+                          {/* Foto única do lote ou fotos distintas */}
+                          {(() => {
+                            const distinctPhotos: string[] = [];
+                            packageToConfirm.packages.forEach((item: any) => {
+                              if (item.photo_url && !distinctPhotos.includes(item.photo_url)) {
+                                distinctPhotos.push(item.photo_url);
+                              }
+                            });
+
+                            if (distinctPhotos.length === 0) return null;
+
                             return (
-                            <div key={pkgItem.id || idx} className="bg-zinc-50 rounded-3xl p-4 border border-zinc-100 shadow-sm space-y-3">
-                              <div className="flex justify-between items-start">
-                                <div>
-                                  <span className="bg-emerald-100 text-emerald-800 text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full inline-flex items-center gap-1">
-                                    <span>#{idx + 1}</span>
-                                    {itemCarrier && (
-                                      <>
-                                        <span>•</span>
-                                        <Truck className="w-3 h-3 text-emerald-700" />
-                                        <span>{itemCarrier}</span>
-                                      </>
-                                    )}
-                                  </span>
-                                  {pkgItem.tracking_code && (
-                                    <p className="text-xs font-mono text-zinc-500 mt-1.5">S/N: {pkgItem.tracking_code}</p>
-                                  )}
-                                </div>
-                                <p className="text-[10px] text-zinc-400 font-medium">
-                                  {formatSafeDateTime(pkgItem.received_at)}
-                                </p>
+                              <div className="space-y-3 mb-4">
+                                {distinctPhotos.map((photoUrl, pIdx) => (
+                                  <div key={pIdx} className="w-full bg-zinc-50 rounded-2xl overflow-hidden border border-zinc-200 shadow-xs flex items-center justify-center">
+                                    <img
+                                      src={photoUrl}
+                                      alt={distinctPhotos.length > 1 ? `Foto do Lote ${pIdx + 1}` : "Foto do Lote"}
+                                      className="w-full max-h-[220px] sm:max-h-[260px] object-contain bg-zinc-900/5 rounded-2xl"
+                                      referrerPolicy="no-referrer"
+                                    />
+                                  </div>
+                                ))}
                               </div>
-
-                              {pkgItem.notes && (
-                                <p className="text-[11px] text-amber-700 italic bg-amber-50 rounded-xl px-3 py-1.5 border border-amber-100/50">
-                                  {pkgItem.notes}
-                                </p>
-                              )}
-
-                              {pkgItem.photo_url && (
-                                <div className="aspect-[4/3] w-full rounded-2xl overflow-hidden border border-zinc-200">
-                                  <img
-                                    src={pkgItem.photo_url}
-                                    alt={`Etiqueta ${idx + 1}`}
-                                    className="w-full h-full object-cover"
-                                    referrerPolicy="no-referrer"
-                                  />
-                                </div>
-                              )}
-                            </div>
                             );
-                          })}
+                          })()}
+
+                          {/* Lista resumida e limpa das encomendas do lote (sem repetir fotos ou textos artificiais) */}
+                          <div className="space-y-2">
+                            {packageToConfirm.packages.map((pkgItem: any, idx: number) => {
+                              const itemCarrier = pkgItem.carrier || extractKnownCarrier(pkgItem.notes);
+                              return (
+                                <div key={pkgItem.id || idx} className="bg-zinc-50 rounded-2xl p-3 border border-zinc-100 shadow-xs flex items-center justify-between gap-3">
+                                  <div className="flex items-center gap-2.5 min-w-0">
+                                    <span className="w-6 h-6 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-black flex items-center justify-center shrink-0">
+                                      {idx + 1}
+                                    </span>
+                                    <div className="truncate">
+                                      <p className="text-xs font-bold text-zinc-800 truncate">
+                                        {itemCarrier ? itemCarrier.toUpperCase() : `Encomenda`}
+                                      </p>
+                                      {pkgItem.tracking_code && (
+                                        <p className="text-[10px] font-mono text-zinc-500 truncate">S/N: {pkgItem.tracking_code}</p>
+                                      )}
+                                      {pkgItem.notes && (
+                                        <p className="text-[10px] text-amber-700 italic truncate">{pkgItem.notes}</p>
+                                      )}
+                                    </div>
+                                  </div>
+                                  <p className="text-[10px] text-zinc-400 font-medium shrink-0">
+                                    {formatSafeDateTime(pkgItem.received_at)}
+                                  </p>
+                                </div>
+                              );
+                            })}
+                          </div>
                         </div>
                       ) : (
                         <>
@@ -3427,6 +3999,18 @@ const isValidUuid = (id?: string | null): boolean => {
                   </div>
                 )}
 
+                {/* Item 9: Botão de Porteiro Substituto no Modal Existente */}
+                <div className="mb-3">
+                  <button
+                    type="button"
+                    onClick={() => setShowSubstituteFormModal(true)}
+                    className="w-full p-3.5 rounded-2xl bg-amber-50 hover:bg-amber-100 border-2 border-dashed border-amber-300 text-amber-900 font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 transition-all active:scale-98 shadow-xs"
+                  >
+                    <Plus className="w-4 h-4 text-amber-600" />
+                    <span>+ PORTEIRO SUBSTITUTO</span>
+                  </button>
+                </div>
+
                 <div className="space-y-3 max-h-[350px] overflow-y-auto pr-1 my-4">
                   {porteirosList.length === 0 ? (
                     <div className="p-6 text-center text-zinc-400 bg-zinc-50 rounded-2xl">
@@ -3494,6 +4078,116 @@ const isValidUuid = (id?: string | null): boolean => {
                   </button>
                 )}
               </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Modal Específico para Porteiro Substituto (Itens 8, 9, 10, 11) */}
+      <AnimatePresence>
+        {showSubstituteFormModal && (
+          <div className="fixed inset-0 z-[90] flex items-center justify-center p-4 bg-zinc-900/80 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-md overflow-hidden border border-zinc-100 p-6 md:p-8"
+            >
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-12 h-12 bg-amber-100 rounded-2xl flex items-center justify-center text-amber-700">
+                    <User className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-bold text-zinc-900">Porteiro Substituto</h3>
+                    <p className="text-xs text-zinc-500">Cobertura temporária de plantão</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowSubstituteFormModal(false)}
+                  className="p-2 text-zinc-400 hover:text-zinc-600 rounded-full hover:bg-zinc-100 transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="p-3 bg-amber-50 rounded-2xl border border-amber-200 mb-5 text-xs text-amber-800 leading-relaxed">
+                Ao confirmar, <strong>o substituto assumirá imediatamente como responsável</strong> pelas novas encomendas e baixas deste plantão, sem ser adicionado à lista permanente.
+              </div>
+
+              <form onSubmit={handleConfirmSubstitutoTemporario} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-bold text-zinc-600 uppercase tracking-wider mb-1">
+                    Nome Completo *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={substituteFormName}
+                    onChange={(e) => setSubstituteFormName(e.target.value)}
+                    placeholder="Ex: Carlos da Silva"
+                    className="w-full px-4 py-3 bg-zinc-50 rounded-xl font-medium text-zinc-900 text-sm border border-zinc-200 outline-none focus:ring-2 focus:ring-amber-500 focus:bg-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-zinc-600 uppercase tracking-wider mb-1">
+                    Documento (RG ou CPF) *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={substituteFormDoc}
+                    onChange={(e) => setSubstituteFormDoc(e.target.value)}
+                    placeholder="Ex: 12.345.678-9 ou CPF"
+                    className="w-full px-4 py-3 bg-zinc-50 rounded-xl font-medium text-zinc-900 text-sm border border-zinc-200 outline-none focus:ring-2 focus:ring-amber-500 focus:bg-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-zinc-600 uppercase tracking-wider mb-1">
+                    Telefone (Opcional)
+                  </label>
+                  <input
+                    type="text"
+                    value={substituteFormPhone}
+                    onChange={(e) => setSubstituteFormPhone(e.target.value)}
+                    placeholder="Ex: (11) 98765-4321"
+                    className="w-full px-4 py-3 bg-zinc-50 rounded-xl font-medium text-zinc-900 text-sm border border-zinc-200 outline-none focus:ring-2 focus:ring-amber-500 focus:bg-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-zinc-600 uppercase tracking-wider mb-1">
+                    Observação (Opcional)
+                  </label>
+                  <input
+                    type="text"
+                    value={substituteFormObs}
+                    onChange={(e) => setSubstituteFormObs(e.target.value)}
+                    placeholder="Ex: Cobertura de ausência autorizada pelo síndico"
+                    className="w-full px-4 py-3 bg-zinc-50 rounded-xl font-medium text-zinc-900 text-sm border border-zinc-200 outline-none focus:ring-2 focus:ring-amber-500 focus:bg-white"
+                  />
+                </div>
+
+                <div className="pt-2 flex gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setShowSubstituteFormModal(false)}
+                    className="flex-1 py-3.5 bg-zinc-100 hover:bg-zinc-200 text-zinc-700 rounded-xl font-bold transition-all text-sm"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="submit"
+                    className="flex-1 py-3.5 bg-amber-500 hover:bg-amber-600 text-white rounded-xl font-bold transition-all text-sm shadow-md active:scale-95 flex items-center justify-center gap-1.5"
+                  >
+                    <Check className="w-4 h-4" />
+                    <span>Assumir Plantão</span>
+                  </button>
+                </div>
+              </form>
             </motion.div>
           </div>
         )}
@@ -3680,7 +4374,7 @@ const isValidUuid = (id?: string | null): boolean => {
                           <span>{itemCarrier}</span>
                         </>
                       ) : (
-                        <span>Encomenda #{idx + 1}</span>
+                        <span>Encomenda</span>
                       )}
                     </p>
                     <p className="text-xs text-zinc-500">Recebido em {formatSafeDateTime(pkg.received_at)}</p>
@@ -3695,6 +4389,10 @@ const isValidUuid = (id?: string | null): boolean => {
 
             <button 
               onClick={() => {
+                if (!isPackageNotified(selectedGroup)) {
+                  guideToNotification(selectedGroup);
+                  return;
+                }
                 setDeliveredToType('resident');
                 setAuthorizedName('');
                 setAuthorizedDoc('');

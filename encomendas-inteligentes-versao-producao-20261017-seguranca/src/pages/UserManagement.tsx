@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
-import { api } from '../lib/apiClient';
+import { api, generateSecureTempPassword } from '../lib/apiClient';
 import { Profile, Role, Condominium } from '../types';
 import { 
   Shield, Plus, Loader2, Search, User, Phone, 
@@ -101,7 +101,8 @@ export default function UserManagement({ user }: UserManagementProps) {
         condominium_id: u.condominium_id || '',
         active: u.active,
         horario_inicio: u.horario_inicio || '',
-        horario_fim: u.horario_fim || ''
+        horario_fim: u.horario_fim || '',
+        escala_tipo: (u.escala_tipo as any) || ''
       });
     } else {
       setEditingUser(null);
@@ -113,7 +114,8 @@ export default function UserManagement({ user }: UserManagementProps) {
         condominium_id: user.role === 'sindico' ? user.condominium_id : (condos[0]?.id || ''),
         active: true,
         horario_inicio: '',
-        horario_fim: ''
+        horario_fim: '',
+        escala_tipo: ''
       });
     }
     setShowModal(true);
@@ -125,15 +127,7 @@ export default function UserManagement({ user }: UserManagementProps) {
       const { data: { session } } = await supabase.auth.getSession();
       if (session) return session;
 
-      // 2. Check for Mock User (AI Studio Preview) fallback
-      if (user && user.id) {
-        return {
-          access_token: 'MOCK_TOKEN',
-          user: { id: user.id, email: user.email || 'demo@example.com' }
-        } as any;
-      }
-
-      // 3. Fallback to getUser()
+      // 2. Fallback to getUser()
       const { data: { user: authUser } } = await supabase.auth.getUser();
       if (authUser) {
         const { data: { session: refreshed } } = await supabase.auth.getSession();
@@ -239,7 +233,7 @@ export default function UserManagement({ user }: UserManagementProps) {
         toast.success('Usuário atualizado com sucesso! ✅', { id: loadingToast });
       } else {
         // Create new user with temporary password
-        const tempPassword = Math.random().toString(36).slice(-8);
+        const tempPassword = generateSecureTempPassword(12);
         console.log("[DEBUG FRONTEND] Criando novo usuário com senha temporária");
         
         const response = await fetch('/api/admin/users', {
@@ -322,7 +316,7 @@ export default function UserManagement({ user }: UserManagementProps) {
       const session = await getValidSession();
       if (!session) throw new Error('Sessão não encontrada. Recarregue a página.');
 
-      const newTempPassword = Math.random().toString(36).slice(-8) + Math.random().toString(36).slice(-4);
+      const newTempPassword = generateSecureTempPassword(12);
 
       const response = await fetch(`/api/admin/users/${target.id}/reset-password`, {
         method: 'POST',
@@ -404,20 +398,25 @@ export default function UserManagement({ user }: UserManagementProps) {
         throw new Error(resData.error || 'Erro ao excluir usuário');
       }
 
-      registrarAuditoria({
-        condominio_id: user.condominium_id || target.condominium_id || '',
-        usuario_id: user.id,
-        usuario_nome: user.full_name,
-        usuario_perfil: user.role,
-        tipo_evento: 'USUARIO_EXCLUIDO',
-        acao: 'DELETE',
-        tabela_afetada: 'profiles',
-        registro_id: target.id,
-        descricao: `Usuário ${target.full_name} (${target.role}) foi excluído permanentemente do sistema.`,
-        metodo: 'MANUAL'
-      }).catch(() => {});
+      if (resData?.softDeleted) {
+        setUsers(cachedUsers.map(item => item.id === target.id ? { ...item, active: false } : item));
+        toast.success(resData.message || `Usuário ${target.full_name} inativado preservando o histórico operacional.`);
+      } else {
+        registrarAuditoria({
+          condominio_id: user.condominium_id || target.condominium_id || '',
+          usuario_id: user.id,
+          usuario_nome: user.full_name,
+          usuario_perfil: user.role,
+          tipo_evento: 'USUARIO_EXCLUIDO',
+          acao: 'DELETE',
+          tabela_afetada: 'profiles',
+          registro_id: target.id,
+          descricao: `Usuário ${target.full_name} (${target.role}) foi excluído permanentemente do sistema.`,
+          metodo: 'MANUAL'
+        }).catch(() => {});
 
-      toast.success(`Usuário ${target.full_name} excluído com sucesso ✅`);
+        toast.success(`Usuário ${target.full_name} excluído com sucesso ✅`);
+      }
       setDeleteConfirmUser(null);
     } catch (error: any) {
       console.error("Erro ao excluir usuário:", error);
@@ -526,6 +525,9 @@ export default function UserManagement({ user }: UserManagementProps) {
 
   const filteredUsers = (users || []).filter(u => {
     if (!u) return false;
+    // ITEM 6: Na listagem geral /users, exibir somente ADMIN e SÍNDICO. Não mostrar PORTEIROS.
+    const userRole = normalizeRole(u.role);
+    if (userRole === 'porteiro') return false;
     const term = (searchTerm || '').toLowerCase().trim();
     const nameStr = (u.full_name || '').toLowerCase();
     const phoneStr = (u.phone || '').toLowerCase();
@@ -550,7 +552,7 @@ export default function UserManagement({ user }: UserManagementProps) {
           <h1 className="text-3xl font-bold text-zinc-900">Usuários</h1>
           <p className="text-zinc-500">Controle de acesso para administradores, síndicos e porteiros</p>
         </div>
-        {user.role === 'admin' && (
+        {normalizeRole(user.role) === 'admin' && (
           <button
             onClick={() => handleOpenModal()}
             className="bg-emerald-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-emerald-700 transition-all flex items-center gap-2"
@@ -625,7 +627,7 @@ export default function UserManagement({ user }: UserManagementProps) {
                   </td>
                   <td className="px-6 py-4 text-right relative">
                     <div className="flex items-center justify-end">
-                      {user.role === 'admin' || user.role === 'sindico' ? (
+                      {normalizeRole(user.role) === 'admin' ? (
                         <div className="relative">
                           <button 
                             onClick={(e) => {

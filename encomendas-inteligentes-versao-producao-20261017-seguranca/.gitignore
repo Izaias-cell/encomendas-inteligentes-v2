@@ -1,0 +1,11 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+public/downloads/
+.vercel/
+/encomendas-inteligentes-final-validado-2026-09-18.zip

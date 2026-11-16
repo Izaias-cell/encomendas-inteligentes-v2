@@ -1,4 +1,4 @@
-import { supabase } from '../lib/supabase';
+import { api } from '../lib/apiClient';
 import { Morador } from '../types';
 
 export interface ScoredResident {
@@ -218,12 +218,13 @@ export const findMatchingResidents = async (
   // 1. Usar moradores em memória se disponíveis, evitando consulta repetida ao Supabase
   let allResidents: Morador[] = cachedResidents || [];
   if (!allResidents || allResidents.length === 0) {
-    const { data } = await supabase
-      .from('moradores')
-      .select('*')
-      .eq('condominium_id', condominiumId)
-      .eq('ativo', true);
-    allResidents = data || [];
+    try {
+      const qs = condominiumId ? `?condominiumId=${encodeURIComponent(condominiumId)}` : '';
+      const res = await api.get<{ moradores?: Morador[] }>(`/api/operational/moradores${qs}`);
+      allResidents = res.ok && res.data?.moradores ? res.data.moradores : [];
+    } catch {
+      allResidents = [];
+    }
   }
 
   if (!allResidents || allResidents.length === 0) return [];

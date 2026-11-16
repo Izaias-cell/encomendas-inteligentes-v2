@@ -26,17 +26,18 @@ export default function ChangePassword({ onUpdateUser }: { onUpdateUser?: (profi
     setLoading(true);
     try {
       const { data: { session } } = await supabase.auth.getSession();
-      const token = session?.access_token || 'MOCK_TOKEN';
+      if (!session?.access_token) {
+        throw new Error('Sessão expirada. Faça login novamente.');
+      }
 
       const response = await fetch('/api/auth/change-password', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
+          'Authorization': `Bearer ${session.access_token}`
         },
         body: JSON.stringify({
-          newPassword: password,
-          userId: session?.user?.id
+          newPassword: password
         })
       });
 

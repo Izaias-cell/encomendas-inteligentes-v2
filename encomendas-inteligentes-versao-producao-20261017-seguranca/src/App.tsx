@@ -11,7 +11,7 @@ import { QRCodeSVG } from 'qrcode.react';
 import { Html5Qrcode } from 'html5-qrcode';
 
 import { Routes, Route, useNavigate, Navigate, useLocation } from 'react-router-dom';
-import { api } from './lib/apiClient';
+import { api, generateSecureToken, getStoredPortariaToken, setStoredPortariaToken, clearStoredPortariaToken } from './lib/apiClient';
 import ResidentPortal from './components/ResidentPortal';
 import Retirada from './pages/Retirada';
 import { analyzePackageLabel } from './services/geminiService';
@@ -309,8 +309,8 @@ const LoginPage = ({ onLogin }: any) => {
     setActivatingPortaria(true);
     setError(null);
     try {
-      const res = await api.post('/api/portaria/activate', { access_code: code.trim() });
-      if (res && res.data && res.data.success && res.data.condominium) {
+      const res = await api.post('/api/portaria/activate', { access_code: code.trim() }, { skipAuth: true });
+      if (res && res.ok && res.data && res.data.success && res.data.condominium) {
         setPendingPortariaActivation({
           condominium: res.data.condominium,
           access_code: code.trim().toUpperCase()
@@ -334,13 +334,9 @@ const LoginPage = ({ onLogin }: any) => {
 
     setActivatingPortaria(true);
     try {
-      const res = await api.post('/api/portaria/confirm-link', { access_code });
-      if (res && res.data && res.data.success && res.data.portaria_token) {
-        if (permanent) {
-          localStorage.setItem('encomendas_portaria_token', res.data.portaria_token);
-        } else {
-          localStorage.removeItem('encomendas_portaria_token');
-        }
+      const res = await api.post('/api/portaria/confirm-link', { access_code }, { skipAuth: true });
+      if (res && res.ok && res.data && res.data.success && res.data.portaria_token) {
+        setStoredPortariaToken(res.data.portaria_token, permanent);
 
         const portariaProfile: Profile = {
           id: `portaria-${condominium.id}`,
@@ -359,9 +355,11 @@ const LoginPage = ({ onLogin }: any) => {
         toast.success(`Portaria ativada: ${condominium.name}`);
         navigate('/portaria');
       } else {
-        toast.error(res?.data?.error || "Erro ao vincular portaria.");
+        clearStoredPortariaToken();
+        toast.error(res?.data?.error || res?.error || "Erro ao vincular portaria.");
       }
     } catch (err: any) {
+      clearStoredPortariaToken();
       toast.error(err.message || "Erro ao conectar portaria.");
     } finally {
       setActivatingPortaria(false);
@@ -617,19 +615,30 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
   };
 
   const fetchResidents = async () => {
-    let query = supabase
-      .from('profiles')
-      .select('*')
-      .eq('condominium_id', user.condominium_id)
-      .eq('role', 'resident');
-    
-    // Porteiro only sees active residents
-    if (user.role === 'porteiro') {
-      query = query.eq('active', true);
+    if (!user?.condominium_id) return;
+    try {
+      const includeInactive = user.role === 'porteiro' ? 'false' : 'true';
+      const res = await api.get(`/api/operational/moradores?includeInactive=${includeInactive}&condominiumId=${encodeURIComponent(user.condominium_id)}`);
+      if (res.ok && Array.isArray(res.data?.moradores)) {
+        const mapped = res.data.moradores.map((m: any) => ({
+          id: m.id,
+          full_name: m.nome || '',
+          unit_number: m.unidade || '',
+          unidade: m.unidade || '',
+          unit_type: m.unit_type || '',
+          block: m.block || m.bloco || '',
+          tower: m.lote || '',
+          complement: m.observacoes || '',
+          phone: m.telefone || '',
+          role: 'resident',
+          condominium_id: m.condominium_id,
+          active: m.ativo !== false
+        }));
+        setResidents(mapped);
+      }
+    } catch (err) {
+      console.error('Erro ao buscar moradores:', err);
     }
-    
-    const { data } = await query.order('full_name');
-    if (data) setResidents(data);
   };
 
   const UNIT_SYNONYMS: Record<string, string> = {
@@ -768,21 +777,26 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
         finalData.unit_number = parts.join('-').toUpperCase();
       }
 
+      const moradorPayload = {
+        nome: finalData.full_name,
+        unidade: finalData.unit_number,
+        unit_type: finalData.unit_type || undefined,
+        block: finalData.block || undefined,
+        bloco: finalData.block || undefined,
+        lote: finalData.tower || undefined,
+        observacoes: finalData.complement || undefined,
+        telefone: finalData.phone,
+        ativo: finalData.active !== false,
+        condominium_id: user.condominium_id
+      };
+
       if (editingResidentId) {
-        const { error } = await supabase
-          .from('profiles')
-          .update(finalData)
-          .eq('id', editingResidentId);
-        if (error) throw error;
+        const res = await api.patch(`/api/operational/moradores/${editingResidentId}`, moradorPayload);
+        if (!res.ok) throw new Error(res.error || 'Erro ao atualizar morador');
         toast.success("Morador atualizado!");
       } else {
-        const { error } = await supabase
-          .from('profiles')
-          .insert([{ 
-            ...finalData, 
-            condominium_id: user.condominium_id 
-          }]);
-        if (error) throw error;
+        const res = await api.post('/api/operational/moradores', moradorPayload);
+        if (!res.ok) throw new Error(res.error || 'Erro ao cadastrar morador');
         toast.success("Morador cadastrado com sucesso!");
       }
       fetchResidents();
@@ -887,14 +901,14 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
     setQrScanStatus('validating');
     setLoading(true);
     try {
-      const { data, error } = await supabase
-        .from('packages')
-        .select('*, package_id:id, unit_label:unit_number')
-        .eq('condominium_id', user.condominium_id)
-        .or(`pickup_token.eq.${decodedText},pickup_code.eq.${decodedText},id.eq.${decodedText}`)
-        .maybeSingle();
+      const cleanLookup = decodedText.trim();
+      const lookupRes = await api.get(
+        `/api/operational/packages?status=all&lookup=${encodeURIComponent(cleanLookup)}&condominiumId=${encodeURIComponent(user.condominium_id)}`
+      );
 
-      if (error) throw error;
+      if (!lookupRes.ok) throw new Error(lookupRes.error || 'Erro ao validar QR Code');
+      const foundList = lookupRes.data?.packages || [];
+      const data = foundList[0] || null;
       if (!data) {
         setQrScanStatus('error');
         toast.error("QR Code inválido ou de outro condomínio");
@@ -936,14 +950,13 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
   };
 
   const fetchRecentRetrievals = async () => {
-    const { data } = await supabase
-      .from('packages')
-      .select('*')
-      .eq('condominium_id', user.condominium_id)
-      .eq('status', 'delivered')
-      .order('delivered_at', { ascending: false })
-      .limit(5);
-    if (data) setRecentRetrievals(data);
+    if (!user?.condominium_id) return;
+    const res = await api.get(
+      `/api/operational/packages?status=delivered&limit=5&condominiumId=${encodeURIComponent(user.condominium_id)}`
+    );
+    if (res.ok && Array.isArray(res.data?.packages)) {
+      setRecentRetrievals(res.data.packages);
+    }
   };
 
   const onScanFailure = (error: any) => {
@@ -954,41 +967,24 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
     if (!qrPackage) return;
     setLoading(true);
     try {
-      // Obter o usuário logado para capturar o ID se disponível (opcional)
-      const { data: { user: authUser } } = await supabase.auth.getUser();
+      const porterName = (getCurrentPorter(user?.condominium_id) && getCurrentPorter(user?.condominium_id) !== 'Selecione o Porteiro')
+        ? getCurrentPorter(user?.condominium_id)
+        : user.full_name;
 
-      const validDeliveredBy = (authUser?.id && isValidUuid(authUser.id)) 
-        ? authUser.id 
-        : (user?.id && isValidUuid(user.id) ? user.id : null);
+      const deliverRes = await api.post('/api/operational/packages/deliver', {
+        packageId: qrPackage.id,
+        condominiumId: user.condominium_id,
+        pickupToken: qrPackage.pickup_token,
+        pickupCode: qrPackage.pickup_code,
+        recipientId: qrPackage.recipient_id,
+        deliveryMethod: 'qr_code',
+        deliveredToName: 'Morador (Confirmado)',
+        porterName,
+        ...(deliveryPhoto && deliveryPhoto.startsWith('data:image/') ? { photoBase64: deliveryPhoto } : {}),
+        ...(deliveryPhoto && !deliveryPhoto.startsWith('data:image/') ? { deliveryPhotoUrl: deliveryPhoto } : {}),
+      });
 
-      const { error } = await supabase
-        .from('packages')
-        .update({ 
-          status: 'delivered', 
-          delivered_at: new Date().toISOString(),
-          delivered_by: validDeliveredBy,
-          entregue_por: (getCurrentPorter(user?.condominium_id) && getCurrentPorter(user?.condominium_id) !== 'Selecione o Porteiro') ? getCurrentPorter(user?.condominium_id) : user.full_name,
-          pickup_qr_code: 'used',
-          delivered_to_name: 'Morador (Confirmado)',
-          ...(deliveryPhoto ? { delivery_photo_url: deliveryPhoto } : {})
-        })
-        .eq('id', qrPackage.id);
-
-      if (error) throw error;
-
-      // Log retrieval
-      try {
-        await supabase.from('retrieval_logs').insert([{
-          package_id: qrPackage.id,
-          porter_id: validDeliveredBy,
-          condominium_id: user.condominium_id,
-          delivery_method: 'qr_code',
-          token_used: qrPackage.pickup_token,
-          status: 'success'
-        }]);
-      } catch (logErr) {
-        console.warn('Erro ao salvar retrieval_log:', logErr);
-      }
+      if (!deliverRes.ok) throw new Error(deliverRes.error || 'Erro ao confirmar retirada');
 
       toast.success("Retirada confirmada com sucesso!");
       setQrScanStatus('success');
@@ -1009,13 +1005,12 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
 
   const fetchPackages = async () => {
     if (!user?.condominium_id) return;
-    const { data, error } = await supabase
-      .from('packages')
-      .select('*, registrar:received_by(full_name), package_id:id, unit_label:unit_number')
-      .eq('condominium_id', user.condominium_id)
-      .order('created_at', { ascending: false });
-    
-    if (data) setPackages(data);
+    const res = await api.get(
+      `/api/operational/packages?status=all&limit=200&condominiumId=${encodeURIComponent(user.condominium_id)}`
+    );
+    if (res.ok && Array.isArray(res.data?.packages)) {
+      setPackages(res.data.packages);
+    }
   };
 
   const startCamera = async () => {
@@ -1145,45 +1140,37 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
     try {
       let photoUrl = null;
 
-      // 1. Upload da foto
+      // 1. Upload da foto via backend operacional
       if (capturedImage) {
         try {
-          // Converter base64 para Blob de forma robusta
-          const res = await fetch(capturedImage);
-          const blob = await res.blob();
-          
-          // Nome de arquivo único para evitar colisões
-          const fileName = `package_${Date.now()}_${Math.random().toString(36).substring(7)}.jpg`;
-
-          const { data: uploadData, error: uploadError } = await supabase.storage
-            .from('packages')
-            .upload(fileName, blob, {
-              contentType: 'image/jpeg',
-              cacheControl: '3600',
-              upsert: false
-            });
-          
-          if (uploadError) {
-            console.error("Erro no upload Supabase:", uploadError);
-            // Não interrompe o fluxo se o storage falhar, apenas loga
+          const uploadRes = await api.post('/api/operational/upload-photo', {
+            imageBase64: capturedImage,
+            folder: 'package-photos'
+          });
+          if (uploadRes.ok && uploadRes.data?.publicUrl) {
+            photoUrl = uploadRes.data.publicUrl;
           } else {
-            const { data: { publicUrl } } = supabase.storage.from('packages').getPublicUrl(fileName);
-            photoUrl = publicUrl;
+            console.error("Erro no upload:", uploadRes.error);
           }
         } catch (storageErr: any) {
           console.warn("Storage não configurado ou erro no upload:", storageErr);
-          // Não interrompe o fluxo principal se a foto falhar
         }
       }
 
-      // 2. Salvar no Supabase (Sempre persiste primeiro)
-      const qrToken = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
-      
-      // Obter o usuário logado para capturar o ID se disponível (opcional)
-      const { data: { user: authUser } } = await supabase.auth.getUser();
+      // 2. Salvar via /api/packages/create
+      const qrToken = generateSecureToken(16);
+      const porterName = (getCurrentPorter(user?.condominium_id) && getCurrentPorter(user?.condominium_id) !== 'Selecione o Porteiro')
+        ? getCurrentPorter(user?.condominium_id)
+        : user.full_name;
+
+      let targetResident = matchingResidents.find(r => r.resident.id === selectedResidentId)?.resident;
+      if (!targetResident && matchingResidents.length === 1) {
+        targetResident = matchingResidents[0].resident;
+      }
 
       const basePackageData: any = {
         condominium_id: user.condominium_id,
+        recipient_id: targetResident?.id || null,
         unit_number: analyzedData?.unitNumber || '',
         unit_type: analyzedData?.unitDetails?.type || null,
         block: analyzedData?.unitDetails?.block || null,
@@ -1193,11 +1180,11 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
         tracking_code: analyzedData?.trackingNumber || '',
         photo_url: photoUrl,
         status: 'received',
-        whatsapp_notified: true,
-        whatsapp_sent: true,
-        notified_at: new Date().toISOString(),
-        recebido_por: (getCurrentPorter(user?.condominium_id) && getCurrentPorter(user?.condominium_id) !== 'Selecione o Porteiro') ? getCurrentPorter(user?.condominium_id) : user.full_name,
-        porter_name: (getCurrentPorter(user?.condominium_id) && getCurrentPorter(user?.condominium_id) !== 'Selecione o Porteiro') ? getCurrentPorter(user?.condominium_id) : user.full_name,
+        whatsapp_notified: false,
+        whatsapp_sent: false,
+        notified_at: null,
+        recebido_por: porterName,
+        porter_name: porterName,
         notes: notes || null,
         pickup_token: qrToken,
         pickup_qr_code: 'active',
@@ -1205,81 +1192,56 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
         whatsapp_status: 'pending'
       };
 
-      if (user?.id) {
+      if (user?.id && isValidUuid(user.id)) {
         basePackageData.received_by = user.id;
-      }
-      if (authUser?.id) {
-        basePackageData.registered_by = authUser.id;
+        basePackageData.registered_by = user.id;
       }
 
-      let insertPkgRes = await supabase
-        .from('packages')
-        .insert([basePackageData])
-        .select()
-        .single();
+      const createRes = await api.post('/api/packages/create', {
+        packages: [basePackageData],
+        recipientId: targetResident?.id || undefined,
+        condominiumId: user.condominium_id
+      });
 
-      if (insertPkgRes.error && (insertPkgRes.error.code === '23503' || insertPkgRes.error.message?.includes('foreign key constraint'))) {
-        const fallbackData = { ...basePackageData };
-        delete fallbackData.received_by;
-        delete fallbackData.registered_by;
-        insertPkgRes = await supabase
-          .from('packages')
-          .insert([fallbackData])
-          .select()
-          .single();
+      if (!createRes.ok || !createRes.data?.packages?.[0]) {
+        throw new Error(createRes.error || 'Erro ao registrar encomenda');
       }
-
-      const { data: pkg, error } = insertPkgRes;
-
-      if (error) throw error;
+      const pkg = createRes.data.packages[0];
 
       // 3. Notificar via WhatsApp
       let whatsappNotConfigured = false;
-      
-      // Busca o perfil do morador selecionado ou tenta encontrar um se não houver seleção
-      let targetResident = matchingResidents.find(r => r.resident.id === selectedResidentId)?.resident;
-      
-      if (!targetResident && matchingResidents.length === 1) {
-        targetResident = matchingResidents[0].resident;
-      }
 
       if (targetResident?.phone) {
         try {
-          const { data: { session } } = await supabase.auth.getSession();
-          const response = await fetch('/api/notify-resident', {
-            method: 'POST',
-            headers: { 
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${session?.access_token}`
-            },
-            body: JSON.stringify({
-              phone: targetResident.phone, 
-              residentName: targetResident.full_name,
-              unitNumber: analyzedData.unitNumber,
-              carrier: analyzedData.carrier,
-              trackingNumber: analyzedData.trackingNumber,
-              packageId: pkg.id,
-              condominiumId: user.condominium_id
-            })
+          const notifyRes = await api.post('/api/notify-resident', {
+            phone: targetResident.phone, 
+            residentName: targetResident.full_name,
+            unitNumber: analyzedData.unitNumber,
+            carrier: analyzedData.carrier,
+            trackingNumber: analyzedData.trackingNumber,
+            packageId: pkg.id,
+            condominiumId: user.condominium_id
           });
           
-          const result = await response.json();
+          const result = notifyRes.data || {};
           if (result.notConfigured) {
             whatsappNotConfigured = true;
-            // Atualiza status para indicar que falta configuração
-            await supabase.from('packages').update({ 
-              whatsapp_status: 'pending_configuration' 
-            }).eq('id', pkg.id);
+            await api.post('/api/operational/packages/whatsapp-status', {
+              packageIds: [pkg.id],
+              fields: { whatsapp_status: 'pending_configuration' },
+              condominiumId: user.condominium_id
+            });
           }
         } catch (notifyErr) {
           console.warn("Erro ao notificar:", notifyErr);
         }
       } else {
         console.warn("Nenhum morador com telefone encontrado para notificação.");
-        // Se não houver telefone, marca como falha de notificação (sem destinatário)
-        await supabase.from('packages').update({ 
-          whatsapp_status: 'no_recipient' 
-        }).eq('id', pkg.id);
+        await api.post('/api/operational/packages/whatsapp-status', {
+          packageIds: [pkg.id],
+          fields: { whatsapp_status: 'no_recipient' },
+          condominiumId: user.condominium_id
+        });
       }
 
       if (whatsappNotConfigured) {
@@ -1303,76 +1265,57 @@ const PorteiroDashboard = ({ user }: { user: Profile }) => {
     const pkg = packages.find(p => p.id === pkgId);
     if (!pkg) return;
 
-    // Obter o usuário logado para capturar o ID se disponível (opcional)
-    const { data: { user: authUser } } = await supabase.auth.getUser();
-    const validDeliveredBy = (authUser?.id && isValidUuid(authUser.id)) 
-      ? authUser.id 
-      : (user?.id && isValidUuid(user.id) ? user.id : null);
+    const porterName = (getCurrentPorter(user?.condominium_id) && getCurrentPorter(user?.condominium_id) !== 'Selecione o Porteiro')
+      ? getCurrentPorter(user?.condominium_id)
+      : user.full_name;
 
-    const { error } = await supabase
-      .from('packages')
-      .update({ 
-        status: 'delivered', 
-        delivered_at: new Date().toISOString(),
-        delivered_by: validDeliveredBy,
-        entregue_por: (getCurrentPorter(user?.condominium_id) && getCurrentPorter(user?.condominium_id) !== 'Selecione o Porteiro') ? getCurrentPorter(user?.condominium_id) : user.full_name,
-        delivered_to_name: 'Morador (Manual)'
-      })
-      .eq('id', pkgId);
-    
-    if (!error) {
-      // Log retrieval
-      try {
-        await supabase.from('retrieval_logs').insert([{
-          package_id: pkgId,
-          porter_id: validDeliveredBy,
-          condominium_id: user.condominium_id,
-          delivery_method: 'manual',
-          status: 'success'
-        }]);
-      } catch (logErr) {
-        console.warn('Erro ao salvar retrieval_log:', logErr);
-      }
+    const deliverRes = await api.post('/api/operational/packages/deliver', {
+      packageId: pkgId,
+      condominiumId: user.condominium_id,
+      pickupToken: pkg.pickup_token,
+      pickupCode: pkg.pickup_code,
+      recipientId: pkg.recipient_id,
+      deliveryMethod: 'manual',
+      deliveredToName: 'Morador (Manual)',
+      porterName
+    });
 
+    if (deliverRes.ok) {
       toast.success("Entrega confirmada!");
       fetchPackages();
     } else {
-      console.error("Erro ao confirmar entrega:", error);
-      toast.error(`Erro ao confirmar entrega: ${error.message}`);
+      console.error("Erro ao confirmar entrega:", deliverRes.error);
+      toast.error(`Erro ao confirmar entrega: ${deliverRes.error || 'Falha na operação'}`);
     }
   };
 
   const resendNotification = async (pkg: PackageType) => {
     setLoading(true);
     try {
-      const { data: residentProfile } = await supabase
-        .from('profiles')
-        .select('phone, full_name')
-        .eq('unit_number', pkg.unit_number)
-        .eq('condominium_id', user.condominium_id)
-        .eq('role', 'resident')
-        .maybeSingle();
+      const morRes = await api.get(
+        `/api/operational/moradores?includeInactive=true&condominiumId=${encodeURIComponent(user.condominium_id)}`
+      );
+      const moradores = morRes.ok ? (morRes.data?.moradores || []) : [];
+      const residentProfile = moradores.find((m: any) =>
+        (pkg.recipient_id && m.id === pkg.recipient_id) ||
+        (pkg.unit_number && m.unidade === pkg.unit_number)
+      );
 
-      if (residentProfile?.phone) {
-        const { data: { session } } = await supabase.auth.getSession();
-        const response = await fetch('/api/notify-resident', {
-          method: 'POST',
-          headers: { 
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${session?.access_token}`
-          },
-          body: JSON.stringify({
-            phone: residentProfile.phone, 
-            residentName: residentProfile.full_name,
-            unitNumber: pkg.unit_number,
-            carrier: pkg.carrier,
-            trackingNumber: pkg.tracking_code,
-            packageId: pkg.id
-          })
+      if (residentProfile?.telefone) {
+        const notifyRes = await api.post('/api/notify-resident', {
+          phone: residentProfile.telefone, 
+          residentName: residentProfile.nome,
+          unitNumber: pkg.unit_number,
+          carrier: pkg.carrier,
+          trackingNumber: pkg.tracking_code,
+          packageId: pkg.id,
+          condominiumId: user.condominium_id
         });
 
-        const result = await response.json();
-        if (result.notConfigured) {
+        const result = notifyRes.data || {};
+        if (!notifyRes.ok && !result.notConfigured) {
+          toast.error(notifyRes.error || "Falha ao reenviar notificação.");
+        } else if (result.notConfigured) {
           toast.error("WhatsApp ainda não configurado.");
         } else {
           toast.success("Notificação reenviada!");
@@ -2286,16 +2229,17 @@ const ResidentDashboard = ({ user }: { user: Profile }) => {
 
   useEffect(() => {
     const fetchMyPackages = async () => {
-      const { data } = await supabase
-        .from('packages')
-        .select('*')
-        .eq('unit_number', user.unidade)
-        .eq('condominium_id', user.condominium_id)
-        .order('received_at', { ascending: false });
-      if (data) setPackages(data);
+      try {
+        const res = await api.get('/api/portal/my-packages');
+        if (res.ok && Array.isArray(res.data?.packages)) {
+          setPackages(res.data.packages);
+        }
+      } catch (err) {
+        console.error('Erro ao carregar minhas encomendas:', err);
+      }
     };
     fetchMyPackages();
-  }, [user.unidade]);
+  }, [user.unidade, user.condominium_id]);
 
   return (
     <div className="p-6 max-w-2xl mx-auto">
@@ -2415,6 +2359,7 @@ export default function App() {
   const handleLogout = async () => {
     clearActivePlantao();
     clearManualPorter();
+    clearStoredPortariaToken();
     await supabase.auth.signOut();
     setUser(null);
   };
@@ -2443,13 +2388,65 @@ const AppLayout = ({ user, loading, setUser, handleLogout }: any) => {
   const navigate = useNavigate();
   const location = useLocation();
 
+  const invalidatePortariaSession = useCallback((message?: string) => {
+    clearStoredPortariaToken();
+    clearActivePlantao();
+    clearManualPorter();
+    setUser((prev: Profile | null) => {
+      if (prev && prev.id?.startsWith('portaria-')) {
+        return null;
+      }
+      return prev;
+    });
+    if (message) {
+      toast.error(message);
+    }
+  }, [setUser]);
+
   useEffect(() => {
-    // Check permanent portaria token on startup if user is null
-    const token = localStorage.getItem('encomendas_portaria_token');
-    if (token && !user && !loading) {
-      api.get(`/api/portaria/validate-token/${token}`)
-        .then(res => {
-          if (res && res.data && res.data.success && res.data.condominium) {
+    const onInvalidated = (ev: Event) => {
+      const detail = (ev as CustomEvent)?.detail;
+      invalidatePortariaSession(
+        detail?.error || "Sessão da portaria desativada pelo administrador. Por favor, informe o novo código."
+      );
+    };
+    window.addEventListener('portaria-session-invalidated', onInvalidated);
+    return () => window.removeEventListener('portaria-session-invalidated', onInvalidated);
+  }, [invalidatePortariaSession]);
+
+  useEffect(() => {
+    if (loading) return;
+
+    const isPortariaSessionUser = Boolean(user && typeof user.id === 'string' && user.id.startsWith('portaria-'));
+    const token = getStoredPortariaToken();
+
+    if (isPortariaSessionUser && !token) {
+      invalidatePortariaSession("Sessão da portaria expirada ou removida. Faça nova ativação.");
+      return;
+    }
+
+    if (!token || (user && !isPortariaSessionUser)) return;
+
+    let cancelled = false;
+
+    const validateCurrentToken = async () => {
+      const currentToken = getStoredPortariaToken();
+      if (!currentToken) {
+        if (isPortariaSessionUser && !cancelled) {
+          invalidatePortariaSession("Sessão da portaria encerrada. Faça nova ativação.");
+        }
+        return;
+      }
+
+      try {
+        const res = await api.get(`/api/portaria/validate-token/${encodeURIComponent(currentToken)}`, {
+          skipAuth: true,
+          retries: 1
+        });
+        if (cancelled) return;
+
+        if (res && res.ok && res.data && res.data.success && res.data.condominium) {
+          if (!user) {
             const condo = res.data.condominium;
             const portariaProfile: Profile = {
               id: `portaria-${condo.id}`,
@@ -2462,18 +2459,37 @@ const AppLayout = ({ user, loading, setUser, handleLogout }: any) => {
               created_at: new Date().toISOString()
             };
             setUser(portariaProfile);
-          } else {
-            localStorage.removeItem('encomendas_portaria_token');
-            if (res && res.data && res.data.code === 'PORTARIA_DEACTIVATED') {
-              toast.error("Sessão da portaria desativada pelo administrador. Por favor, informe o novo código.");
-            }
           }
-        })
-        .catch(() => {
-          // Fallback to standard login
-        });
-    }
-  }, [user, loading, setUser]);
+        } else if (res && (res.status === 401 || res.status === 403 || res.data?.code === 'PORTARIA_DEACTIVATED')) {
+          invalidatePortariaSession(
+            res.data?.error || "Sessão da portaria desativada pelo administrador. Por favor, informe o novo código."
+          );
+        }
+      } catch {
+        // Transient network error: do not fabricate valid session when !user
+      }
+    };
+
+    validateCurrentToken();
+
+    if (!isPortariaSessionUser) return;
+
+    const intervalId = window.setInterval(validateCurrentToken, 30000);
+    const handleVisibilityOrFocus = () => {
+      if (document.visibilityState === 'visible') {
+        validateCurrentToken();
+      }
+    };
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+    };
+  }, [user, loading, setUser, invalidatePortariaSession]);
 
   useEffect(() => {
     // Role-based initial redirection
@@ -2674,7 +2690,7 @@ const AppLayout = ({ user, loading, setUser, handleLogout }: any) => {
               return (role === 'porteiro' || role === 'sindico' || role === 'admin') ? <Portaria user={user} /> : <Navigate to="/dashboard" />
             })()
           } />
-          <Route path="/condominiums" element={<CondominiumList user={user} />} />
+          <Route path="/condominiums" element={<CondominiumList user={user} onUpdateUser={setUser} />} />
           <Route path="/condominiums/new" element={<CondominiumNew user={user} onUpdateUser={setUser} />} />
           <Route path="/profiles" element={<ProfileList user={user} />} />
           <Route path="/profiles/new" element={<ProfileNew user={user} />} />

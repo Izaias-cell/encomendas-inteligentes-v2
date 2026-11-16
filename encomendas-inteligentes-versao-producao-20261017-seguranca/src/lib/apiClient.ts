@@ -14,27 +14,114 @@ export interface ApiResponse<T = any> {
   hasDependencies?: boolean;
 }
 
-/**
- * Gets a valid authentication bearer token from Supabase session,
- * falling back to MOCK_TOKEN if unauthenticated or offline.
- */
-export async function getValidAuthToken(): Promise<string> {
+export const PORTARIA_TOKEN_STORAGE_KEY = 'encomendas_portaria_token';
+const LEGACY_PORTARIA_TOKEN_KEYS = ['portaria_token', 'portaria_session'];
+
+export function generateSecureToken(byteLength: number = 16): string {
+  const bytes = new Uint8Array(Math.max(16, byteLength));
+  const cryptoObj = typeof globalThis !== 'undefined' ? (globalThis as any).crypto : undefined;
+  if (cryptoObj && typeof cryptoObj.getRandomValues === 'function') {
+    cryptoObj.getRandomValues(bytes);
+  } else {
+    throw new Error('Web Crypto API indisponível para geração segura de token.');
+  }
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+export function generateSecureTempPassword(length: number = 12): string {
+  const charset = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$';
+  const targetLen = Math.max(10, length);
+  const bytes = new Uint8Array(targetLen);
+  const cryptoObj = typeof globalThis !== 'undefined' ? (globalThis as any).crypto : undefined;
+  if (cryptoObj && typeof cryptoObj.getRandomValues === 'function') {
+    cryptoObj.getRandomValues(bytes);
+  } else {
+    throw new Error('Web Crypto API indisponível para geração segura de senha.');
+  }
+  let pwd = '';
+  for (let i = 0; i < targetLen; i++) {
+    pwd += charset[bytes[i] % charset.length];
+  }
+  return pwd;
+}
+
+export function getStoredPortariaToken(): string | null {
   try {
-    const { data: { session } } = await supabase.auth.getSession();
-    if (session && session.access_token) {
-      return session.access_token;
+    if (typeof localStorage !== 'undefined') {
+      const persistent = localStorage.getItem(PORTARIA_TOKEN_STORAGE_KEY);
+      if (persistent) return persistent;
     }
-
-    const { data: { user } } = await supabase.auth.getUser();
-    if (user) {
-      const { data: { session: refreshed } } = await supabase.auth.getSession();
-      if (refreshed?.access_token) return refreshed.access_token;
+    if (typeof sessionStorage !== 'undefined') {
+      const sessionOnly = sessionStorage.getItem(PORTARIA_TOKEN_STORAGE_KEY);
+      if (sessionOnly) return sessionOnly;
     }
+    return null;
+  } catch {
+    return null;
+  }
+}
 
-    return 'MOCK_TOKEN';
+export function setStoredPortariaToken(token: string, permanent: boolean): void {
+  try {
+    if (permanent) {
+      if (typeof localStorage !== 'undefined') localStorage.setItem(PORTARIA_TOKEN_STORAGE_KEY, token);
+      if (typeof sessionStorage !== 'undefined') sessionStorage.removeItem(PORTARIA_TOKEN_STORAGE_KEY);
+    } else {
+      if (typeof sessionStorage !== 'undefined') sessionStorage.setItem(PORTARIA_TOKEN_STORAGE_KEY, token);
+      if (typeof localStorage !== 'undefined') localStorage.removeItem(PORTARIA_TOKEN_STORAGE_KEY);
+    }
   } catch (err) {
-    console.warn('[ApiClient] Erro ao obter token Supabase, utilizando fallback MOCK_TOKEN:', err);
-    return 'MOCK_TOKEN';
+    console.warn('[ApiClient] Não foi possível armazenar token da portaria:', err);
+  }
+}
+
+export function clearStoredPortariaToken(): void {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem(PORTARIA_TOKEN_STORAGE_KEY);
+      for (const legacyKey of LEGACY_PORTARIA_TOKEN_KEYS) {
+        localStorage.removeItem(legacyKey);
+      }
+    }
+    if (typeof sessionStorage !== 'undefined') {
+      sessionStorage.removeItem(PORTARIA_TOKEN_STORAGE_KEY);
+      for (const legacyKey of LEGACY_PORTARIA_TOKEN_KEYS) {
+        sessionStorage.removeItem(legacyKey);
+      }
+    }
+  } catch (err) {
+    console.warn('[ApiClient] Erro ao limpar token da portaria:', err);
+  }
+}
+
+/**
+ * Gets a valid authentication bearer token from Supabase session
+ * or stored Portaria session token (encomendas_portaria_token).
+ * Does NOT silently fall back to MOCK_TOKEN.
+ */
+export async function getValidAuthToken(): Promise<string | null> {
+  try {
+    const { data } = await supabase.auth.getSession();
+    if (data?.session?.access_token) {
+      return data.session.access_token;
+    }
+
+    const portariaToken = getStoredPortariaToken();
+    if (portariaToken) {
+      return portariaToken;
+    }
+
+    const allowMockInDev =
+      typeof import.meta !== 'undefined' &&
+      Boolean((import.meta as any).env?.DEV) &&
+      (import.meta as any).env?.VITE_ALLOW_MOCK_AUTH === 'true';
+
+    return allowMockInDev ? 'MOCK_TOKEN' : null;
+  } catch (err) {
+    console.warn('[ApiClient] Erro ao obter token de autenticação:', err);
+    return null;
   }
 }
 
@@ -73,9 +160,11 @@ export async function apiFetch<T = any>(
         ...(customHeaders as Record<string, string>)
       };
 
-      if (!skipAuth) {
+      if (!skipAuth && !headers['Authorization']) {
         const token = await getValidAuthToken();
-        headers['Authorization'] = `Bearer ${token}`;
+        if (token) {
+          headers['Authorization'] = `Bearer ${token}`;
+        }
       }
 
       if (fetchOptions.body && typeof fetchOptions.body === 'string' && !headers['Content-Type']) {
@@ -144,6 +233,13 @@ export async function apiFetch<T = any>(
 
       if (!response.ok) {
         const serverError = parsedData?.error || `Erro de servidor (HTTP ${response.status})`;
+
+        if (response.status === 401 && parsedData?.code === 'PORTARIA_DEACTIVATED') {
+          clearStoredPortariaToken();
+          if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+            window.dispatchEvent(new CustomEvent('portaria-session-invalidated', { detail: parsedData }));
+          }
+        }
         
         // Retry only on 5xx server errors
         if (response.status >= 500 && attempt <= retries) {

@@ -32,10 +32,12 @@ import {
   Send,
   ArrowRight,
   ExternalLink,
-  MessageCircle
+  MessageCircle,
+  Layers,
+  Lock,
+  Plus
 } from 'lucide-react';
 import { feedback } from '../lib/feedback';
-import { supabase } from '../lib/supabase';
 import { Profile, Morador, CondominiumSettings } from '../types';
 import toast from 'react-hot-toast';
 import { registrarAuditoria, sanitizeUuid, isValidUuid } from '../services/auditService';
@@ -52,9 +54,12 @@ import { parseLabelText } from '../services/labelParser';
 import { findMatchingResidents, ScoredResident, normalizeUnit, normalizeName } from '../services/residentMatcher';
 import { formatResidentAddress } from '../lib/residentUtils';
 import { motion, AnimatePresence } from 'motion/react';
-import { generatePickupCode, prepareWhatsAppNotification, sendWhatsAppMessage, getWhatsAppLink } from '../services/whatsappService';
-import { formatBatchNotes } from '../lib/packageUtils';
+import { generatePickupCode, prepareWhatsAppNotification, getWhatsAppLink } from '../services/whatsappService';
+import { executeManualSendConfirmation, executePortariaAutoSend } from '../services/whatsappConfirmationService';
+import { recordCondoActivity, subscribeCondoActivity, CondoActivityAction, CondoActivitySubscription } from '../services/activitySyncService';
+import { formatBatchNotes, sumPackageItems } from '../lib/packageUtils';
 import { isTestResident } from '../services/residentModeService';
+import { api, generateSecureToken } from '../lib/apiClient';
 
 interface PackageNewProps {
   user: Profile;
@@ -123,42 +128,51 @@ export default function PackageNew({ user }: PackageNewProps) {
   const [portersList, setPortersList] = useState<Profile[]>([]);
 
   useEffect(() => {
-    if (user?.condominium_id) {
-      supabase
-        .from('profiles')
-        .select('*')
-        .eq('condominium_id', user.condominium_id)
-        .eq('role', 'porteiro')
-        .eq('active', true)
-        .order('full_name')
-        .then(({ data, error }) => {
-          if (!error && data) {
-            setPortersList(data);
-
-            // Se não há plantão ativo ou se o plantão atual está expirado, tenta determinar pela escala
-            const plantao = getActivePlantao(user.condominium_id);
-            if (!plantao || isPlantaoExpired(plantao)) {
-              const { eligiblePorter, count } = findEligiblePorterForShift(data, new Date(), user.condominium_id);
-              if (eligiblePorter && count === 1) {
-                const newPlantao: PlantaoAtivo = {
-                  id: eligiblePorter.id,
-                  condominium_id: user.condominium_id,
-                  porteiro_id: eligiblePorter.id,
-                  porteiro_nome: eligiblePorter.full_name,
-                  horario_inicio: eligiblePorter.horario_inicio || '00:00',
-                  horario_fim: eligiblePorter.horario_fim || '23:59',
-                  started_at: new Date().toISOString(),
-                  substituicao: { is_substituicao: false }
-                };
-                setActivePlantao(newPlantao);
-                setManualPorter(eligiblePorter.full_name, user.condominium_id);
-                setCurrentPorterState(eligiblePorter.full_name);
-                setShowPorterModal(false);
-              }
+    if (!user?.condominium_id) return;
+    let cancelled = false;
+    api.get<{
+      condominium?: { name?: string } | null;
+      settings?: CondominiumSettings | null;
+      porters?: Profile[];
+      moradores?: Morador[];
+    }>(`/api/operational/context?condominiumId=${encodeURIComponent(user.condominium_id)}`)
+      .then((res) => {
+        if (cancelled || !res.ok || !res.data) return;
+        const payload = res.data;
+        if (payload.condominium?.name) setCondoName(payload.condominium.name);
+        if (payload.settings) setCondoSettings(payload.settings);
+        if (Array.isArray(payload.moradores)) {
+          setAllResidents(payload.moradores);
+          setAllCondoResidents(payload.moradores);
+        }
+        if (Array.isArray(payload.porters)) {
+          setPortersList(payload.porters);
+          const plantao = getActivePlantao(user.condominium_id);
+          if (!plantao || isPlantaoExpired(plantao)) {
+            const { eligiblePorter, count } = findEligiblePorterForShift(payload.porters, new Date(), user.condominium_id);
+            if (eligiblePorter && count === 1) {
+              const newPlantao: PlantaoAtivo = {
+                id: eligiblePorter.id,
+                condominium_id: user.condominium_id,
+                porteiro_id: eligiblePorter.id,
+                porteiro_nome: eligiblePorter.full_name,
+                horario_inicio: eligiblePorter.horario_inicio || '00:00',
+                horario_fim: eligiblePorter.horario_fim || '23:59',
+                started_at: new Date().toISOString(),
+                substituicao: { is_substituicao: false }
+              };
+              setActivePlantao(newPlantao);
+              setManualPorter(eligiblePorter.full_name, user.condominium_id);
+              setCurrentPorterState(eligiblePorter.full_name);
+              setShowPorterModal(false);
             }
           }
-        });
-    }
+        }
+      })
+      .catch((err) => {
+        console.warn('[PackageNew] Erro ao carregar contexto operacional:', err);
+      });
+    return () => { cancelled = true; };
   }, [user?.condominium_id]);
 
   useEffect(() => {
@@ -179,6 +193,130 @@ export default function PackageNew({ user }: PackageNewProps) {
   const [statusMessage, setStatusMessage] = useState('Lendo etiqueta...');
   const [allResidents, setAllResidents] = useState<Morador[]>([]);
   const [isWaitingForReturn, setIsWaitingForReturn] = useState(false);
+  const [isConfirmingWhatsApp, setIsConfirmingWhatsApp] = useState(false);
+  const [confirmWhatsAppError, setConfirmWhatsAppError] = useState<string | null>(null);
+  const [pendingWhatsAppUrl, setPendingWhatsAppUrl] = useState<string>('');
+  const [pendingConfirmPackage, setPendingConfirmPackage] = useState<{
+    id: string;
+    residentName: string;
+    unit: string;
+    pickupCode: string;
+    phone?: string;
+  } | null>(null);
+  const activitySubRef = useRef<CondoActivitySubscription | null>(null);
+
+  const syncCondoActivity = useCallback((action: CondoActivityAction, packageId?: string) => {
+    const now = Date.now();
+    try {
+      localStorage.setItem('last_send_activity_timestamp', now.toString());
+    } catch (e) {}
+    if (!user?.condominium_id) return;
+    recordCondoActivity({
+      condominiumId: user.condominium_id,
+      action,
+      userId: user.id,
+      userName: (currentPorterState && currentPorterState !== 'Selecione o Porteiro') ? currentPorterState : (user.full_name || 'Porteiro'),
+      userRole: user.role || 'porteiro',
+      packageId,
+      timestamp: now,
+      realtimeBroadcastFn: (payload) => activitySubRef.current?.broadcast(payload)
+    }).catch(() => {});
+  }, [user?.condominium_id, user?.id, user?.full_name, user?.role, currentPorterState]);
+
+  useEffect(() => {
+    if (!user?.condominium_id) return;
+    const sub = subscribeCondoActivity({
+      condominiumId: user.condominium_id,
+      onRemoteActivity: (ts) => {
+        try {
+          const prev = parseInt(localStorage.getItem('last_send_activity_timestamp') || '0', 10) || 0;
+          if (ts > prev) {
+            localStorage.setItem('last_send_activity_timestamp', ts.toString());
+          }
+        } catch (e) {}
+      }
+    });
+    activitySubRef.current = sub;
+    return () => {
+      sub.unsubscribe();
+      activitySubRef.current = null;
+    };
+  }, [user?.condominium_id]);
+
+  useEffect(() => {
+    if (!isWaitingForReturn) return;
+    const handleVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        hasBeenHiddenRef.current = true;
+      } else if (document.visibilityState === 'visible' && hasBeenHiddenRef.current) {
+        hasBeenHiddenRef.current = false;
+        syncCondoActivity('WHATSAPP_RETORNO', pendingConfirmPackage?.id);
+      }
+    };
+    const handleFocus = () => {
+      if (whatsAppOpenedTimeRef.current > 0) {
+        syncCondoActivity('WHATSAPP_RETORNO', pendingConfirmPackage?.id);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('focus', handleFocus);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('focus', handleFocus);
+    };
+  }, [isWaitingForReturn, pendingConfirmPackage?.id, syncCondoActivity]);
+
+  const handleConfirmSentInNew = async () => {
+    if (isConfirmingWhatsApp) return;
+    if (!pendingConfirmPackage?.id) {
+      setIsWaitingForReturn(false);
+      setConfirmWhatsAppError(null);
+      resetForm();
+      return;
+    }
+
+    setIsConfirmingWhatsApp(true);
+    setConfirmWhatsAppError(null);
+
+    try {
+      const result = await executeManualSendConfirmation({
+        packageIds: [pendingConfirmPackage.id]
+      });
+
+      if (!result.ok) {
+        const errMessage = result.error || 'Falha ao confirmar envio no banco de dados. A encomenda permanece pendente.';
+        setConfirmWhatsAppError(errMessage);
+        toast.error(errMessage, { duration: 5000 });
+        return;
+      }
+
+      syncCondoActivity('WHATSAPP_CONFIRMADO', pendingConfirmPackage.id);
+      toast.success('Envio confirmado com sucesso!', { icon: '💬' });
+      setIsWaitingForReturn(false);
+      setPendingConfirmPackage(null);
+      setConfirmWhatsAppError(null);
+      resetForm();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } catch (e: any) {
+      const errMessage = e instanceof Error ? e.message : 'Erro inesperado ao atualizar status no banco.';
+      console.error('Erro ao confirmar envio:', e);
+      setConfirmWhatsAppError(errMessage);
+      toast.error('Erro ao atualizar status. Tente confirmar novamente.');
+    } finally {
+      setIsConfirmingWhatsApp(false);
+    }
+  };
+
+  const handleCancelSentInNew = () => {
+    if (isConfirmingWhatsApp) return;
+    syncCondoActivity('WHATSAPP_CANCELADO', pendingConfirmPackage?.id);
+    toast('Aviso não enviado. A encomenda permanece pendente na Portaria.', { icon: 'ℹ️', duration: 4000 });
+    setConfirmWhatsAppError(null);
+    setIsWaitingForReturn(false);
+    setPendingConfirmPackage(null);
+    resetForm();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
   const [isOcrLoading, setIsOcrLoading] = useState(false);
   const [ocrConfidence, setOcrConfidence] = useState<'alta' | 'media' | 'baixa' | null>(null);
   const [debugOcrImage, setDebugOcrImage] = useState<string | null>(null);
@@ -195,6 +333,7 @@ export default function PackageNew({ user }: PackageNewProps) {
   const [shouldFocusSearch, setShouldFocusSearch] = useState(false);
   const [isBatch, setIsBatch] = useState(false);
   const [batchQuantity, setBatchQuantity] = useState(1);
+  const [packageQuantity, setPackageQuantity] = useState(1);
   const [detectedHandwrittenUnit, setDetectedHandwrittenUnit] = useState<string | null>(null);
   const [showResidencyAlert, setShowResidencyAlert] = useState(false);
   const [ignoreResidencyAlert, setIgnoreResidencyAlert] = useState(false);
@@ -258,83 +397,7 @@ export default function PackageNew({ user }: PackageNewProps) {
     return first.endsWith('a') || first.endsWith('e');
   };
 
-  // Detect context return for individual flow (e.g. from WhatsApp)
-  useEffect(() => {
-    const handleReturn = () => {
-      if (isWaitingForReturn) {
-        const elapsed = Date.now() - whatsAppOpenedTimeRef.current;
-        // Evita processar retornos instantâneos gerados pelo próprio disparo do window.open
-        if (!hasBeenHiddenRef.current && elapsed < 1200) {
-          return;
-        }
-
-        setIsWaitingForReturn(false);
-        hasBeenHiddenRef.current = false;
-        resetForm();
-        window.scrollTo({ top: 0, behavior: 'smooth' });
-        toast.success('Pronto para o próximo registro!', { icon: '📸', duration: 4000 });
-      }
-    };
-
-    const handleFocus = () => {
-      if (isWaitingForReturn && (hasBeenHiddenRef.current || (Date.now() - whatsAppOpenedTimeRef.current > 1500))) {
-        handleReturn();
-      }
-    };
-
-    const handleBlur = () => {
-      if (isWaitingForReturn) {
-        hasBeenHiddenRef.current = true;
-      }
-    };
-
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'hidden') {
-        if (isWaitingForReturn) {
-          hasBeenHiddenRef.current = true;
-        }
-      } else if (document.visibilityState === 'visible') {
-        if (isWaitingForReturn && (hasBeenHiddenRef.current || (Date.now() - whatsAppOpenedTimeRef.current > 1500))) {
-          handleReturn();
-        }
-      }
-    };
-
-    window.addEventListener('focus', handleFocus);
-    window.addEventListener('blur', handleBlur);
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    return () => {
-      window.removeEventListener('focus', handleFocus);
-      window.removeEventListener('blur', handleBlur);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-    };
-  }, [isWaitingForReturn]);
-
-  // Fetch residents and settings on mount
-  useEffect(() => {
-    const fetchData = async () => {
-      if (!user?.condominium_id) return;
-      
-      const { data: settings } = await supabase
-        .from('condominium_settings')
-        .select('*')
-        .eq('condominium_id', user.condominium_id)
-        .maybeSingle();
-      if (settings) setCondoSettings(settings);
-
-      const { data: residentsList } = await supabase
-        .from('moradores')
-        .select('*')
-        .eq('condominium_id', user.condominium_id)
-        .eq('ativo', true)
-        .order('nome');
-      if (residentsList) {
-        setAllResidents(residentsList);
-        setAllCondoResidents(residentsList as Morador[]);
-      }
-    };
-    fetchData();
-  }, [user?.condominium_id]);
+  // Contexto operacional (condomínio, settings, moradores, porteiros) carregado via /api/operational/context above.
 
   const attachStreamToVideo = useCallback((stream: MediaStream, videoEl?: HTMLVideoElement | null) => {
     const video = videoEl || videoRef.current;
@@ -397,6 +460,9 @@ export default function PackageNew({ user }: PackageNewProps) {
     setBlockAutoCamera(false);
     setCameraError(null);
     
+    // Pausa de segurança (120ms) para liberação limpa do sensor físico pelo SO (evita NotReadableError no mobile)
+    await new Promise(r => setTimeout(r, 120));
+    
     try {
       let stream: MediaStream;
       
@@ -450,8 +516,8 @@ export default function PackageNew({ user }: PackageNewProps) {
       console.error("Erro crítico ao acessar câmera:", err);
       
       // 6. Tratar erros específicos conforme solicitado
-      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        setCameraError("Permissão da câmera negada. Ative nas configurações do navegador ou abra o aplicativo em uma nova aba fora do chat.");
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError' || err.message?.includes('Permission denied')) {
+        setCameraError("Permissão da câmera negada pelo navegador. Toque em 'ABRIR EM NOVA ABA' abaixo ou permita o acesso à câmera no ícone de cadeado do navegador.");
       } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
         setCameraError("Nenhuma câmera encontrada no dispositivo.");
       } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
@@ -503,23 +569,7 @@ export default function PackageNew({ user }: PackageNewProps) {
     };
   }, [stopCamera]);
 
-  // Fetch condominium name on mount
-  useEffect(() => {
-    const fetchCondoName = async () => {
-      if (!user?.condominium_id) return;
-      const { data, error } = await supabase
-        .from('condominiums')
-        .select('name')
-        .eq('id', user.condominium_id)
-        .single();
-      
-      if (!error && data) {
-        setCondoName(data.name);
-      }
-    };
-
-    fetchCondoName();
-  }, [user?.condominium_id]);
+  // Condominium name loaded via /api/operational/context above.
 
   const toggleFlash = async () => {
     if (!videoRef.current || !videoRef.current.srcObject) return;
@@ -568,8 +618,8 @@ export default function PackageNew({ user }: PackageNewProps) {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     
-    // Resolução otimizada para foto da encomenda (máximo 1600px)
-    const MAX_DIMENSION = 1600; 
+    // Resolução otimizada para foto da encomenda (máximo 1200px - alta nitidez e leveza extrema)
+    const MAX_DIMENSION = 1200; 
     let width = video.videoWidth || 1280;
     let height = video.videoHeight || 720;
     
@@ -626,7 +676,7 @@ export default function PackageNew({ user }: PackageNewProps) {
       setStep('manual');
       setShouldFocusSearch(true);
 
-      // Processar Blob da foto em paralelo para upload e visualização rápida
+      // Processar Blob da foto em paralelo para upload e visualização rápida (qualidade 0.72 para <200KB)
       canvas.toBlob((blob) => {
         if (!blob || requestId !== activeRequestIdRef.current) return;
 
@@ -635,11 +685,12 @@ export default function PackageNew({ user }: PackageNewProps) {
         }
         const previewUrl = URL.createObjectURL(blob);
         objectUrlRef.current = previewUrl;
+        currentPhotoRef.current = ocrBase64;
         setPhotoUrl(previewUrl);
 
         // Inicia upload e OCR com o blob direto sem converter de volta
         processImageFlow(previewUrl, ocrBase64, true, requestId, blob);
-      }, 'image/jpeg', 0.85);
+      }, 'image/jpeg', 0.72);
     } else {
       setIsCapturing(false);
     }
@@ -648,35 +699,46 @@ export default function PackageNew({ user }: PackageNewProps) {
   const processImageFlow = async (previewUrl: string, ocrBase64: string, runOcr: boolean = true, requestId?: number, capturedBlob?: Blob) => {
     const currentReq = requestId || activeRequestIdRef.current;
     try {
-      // 1. Inicia upload em background (Prova Jurídica) direto com o Blob
+      // 1. Inicia upload em background via backend operacional (compatível com Portaria e Auth)
       uploadPromiseRef.current = (async () => {
         try {
-          let blob = capturedBlob;
-          if (!blob) {
-            const res = await fetch(previewUrl);
-            blob = await res.blob();
-          }
-          const file = new File([blob], "package_photo.jpg", { type: "image/jpeg" });
-          const fileName = `${Date.now()}_${Math.random().toString(36).substring(7)}.jpg`;
-          const filePath = `package-photos/${fileName}`;
-          
-          const { error: uploadError } = await supabase.storage
-            .from('packages')
-            .upload(filePath, file);
-
-          if (!uploadError) {
-            const { data: { publicUrl } } = supabase.storage
-              .from('packages')
-              .getPublicUrl(filePath);
-
-            if (currentReq === activeRequestIdRef.current) {
-              setPhotoUrl(publicUrl);
+          let imageBase64 = ocrBase64 && ocrBase64.startsWith('data:image/') ? ocrBase64 : '';
+          if (!imageBase64) {
+            let blob = capturedBlob;
+            if (!blob) {
+              const res = await fetch(previewUrl);
+              blob = await res.blob();
             }
-            return publicUrl;
+            imageBase64 = await new Promise<string>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onloadend = () => resolve(String(reader.result || ''));
+              reader.onerror = () => reject(new Error('Falha ao ler foto para upload'));
+              reader.readAsDataURL(blob!);
+            });
           }
-          return null;
+
+          if (!imageBase64.startsWith('data:image/')) {
+            return null;
+          }
+
+          const uploadOperation = api.post<{ publicUrl?: string }>('/api/operational/upload-photo', {
+            imageBase64,
+            folder: 'package-photos'
+          });
+
+          const timeoutPromise = new Promise<any>((_, reject) =>
+            setTimeout(() => reject(new Error('Storage upload timeout')), 8000)
+          );
+
+          const result = await Promise.race([uploadOperation, timeoutPromise]);
+          const publicUrl = result?.ok ? (result.data?.publicUrl || null) : null;
+
+          if (publicUrl && currentReq === activeRequestIdRef.current) {
+            setPhotoUrl(publicUrl);
+          }
+          return publicUrl;
         } catch (e) {
-          console.error('Erro no upload de prova:', e);
+          console.warn('Upload de foto em background excedeu tempo limite ou falhou:', e);
           return null;
         }
       })();
@@ -950,7 +1012,7 @@ export default function PackageNew({ user }: PackageNewProps) {
     return () => clearTimeout(timer);
   }, [searchTerm, user?.condominium_id, selectedResident, indexedResidents, foundPartialData, isManualUnitSearch, allResidents]);
 
-  // Fechamento automático do teclado e posicionamento suave da lista de moradores após a digitação estabilizada
+  // Posicionamento suave da lista de moradores após a digitação estabilizada (sem forçar blur ou fechar o teclado)
   useEffect(() => {
     const trimmed = searchTerm.trim();
     if (
@@ -961,34 +1023,26 @@ export default function PackageNew({ user }: PackageNewProps) {
       trimmed.length > 0 && 
       searchedTermRef.current === trimmed
     ) {
-      // Aguarda a estabilização completa da digitação (400ms após a última tecla)
-      const stabilizationTimer = setTimeout(() => {
-        // 1. Fecha o teclado virtual liberando a área visual da tela
-        if (unitInputRef.current && document.activeElement === unitInputRef.current) {
-          unitInputRef.current.blur();
-        }
+      // Ajuste suave de posicionamento visual apenas se o usuário não estiver no meio de toque
+      const scrollTimer = setTimeout(() => {
+        if (residentsSectionRef.current) {
+          const element = residentsSectionRef.current;
+          const rect = element.getBoundingClientRect();
+          const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
+          
+          const targetY = Math.max(0, rect.top + scrollTop - 80);
 
-        // 2. Executa o scroll automático com pequeno delay para adaptação da viewport pós-teclado
-        setTimeout(() => {
-          if (residentsSectionRef.current) {
-            const element = residentsSectionRef.current;
-            const rect = element.getBoundingClientRect();
-            const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
-            
-            const targetY = Math.max(0, rect.top + scrollTop - 40);
-
-            if (lastScrolledTargetYRef.current === -1 || Math.abs(targetY - lastScrolledTargetYRef.current) > 15) {
-              lastScrolledTargetYRef.current = targetY;
-              window.scrollTo({
-                top: targetY,
-                behavior: 'smooth'
-              });
-            }
+          if (lastScrolledTargetYRef.current === -1 || Math.abs(targetY - lastScrolledTargetYRef.current) > 30) {
+            lastScrolledTargetYRef.current = targetY;
+            window.scrollTo({
+              top: targetY,
+              behavior: 'smooth'
+            });
           }
-        }, 100);
-      }, 400);
+        }
+      }, 500);
 
-      return () => clearTimeout(stabilizationTimer);
+      return () => clearTimeout(scrollTimer);
     }
   }, [isSearchingResidents, matchingResidents.length, step, selectedResident, searchTerm]);
 
@@ -996,9 +1050,14 @@ export default function PackageNew({ user }: PackageNewProps) {
     try {
       const activeCode = codeToUse || pickupCode || generatePickupCode();
       const nameOfCondo = condoName || 'Condomínio';
-      const isBatchNote = isBatch || batchQuantity > 1;
-      const batchLabel = isBatchNote ? ` (Lote de ${batchQuantity} encomendas)` : '';
-      const finalNotes = isBatchNote ? formatBatchNotes(notes, batchQuantity) : notes;
+      const isAdmin = user?.role === 'admin';
+      const canUseBatch = isAdmin && isBatch && batchQuantity > 1;
+      const isMultiVolume = canUseBatch || packageQuantity > 1;
+      const effectiveQuantity = canUseBatch ? batchQuantity : packageQuantity;
+      const batchLabel = isMultiVolume ? ` (${effectiveQuantity} volumes)` : '';
+      const finalNotes = canUseBatch 
+        ? formatBatchNotes(notes, batchQuantity) 
+        : (packageQuantity > 1 ? formatBatchNotes(notes, packageQuantity) : notes);
       const isLargePackage = notes.includes('Encomenda grande (retirada imediata)');
 
       let directMessage = `Olá, ${resident.nome}! Sua encomenda chegou na portaria de ${nameOfCondo}. Código: ${activeCode}${batchLabel}`;
@@ -1009,7 +1068,7 @@ export default function PackageNew({ user }: PackageNewProps) {
           activeCode,
           finalNotes,
           undefined,
-          1,
+          effectiveQuantity || 1,
           'disponivel',
           undefined,
           undefined,
@@ -1037,7 +1096,9 @@ export default function PackageNew({ user }: PackageNewProps) {
 
         whatsAppOpenedTimeRef.current = Date.now();
         hasBeenHiddenRef.current = false;
+        setConfirmWhatsAppError(null);
         setIsWaitingForReturn(true);
+        syncCondoActivity('WHATSAPP_ABERTO');
         const link = getWhatsAppLink(resident.telefone!, directMessage, photoUrl);
         window.open(link, '_blank');
         toast.success(`Abrindo WhatsApp para ${resident.nome}...`, { icon: '💬' });
@@ -1065,17 +1126,18 @@ export default function PackageNew({ user }: PackageNewProps) {
 
     let activeCode = pickupCode;
 
-    // Check for existing pending packages to reuse code/token em background
+    // Check for existing pending packages to reuse code/token em background via API operacional
     try {
-      const { data: existing } = await supabase
-        .from('packages')
-        .select('pickup_code, pickup_token')
-        .eq('recipient_id', resident.id)
-        .eq('status', 'received')
-        .order('received_at', { ascending: false })
-        .limit(1);
+      const qs = new URLSearchParams({
+        status: 'pending',
+        recipientId: resident.id,
+        limit: '10',
+        ...(user?.condominium_id ? { condominiumId: user.condominium_id } : {})
+      }).toString();
+      const res = await api.get<{ packages?: any[] }>(`/api/operational/packages?${qs}`);
+      const existing = res.ok && res.data?.packages ? res.data.packages : [];
 
-      if (existing && existing.length > 0 && existing[0].pickup_code) {
+      if (existing.length > 0 && existing[0].pickup_code) {
         activeCode = existing[0].pickup_code;
         setPickupCode(activeCode);
       }
@@ -1109,6 +1171,7 @@ export default function PackageNew({ user }: PackageNewProps) {
       reader.onloadend = async () => {
         const base64 = reader.result as string;
 
+        currentPhotoRef.current = base64;
         setPhotoUrl(base64);
         setStep('analyzing');
         setStatusMessage('Buscando dados da etiqueta...');
@@ -1161,6 +1224,7 @@ export default function PackageNew({ user }: PackageNewProps) {
     setTrackingNumber('');
     setNotes('');
     setSearchTerm('');
+    setPackageQuantity(1);
     setIsBatch(false);
     setBatchQuantity(1);
     // No "next package" mode, we keep the unit search active
@@ -1176,6 +1240,8 @@ export default function PackageNew({ user }: PackageNewProps) {
     setShowPickupCode(false);
     setIsOcrLoading(false);
     setIsCapturing(false);
+    setIsWaitingForReturn(false);
+    setPendingWhatsAppUrl('');
     setOcrConfidence(null);
     setStatusMessage('Aguardando...');
     
@@ -1265,77 +1331,69 @@ export default function PackageNew({ user }: PackageNewProps) {
     const toastId = toast.loading('Salvando encomenda...', { id: 'saving-package' });
 
     try {
-      // 0. Garantir que a foto foi enviada (Prova Jurídica)
+      // 0. Garantir que a foto foi enviada (Prova Jurídica) com proteção de timeout de 3.5s
       let finalPhotoUrl = photoUrl;
       console.log("[SALVAMENTO] Iniciando com foto:", finalPhotoUrl?.substring(0, 50));
       
       if (finalPhotoUrl && (finalPhotoUrl.startsWith('data:') || finalPhotoUrl.startsWith('blob:')) && uploadPromiseRef.current) {
         setStatusMessage('FINALIZANDO FOTO...');
-        const uploadedUrl = await uploadPromiseRef.current;
-        if (uploadedUrl) {
-          finalPhotoUrl = uploadedUrl;
-          setPhotoUrl(uploadedUrl);
-        }
-      }
-
-      // 1. Obter o usuário logado e tratar UUIDs de forma segura
-      const { data: { user: authUser } } = await supabase.auth.getUser();
-      const condoId = sanitizeUuid(user?.condominium_id) || user?.condominium_id || '';
-      const candidateUuid = (authUser?.id && isValidUuid(authUser.id)) 
-        ? authUser.id 
-        : (user?.id && isValidUuid(user.id) ? user.id : sanitizeUuid(user?.id));
-
-      let validProfileId: string | null = null;
-      if (candidateUuid) {
         try {
-          const { data: prof } = await supabase
-            .from('profiles')
-            .select('id')
-            .eq('id', candidateUuid)
-            .maybeSingle();
-          if (prof?.id) {
-            validProfileId = prof.id;
+          const timeoutRace = new Promise<null>((resolve) => setTimeout(() => resolve(null), 3500));
+          const uploadedUrl = await Promise.race([uploadPromiseRef.current, timeoutRace]);
+          if (uploadedUrl) {
+            finalPhotoUrl = uploadedUrl;
+            setPhotoUrl(uploadedUrl);
           }
-        } catch (e) {
-          console.warn("Verificação de perfil ignorada:", e);
+        } catch (uErr) {
+          console.warn("[PackageNew] Erro no uploadPromiseRef:", uErr);
         }
       }
 
-      // 2. Verificar agrupamento acumulativo (encomendas pendentes do mesmo morador)
-      const { data: existingPackages } = await supabase
-        .from('packages')
-        .select('id, pickup_code, pickup_token')
-        .eq('recipient_id', targetResident.id)
-        .neq('status', 'delivered')
-        .is('delivered_at', null)
-        .order('received_at', { ascending: false });
+      // Se a foto ainda for um blob local, substitui pelo base64 disponível para o servidor fazer upload no Storage
+      if (finalPhotoUrl && finalPhotoUrl.startsWith('blob:') && currentPhotoRef.current) {
+        finalPhotoUrl = currentPhotoRef.current;
+      }
+
+      // 1. Obter o identificador do condomínio e perfil de forma direta sem roundtrips síncronos
+      const condoId = sanitizeUuid(user?.condominium_id) || user?.condominium_id || '';
+      const candidateUuid = (user?.id && isValidUuid(user.id)) 
+        ? user.id 
+        : sanitizeUuid(user?.id);
+      const validProfileId: string | null = candidateUuid || null;
+
+      // 2. Verificar agrupamento acumulativo (encomendas pendentes do mesmo morador) via API operacional
+      let existingPackages: any[] = [];
+      try {
+        const qs = new URLSearchParams({
+          status: 'pending',
+          recipientId: targetResident.id,
+          limit: '50',
+          ...(condoId ? { condominiumId: condoId } : {})
+        }).toString();
+        const res = await api.get<{ packages?: any[] }>(`/api/operational/packages?${qs}`);
+        existingPackages = res.ok && res.data?.packages ? res.data.packages : [];
+      } catch (fetchPkgErr) {
+        console.warn("[PackageNew] Erro ao buscar existingPackages via API:", fetchPkgErr);
+      }
 
       const hasExisting = existingPackages && existingPackages.length > 0;
       const existingToken = existingPackages?.find(p => p.pickup_token)?.pickup_token;
       const existingCode = existingPackages?.find(p => p.pickup_code)?.pickup_code;
 
       const finalPickupCode = existingCode || pickupCode;
-      const finalPickupToken = existingToken || (Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15));
-      const additionalCount = (isBatch && batchQuantity > 1) ? batchQuantity : 1;
-      const totalPackages = (existingPackages?.length || 0) + additionalCount;
-
-      // Se houver encomendas existentes, sincroniza códigos e tokens em todas as pendentes
-      if (hasExisting) {
-        await supabase
-          .from('packages')
-          .update({ 
-            pickup_code: finalPickupCode, 
-            pickup_token: finalPickupToken 
-          })
-          .eq('recipient_id', targetResident.id)
-          .neq('status', 'delivered')
-          .is('delivered_at', null);
-      }
+      const finalPickupToken = existingToken || generateSecureToken(16);
+      const isAdmin = user?.role === 'admin';
+      const canUseBatch = isAdmin && isBatch && batchQuantity > 1;
+      const isMultiVolume = canUseBatch || packageQuantity > 1;
+      const effectiveQuantity = canUseBatch ? batchQuantity : packageQuantity;
+      const additionalCount = isMultiVolume ? effectiveQuantity : 1;
+      const totalPackages = sumPackageItems(existingPackages || []) + additionalCount;
 
       // 3. Preparar mensagem
-      const isBatchNote = isBatch || batchQuantity > 1;
-      const batchLabel = isBatchNote ? ` (Lote de ${batchQuantity} encomendas)` : '';
-      const finalNotes = isBatchNote ? formatBatchNotes(notes, batchQuantity) : notes;
+      const batchLabel = isMultiVolume ? ` (${effectiveQuantity} volumes)` : '';
+      const finalNotes = canUseBatch 
+        ? formatBatchNotes(notes, batchQuantity) 
+        : (packageQuantity > 1 ? formatBatchNotes(notes, packageQuantity) : notes);
       const isLargePackage = notes.includes('Encomenda grande (retirada imediata)');
 
       let directMessage = `Olá, ${targetResident.nome}! Sua encomenda chegou na portaria de ${condoName}. Código: ${finalPickupCode}${batchLabel}`;
@@ -1382,9 +1440,9 @@ export default function PackageNew({ user }: PackageNewProps) {
         pickup_code: finalPickupCode,
         pickup_token: finalPickupToken,
         status: 'received',
-        whatsapp_notified: shouldOpenWhatsAppNow, 
-        whatsapp_sent: shouldOpenWhatsAppNow,
-        whatsapp_status: shouldOpenWhatsAppNow ? 'enviado' : (targetResident.telefone ? 'pending' : 'no_recipient'),
+        whatsapp_notified: false, 
+        whatsapp_sent: false,
+        whatsapp_status: targetResident.telefone ? 'pending' : 'no_recipient',
         whatsapp_message: directMessage
       };
 
@@ -1395,34 +1453,45 @@ export default function PackageNew({ user }: PackageNewProps) {
 
       console.log("[SALVAMENTO] Objeto final:", packageData);
 
-      let insertResult = await supabase
-        .from('packages')
-        .insert([packageData])
-        .select('*')
-        .single();
+      // MECANISMO DE MULTI-VOLUMES INDEPENDENTE & CONTROLE DE ACESSO:
+      // 1. ADICIONAR VÁRIAS: permitido EXCLUSIVAMENTE para ADMIN (canUseBatch && batchQuantity >= 2). Para PORTARIA permanece bloqueado.
+      // 2. QUANTIDADE DE ENCOMENDAS: permitido para todos os perfis (packageQuantity >= 2 e !canUseBatch), cria APENAS 1 REGISTRO com [QTD: X].
+      // 3. CADASTRO NORMAL: cria exatamente 1 registro normal.
+      const countToCreate = (canUseBatch && batchQuantity >= 2) ? batchQuantity : 1;
+      const packagesListToInsert = Array.from({ length: countToCreate }).map((_, index) => {
+        // Para registros individuais do ADICIONAR VÁRIAS, detalha cada volume sem anotação [QTD: X] para evitar dupla contagem.
+        // Para QUANTIDADE DE ENCOMENDAS (onde countToCreate === 1), preserva finalNotes contendo [QTD: X].
+        const itemNote = countToCreate > 1 ? (notes ? `${notes} (Volume ${index + 1} de ${countToCreate})` : `Volume ${index + 1} de ${countToCreate}`) : finalNotes;
+        return {
+          ...packageData,
+          notes: itemNote
+        };
+      });
 
-      if (insertResult.error && (insertResult.error.code === '23503' || insertResult.error.message?.includes('foreign key constraint'))) {
-        console.warn("[FALLBACK] Falha de chave estrangeira em received_by/registered_by. Tentando salvar com autor em texto:", insertResult.error);
-        const fallbackData = { ...packageData };
-        delete fallbackData.received_by;
-        delete fallbackData.registered_by;
-        insertResult = await supabase
-          .from('packages')
-          .insert([fallbackData])
-          .select('*')
-          .single();
+      let insertedPackages: any[] = [];
+
+      // Persistência segura via servidor (valida sessão, condomínio, destinatário e sincroniza lotes existentes)
+      setStatusMessage('SALVANDO VIA SERVIDOR...');
+      const apiRes = await api.post('/api/packages/create', {
+        packages: packagesListToInsert,
+        recipientId: targetResident.id,
+        condominiumId: condoId,
+        syncExisting: hasExisting
+      });
+
+      if (apiRes.ok && apiRes.data?.packages && apiRes.data.packages.length > 0) {
+        insertedPackages = apiRes.data.packages;
+        console.log("[SUCESSO] Encomenda salva com sucesso via servidor!");
+      } else {
+        const errMsg = apiRes.error || 'Erro ao comunicar com o servidor';
+        console.error("[ERRO_CRITICO] Falha ao inserir via servidor:", errMsg);
+        throw new Error(errMsg);
       }
 
-      if (insertResult.error) {
-        console.error("[ERRO_CRITICO] Falha ao inserir no banco:", insertResult.error);
-        throw new Error(insertResult.error.message);
-      }
-
-      const newPackage = insertResult.data;
-
+      const newPackage = insertedPackages[0] || packageData;
       console.log("[SUCESSO] Encomenda salva com ID:", newPackage.id);
 
-      // 5. Notificação via WhatsApp Z-API (Se configurado)
+      // 5. Notificação via WhatsApp Z-API (Se configurado) - Validação estrita API -> Banco -> Estado
       if (!notifyAfter && targetResident.telefone) {
         const apiActive = condoSettings?.whatsapp_mode === 'api_automatica' && 
                         condoSettings?.api_url && 
@@ -1430,60 +1499,71 @@ export default function PackageNew({ user }: PackageNewProps) {
 
         if (apiActive) {
           try {
-            await sendWhatsAppMessage(targetResident.telefone, directMessage, user.condominium_id, {
-              api_url: condoSettings?.api_url,
-              api_token: condoSettings?.api_token,
-              instance_id: condoSettings?.instance_id,
-              whatsapp_provider: condoSettings?.whatsapp_provider,
-              photo_url: finalPhotoUrl
+            const autoResult = await executePortariaAutoSend({
+              phone: targetResident.telefone,
+              message: directMessage,
+              condominiumId: user.condominium_id,
+              packageId: newPackage.id,
+              config: {
+                api_url: condoSettings?.api_url,
+                api_token: condoSettings?.api_token,
+                instance_id: condoSettings?.instance_id,
+                whatsapp_provider: condoSettings?.whatsapp_provider,
+                photo_url: finalPhotoUrl
+              }
             });
-            
-            await supabase
-              .from('packages')
-              .update({ 
-                whatsapp_status: 'enviado', 
-                whatsapp_notified: true,
-                whatsapp_sent: true,
-                notified_at: new Date().toISOString(),
-                last_notification_at: new Date().toISOString(),
-                whatsapp_sent_at: new Date().toISOString()
-              })
-              .eq('id', newPackage.id);
+
+            if (autoResult.ok) {
+              syncCondoActivity('WHATSAPP_CONFIRMADO', newPackage.id);
+            } else {
+              console.warn('[PackageNew] Falha no envio automático ou confirmação no banco:', autoResult.error);
+              if (autoResult.stage === 'database') {
+                toast.error('Mensagem enviada pela API, mas falhou ao gravar confirmação no banco. Encomenda mantida pendente.');
+              }
+            }
           } catch (err) {
-            console.error('Erro no envio automático:', err);
+            console.error('Erro no envio automático via API:', err);
           }
         }
       }
 
-      // 6. Auditoria
-      try {
-        await registrarAuditoria({
-          condominio_id: user?.condominium_id || '',
-          usuario_id: user?.id || '',
-          usuario_nome: user?.full_name || 'Porteiro',
-          usuario_perfil: user?.role || 'porteiro',
-          tipo_evento: 'ENCOMENDA_CADASTRADA',
-          acao: 'CREATE',
-          tabela_afetada: 'encomendas',
-          registro_id: newPackage.id,
-          descricao: `Encomenda registrada para ${targetResident.nome} - ${targetResident.unidade}`,
-          metodo: finalPhotoUrl ? 'FOTO' : 'MANUAL'
-        });
-      } catch (logErr) {
-        console.warn('Erro ao logar ação:', logErr);
-      }
+      // 6. Auditoria (não-bloqueante para velocidade máxima da interface)
+      registrarAuditoria({
+        condominio_id: user?.condominium_id || '',
+        usuario_id: user?.id || '',
+        usuario_nome: user?.full_name || 'Porteiro',
+        usuario_perfil: user?.role || 'porteiro',
+        tipo_evento: 'ENCOMENDA_CADASTRADA',
+        acao: 'CREATE',
+        tabela_afetada: 'encomendas',
+        registro_id: newPackage.id,
+        descricao: `Encomenda registrada para ${targetResident.nome} - ${targetResident.unidade}`,
+        metodo: finalPhotoUrl ? 'FOTO' : 'MANUAL'
+      }).catch(logErr => console.warn('Erro ao logar ação de auditoria em background:', logErr));
 
       // 7. Sucesso e Feedback
       playSuccessSound();
       toast.success('Encomenda registrada com sucesso!', { id: toastId, icon: '📦' });
+      // Inicia ou renova o timestamp de atividade compartilhado para a contagem dos 3 minutos no modo APÓS REGISTRO
+      syncCondoActivity('ENCOMENDA_CADASTRADA', newPackage.id);
       
       // ENVIO AUTOMÁTICO VIA LINK (SOLICITAÇÃO DO USUÁRIO)
       if (shouldOpenWhatsAppNow) {
         try {
           whatsAppOpenedTimeRef.current = Date.now();
           hasBeenHiddenRef.current = false;
-          setIsWaitingForReturn(true);
+          setConfirmWhatsAppError(null);
           const link = getWhatsAppLink(targetResident.telefone, directMessage, finalPhotoUrl);
+          setPendingWhatsAppUrl(link);
+          setPendingConfirmPackage({
+            id: newPackage.id,
+            residentName: targetResident.nome,
+            unit: targetResident.unidade,
+            pickupCode: pickupCode,
+            phone: targetResident.telefone
+          });
+          setIsWaitingForReturn(true);
+          syncCondoActivity('WHATSAPP_ABERTO', newPackage.id);
           window.open(link, '_blank');
         } catch (linkErr) {
           console.error('Erro ao abrir link do WhatsApp:', linkErr);
@@ -1913,31 +1993,55 @@ export default function PackageNew({ user }: PackageNewProps) {
                         </button>
                       </div>
 
-                      {/* Batch Registration Selector */}
-                      <div className="bg-indigo-50 border border-indigo-100 rounded-2xl p-4 mb-4 flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <Truck className="w-5 h-5 text-indigo-600" />
+                      {/* Novo Mecanismo Independente: QUANTIDADE DE ENCOMENDAS (1 foto = N volumes em 1 único registro) */}
+                      <div className="bg-gradient-to-r from-emerald-50 to-teal-50 border border-emerald-100/80 rounded-2xl p-4 mb-4 flex items-center justify-between shadow-xs">
+                        <div className="flex items-center gap-3">
+                          <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center shadow-sm">
+                            <Package className="w-5 h-5" />
+                          </div>
                           <div>
-                            <p className="text-xs font-bold text-indigo-900 uppercase tracking-tight">Registro em Lote</p>
-                            <p className="text-[10px] text-indigo-600">Várias encomendas juntas</p>
+                            <p className="text-xs font-black text-emerald-950 uppercase tracking-wide flex items-center gap-1.5">
+                              QUANTIDADE DE ENCOMENDAS
+                              {packageQuantity > 1 && (
+                                <span className="text-[9px] bg-emerald-200 text-emerald-900 px-2 py-0.5 rounded-full font-bold">
+                                  {packageQuantity} VOLUMES
+                                </span>
+                              )}
+                            </p>
+                            <p className="text-[11px] text-emerald-700 font-medium">Quantos volumes físicos aparecem nesta foto?</p>
                           </div>
                         </div>
                         <div className="flex items-center gap-3">
                           <button
                             type="button"
-                            onClick={() => setBatchQuantity(Math.max(1, batchQuantity - 1))}
-                            className="w-10 h-10 bg-white border border-indigo-200 rounded-xl flex items-center justify-center text-indigo-600 font-bold active:scale-90"
+                            onClick={() => {
+                              const nextQty = Math.max(1, packageQuantity - 1);
+                              setPackageQuantity(nextQty);
+                            }}
+                            disabled={packageQuantity <= 1}
+                            className={`w-10 h-10 rounded-xl flex items-center justify-center font-black transition-all active:scale-90 ${
+                              packageQuantity <= 1 
+                                ? 'bg-zinc-100 text-zinc-300 border border-zinc-200 cursor-not-allowed' 
+                                : 'bg-white border border-emerald-200 text-emerald-700 hover:bg-emerald-50 shadow-xs'
+                            }`}
+                            title="Diminuir quantidade de volumes"
                           >
                             -
                           </button>
-                          <span className="text-xl font-black text-indigo-900 w-6 text-center">{batchQuantity}</span>
+                          <span className="text-xl font-black text-emerald-950 w-7 text-center font-mono">{packageQuantity}</span>
                           <button
                             type="button"
                             onClick={() => {
-                              setBatchQuantity(batchQuantity + 1);
-                              setIsBatch(true);
+                              const nextQty = packageQuantity + 1;
+                              setPackageQuantity(nextQty);
+                              // Independência: se usar Quantidade de Encomendas, desativa Adicionar Várias
+                              if (isBatch) {
+                                setIsBatch(false);
+                                setBatchQuantity(1);
+                              }
                             }}
-                            className="w-10 h-10 bg-white border border-indigo-200 rounded-xl flex items-center justify-center text-indigo-600 font-bold active:scale-90"
+                            className="w-10 h-10 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl flex items-center justify-center font-black shadow-xs transition-all active:scale-90"
+                            title="Aumentar quantidade de volumes"
                           >
                             +
                           </button>
@@ -2355,6 +2459,80 @@ export default function PackageNew({ user }: PackageNewProps) {
                   </button>
                 </div>
 
+                {/* Mecanismo Preservado: ADICIONAR VÁRIAS (Controles + e - restritos a ADMIN; bloqueados para PORTARIA) */}
+                <div className={`bg-gradient-to-r border rounded-2xl p-4 mb-4 flex items-center justify-between shadow-xs ${
+                  user?.role === 'admin' 
+                    ? 'from-indigo-50 to-blue-50 border-indigo-100/80' 
+                    : 'from-zinc-50 to-gray-50 border-zinc-200/60 opacity-80'
+                }`}>
+                  <div className="flex items-center gap-3">
+                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center shadow-sm ${
+                      user?.role === 'admin' ? 'bg-indigo-600 text-white' : 'bg-zinc-400 text-white'
+                    }`}>
+                      <Layers className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <p className={`text-xs font-black uppercase tracking-wide flex items-center gap-1.5 ${
+                        user?.role === 'admin' ? 'text-indigo-950' : 'text-zinc-600'
+                      }`}>
+                        ADICIONAR VÁRIAS
+                        {user?.role === 'admin' && batchQuantity > 1 && (
+                          <span className="text-[9px] bg-indigo-200 text-indigo-900 px-2 py-0.5 rounded-full font-bold">
+                            {batchQuantity} VOLUMES
+                          </span>
+                        )}
+                        {user?.role !== 'admin' && (
+                          <span className="text-[9px] bg-zinc-200 text-zinc-600 px-2 py-0.5 rounded-full font-bold">
+                            EXCLUSIVO ADMIN
+                          </span>
+                        )}
+                      </p>
+                      <p className={`text-[11px] font-medium ${user?.role === 'admin' ? 'text-indigo-600' : 'text-zinc-400'}`}>
+                        {user?.role === 'admin' ? 'Registros individuais para cada volume' : 'Recurso disponível apenas para Administradores'}
+                      </p>
+                    </div>
+                  </div>
+                  {user?.role === 'admin' ? (
+                    <div className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const nextQty = Math.max(1, batchQuantity - 1);
+                          setBatchQuantity(nextQty);
+                          if (nextQty <= 1) setIsBatch(false);
+                        }}
+                        disabled={batchQuantity <= 1}
+                        className={`w-10 h-10 rounded-xl flex items-center justify-center font-black transition-all active:scale-90 ${
+                          batchQuantity <= 1 
+                            ? 'bg-zinc-100 text-zinc-300 border border-zinc-200 cursor-not-allowed' 
+                            : 'bg-white border border-indigo-200 text-indigo-700 hover:bg-indigo-50 shadow-xs'
+                        }`}
+                        title="Diminuir quantidade de encomendas"
+                      >
+                        -
+                      </button>
+                      <span className="text-xl font-black text-indigo-950 w-7 text-center font-mono">{batchQuantity}</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setBatchQuantity(batchQuantity + 1);
+                          setIsBatch(true);
+                          setPackageQuantity(1);
+                        }}
+                        className="w-10 h-10 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl flex items-center justify-center font-black shadow-xs transition-all active:scale-90"
+                        title="Aumentar quantidade de encomendas"
+                      >
+                        +
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-100 rounded-xl text-zinc-400 text-xs font-bold border border-zinc-200/80">
+                      <Lock className="w-3.5 h-3.5" />
+                      <span>Bloqueado</span>
+                    </div>
+                  )}
+                </div>
+
                 {/* Final Actions - SALVAR ENCOMENDA appears when resident is selected */}
                 {selectedResident && (
                   <div className="fixed bottom-0 left-0 right-0 p-4 pb-[max(1rem,env(safe-area-inset-bottom))] bg-white/90 backdrop-blur-md border-t border-gray-200 z-50 animate-in fade-in slide-in-from-bottom-5">
@@ -2505,6 +2683,86 @@ export default function PackageNew({ user }: PackageNewProps) {
                 >
                   FECHAR
                 </button>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        <AnimatePresence>
+          {isWaitingForReturn && (
+            <div className="fixed inset-0 z-[80] flex items-center justify-center p-4 bg-zinc-950/80 backdrop-blur-sm">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="bg-white rounded-[2rem] p-6 max-w-sm w-full shadow-2xl relative border border-zinc-100 text-center space-y-4"
+              >
+                <div className="w-16 h-16 bg-emerald-50 rounded-full flex items-center justify-center mx-auto text-emerald-600 shadow-inner">
+                  <MessageCircle className="w-8 h-8" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-black text-zinc-900 tracking-tight">CONFIRMAR ENVIO NO WHATSAPP</h3>
+                  <p className="text-xs text-zinc-500 mt-1 font-medium">
+                    Código: <span className="font-bold text-zinc-800">{pickupCode}</span> • {selectedResident?.nome || 'Morador'} ({selectedResident?.unidade || ''})
+                  </p>
+                </div>
+                <p className="text-xs text-zinc-600 leading-relaxed">
+                  A mensagem foi enviada com sucesso no WhatsApp do morador?
+                </p>
+
+                {pendingWhatsAppUrl && (
+                  <div className="pt-1">
+                    <a
+                      href={pendingWhatsAppUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={() => syncCondoActivity('WHATSAPP_ABERTO', pendingConfirmPackage?.id)}
+                      className="inline-flex items-center gap-1.5 text-xs text-emerald-600 font-semibold hover:underline cursor-pointer"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      Reabrir conversa no WhatsApp
+                    </a>
+                  </div>
+                )}
+
+                {confirmWhatsAppError && (
+                  <div className="bg-red-50 border border-red-200 rounded-2xl p-3 text-left flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                    <div className="text-xs text-red-700">
+                      <p className="font-bold">Não foi possível salvar a confirmação</p>
+                      <p className="mt-0.5">{confirmWhatsAppError} Tente novamente abaixo.</p>
+                    </div>
+                  </div>
+                )}
+
+                <div className="space-y-2 pt-2">
+                  <button
+                    type="button"
+                    disabled={isConfirmingWhatsApp}
+                    onClick={handleConfirmSentInNew}
+                    className="w-full py-3.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white font-bold rounded-2xl flex items-center justify-center gap-2 shadow-lg shadow-emerald-200 active:scale-95 transition-all text-sm cursor-pointer"
+                  >
+                    {isConfirmingWhatsApp ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        SALVANDO CONFIRMAÇÃO...
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle className="w-4 h-4" />
+                        {confirmWhatsAppError ? 'TENTAR CONFIRMAR NOVAMENTE' : 'SIM, MENSAGEM ENVIADA'}
+                      </>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isConfirmingWhatsApp}
+                    onClick={handleCancelSentInNew}
+                    className="w-full py-3 bg-zinc-100 hover:bg-zinc-200 disabled:opacity-60 text-zinc-700 font-bold rounded-2xl flex items-center justify-center gap-2 active:scale-95 transition-all text-xs cursor-pointer"
+                  >
+                    NÃO ENVIOU / MANTER PENDENTE
+                  </button>
+                </div>
               </motion.div>
             </div>
           )}

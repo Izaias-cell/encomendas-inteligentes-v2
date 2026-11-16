@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { supabase } from '../lib/supabase';
+import { api } from '../lib/apiClient';
 import { AuditLog, Profile } from '../types';
 import { 
   History, Loader2, Search, User, Calendar, 
@@ -45,19 +45,15 @@ export default function AuditLogs({ user }: AuditLogsProps) {
   const fetchLogs = async () => {
     setLoading(true);
     try {
-      let query = supabase
-        .from('auditoria_eventos')
-        .select('*')
-        .eq('condominio_id', user.condominium_id)
-        .gte('criado_em', startOfDay(new Date(dateRange.start + 'T00:00:00')).toISOString())
-        .lte('criado_em', endOfDay(new Date(dateRange.end + 'T23:59:59')).toISOString())
-        .order('criado_em', { ascending: false })
-        .limit(500);
+      const qs = new URLSearchParams({
+        ...(user.condominium_id ? { condominiumId: user.condominium_id } : {}),
+        start: startOfDay(new Date(dateRange.start + 'T00:00:00')).toISOString(),
+        end: endOfDay(new Date(dateRange.end + 'T23:59:59')).toISOString(),
+      }).toString();
 
-      const { data, error } = await query;
-
-      if (error) throw error;
-      setLogs(data || []);
+      const res = await api.get<{ logs?: AuditLog[] }>(`/api/operational/audit?${qs}`);
+      if (!res.ok) throw new Error(res.error || 'Erro ao carregar logs de auditoria');
+      setLogs(res.data?.logs || []);
     } catch (error: any) {
       toast.error('Erro ao carregar logs: ' + error.message);
     } finally {

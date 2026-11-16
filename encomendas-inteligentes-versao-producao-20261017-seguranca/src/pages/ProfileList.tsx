@@ -1,8 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { supabase } from '../lib/supabase';
+import { api } from '../lib/apiClient';
 import { Profile } from '../types';
-import { Users, Plus, Loader2, Search, User, Phone, Home, Shield, Trash2, MoreVertical, Edit, Power, X, FileSpreadsheet } from 'lucide-react';
+import { Users, Plus, Loader2, Search, User, Phone, Home, Shield, Trash2, MoreVertical, Edit, Power, X, FileSpreadsheet, UserCheck, UserX } from 'lucide-react';
 import { formatResidentAddress } from '../lib/residentUtils';
 import { toast } from 'react-hot-toast';
 import { registrarAuditoria } from '../services/auditService';
@@ -33,7 +33,8 @@ export default function ProfileList({ user }: ProfileListProps) {
     block: '',
     street: '',
     horario_inicio: '',
-    horario_fim: ''
+    horario_fim: '',
+    escala_tipo: ''
   });
   const [condoSettings, setCondoSettings] = useState<any>(null);
   const [isImporterOpen, setIsImporterOpen] = useState(false);
@@ -46,29 +47,25 @@ export default function ProfileList({ user }: ProfileListProps) {
 
   const fetchSettings = async () => {
     if (!user.condominium_id) return;
-    const { data } = await supabase
-      .from('condominium_settings')
-      .select('*')
-      .eq('condominium_id', user.condominium_id)
-      .maybeSingle();
-    if (data) setCondoSettings(data);
+    try {
+      const res = await api.get<{ settings?: any }>(`/api/operational/context?condominiumId=${encodeURIComponent(user.condominium_id)}`);
+      if (res.ok && res.data?.settings) setCondoSettings(res.data.settings);
+    } catch {
+      // ignore settings error
+    }
   };
 
   const fetchProfiles = async () => {
     if (!user.condominium_id) return;
     try {
-      // Fetch residents from moradores
-      let query = supabase
-        .from('moradores')
-        .select('id, nome, unidade, unit_type, block, street, telefone, ativo, created_at, condominium_id')
-        .eq('condominium_id', user.condominium_id);
-      
-      const { data: residentsData, error: residentsError } = await query;
+      const res = await api.get<{ moradores?: any[]; settings?: any }>(
+        `/api/operational/context?includeInactive=true&condominiumId=${encodeURIComponent(user.condominium_id)}`
+      );
+      if (!res.ok) throw new Error(res.error || 'Erro ao buscar moradores');
+      if (res.data?.settings) setCondoSettings(res.data.settings);
+      const residentsData = res.data?.moradores || [];
 
-      if (residentsError) throw residentsError;
-
-      // Map residents to Profile-like structure
-      const mappedResidents: Profile[] = (residentsData || []).map(r => ({
+      const mappedResidents: Profile[] = residentsData.map((r: any) => ({
         id: r.id,
         full_name: r.nome,
         phone: r.telefone,
@@ -96,20 +93,11 @@ export default function ProfileList({ user }: ProfileListProps) {
 
     try {
       setLoading(true);
-      
-      // Soft delete in moradores table
-      const { error: errorMorador } = await supabase
-        .from('moradores')
-        .update({ ativo: false })
-        .eq('id', profile.id);
-
-      if (errorMorador) throw errorMorador;
-
-      // Also try to deactivate in profiles table if it exists
-      await supabase
-        .from('profiles')
-        .update({ active: false })
-        .eq('id', profile.id);
+      const res = await api.patch(`/api/operational/moradores/${profile.id}`, {
+        ativo: false,
+        condominiumId: user.condominium_id
+      });
+      if (!res.ok) throw new Error(res.error || 'Erro ao desativar morador');
 
       await registrarAuditoria({
         condominio_id: user.condominium_id || '',
@@ -141,13 +129,11 @@ export default function ProfileList({ user }: ProfileListProps) {
     try {
       setLoading(true);
       const newStatus = !profile.active;
-      
-      const { error } = await supabase
-        .from('moradores')
-        .update({ ativo: newStatus })
-        .eq('id', profile.id);
-
-      if (error) throw error;
+      const res = await api.patch(`/api/operational/moradores/${profile.id}`, {
+        ativo: newStatus,
+        condominiumId: user.condominium_id
+      });
+      if (!res.ok) throw new Error(res.error || 'Erro ao alterar status do morador');
 
       await registrarAuditoria({
         condominio_id: user.condominium_id || '',
@@ -179,13 +165,8 @@ export default function ProfileList({ user }: ProfileListProps) {
     try {
       setLoading(true);
       const newStatus = !profile.active;
-      
-      const { error } = await supabase
-        .from('profiles')
-        .update({ active: newStatus })
-        .eq('id', profile.id);
-
-      if (error) throw error;
+      const res = await api.put(`/api/admin/users/${profile.id}`, { active: newStatus });
+      if (!res.ok) throw new Error(res.error || 'Erro ao alterar status do usuário');
 
       await registrarAuditoria({
         condominio_id: user.condominium_id || '',
@@ -225,7 +206,8 @@ export default function ProfileList({ user }: ProfileListProps) {
       block: profile.block || '',
       street: profile.street || '',
       horario_inicio: profile.horario_inicio || '',
-      horario_fim: profile.horario_fim || ''
+      horario_fim: profile.horario_fim || '',
+      escala_tipo: (profile.escala_tipo as any) || ''
     });
     setShowEditModal(true);
   };
@@ -237,35 +219,28 @@ export default function ProfileList({ user }: ProfileListProps) {
     setModalLoading(true);
     try {
       if (editingProfile.role === 'resident') {
-        const { error } = await supabase
-          .from('moradores')
-          .update({
-            nome: formData.full_name,
-            telefone: formData.phone,
-            unidade: formData.unidade || editingProfile.unidade,
-            unit_type: (formData.unit_type || editingProfile.unit_type),
-            block: formData.block || editingProfile.block,
-            street: formData.street || editingProfile.street,
-            ativo: formData.active
-          })
-          .eq('id', editingProfile.id);
-
-        if (error) throw error;
+        const res = await api.patch(`/api/operational/moradores/${editingProfile.id}`, {
+          condominiumId: user.condominium_id,
+          nome: formData.full_name,
+          telefone: formData.phone,
+          unidade: formData.unidade || editingProfile.unidade,
+          unit_type: (formData.unit_type || editingProfile.unit_type),
+          block: formData.block || editingProfile.block,
+          street: formData.street || editingProfile.street,
+          ativo: formData.active
+        });
+        if (!res.ok) throw new Error(res.error || 'Erro ao atualizar morador');
       } else {
-        const { error } = await supabase
-          .from('profiles')
-          .update({
-            full_name: formData.full_name,
-            phone: formData.phone,
-            role: formData.role,
-            active: formData.active,
-            horario_inicio: formData.horario_inicio || null,
-            horario_fim: formData.horario_fim || null,
-            updated_at: new Date().toISOString()
-          })
-          .eq('id', editingProfile.id);
-
-        if (error) throw error;
+        const res = await api.put(`/api/admin/users/${editingProfile.id}`, {
+          full_name: formData.full_name,
+          phone: formData.phone,
+          role: formData.role,
+          active: formData.active,
+          horario_inicio: formData.horario_inicio || null,
+          horario_fim: formData.horario_fim || null,
+          escala_tipo: formData.escala_tipo || null
+        });
+        if (!res.ok) throw new Error(res.error || 'Erro ao atualizar usuário');
       }
 
       await registrarAuditoria({
@@ -692,6 +667,22 @@ export default function ProfileList({ user }: ProfileListProps) {
                         className="w-full px-3 py-2 rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 text-xs font-medium"
                       />
                     </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-zinc-500 uppercase tracking-wider mb-1.5">
+                      Tipo de Escala (Dias de Plantão)
+                    </label>
+                    <select
+                      value={formData.escala_tipo || ''}
+                      onChange={e => setFormData({ ...formData, escala_tipo: e.target.value })}
+                      className="w-full px-3.5 py-2 rounded-xl border border-zinc-200 outline-none focus:ring-2 focus:ring-emerald-500 bg-white text-xs font-medium"
+                    >
+                      <option value="">Não configurada (Manual)</option>
+                      <option value="impar">Dia Ímpar</option>
+                      <option value="par">Dia Par</option>
+                      <option value="todos">Todos os Dias / Diário</option>
+                    </select>
                   </div>
                 </div>
               )}
