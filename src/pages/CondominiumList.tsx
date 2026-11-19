@@ -1,14 +1,15 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
-import { api } from '../lib/apiClient';
+import { api, generateSecureTempPassword } from '../lib/apiClient';
 import { Condominium, Profile, Role } from '../types';
 import { 
   Building, Building2, Plus, Loader2, Search, MapPin, 
   Users, Package, Edit2, Trash2, Power, Key, X, Filter, 
   Check, Copy, AlertTriangle, Phone, Mail, Calendar, 
   ArrowUpDown, Shield, User, FileText, CheckCircle2, XCircle,
-  MoreVertical, Eye, UserPlus
+  MoreVertical, Eye, UserPlus,
+  ArrowRight
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { registrarAuditoria } from '../services/auditService';
@@ -39,9 +40,10 @@ interface SummaryData {
 
 interface CondominiumListProps {
   user?: Profile;
+  onUpdateUser?: (updated: Profile) => void;
 }
 
-export default function CondominiumList({ user }: CondominiumListProps) {
+export default function CondominiumList({ user, onUpdateUser }: CondominiumListProps) {
   const [condos, setCondos] = useState<Condominium[]>([]);
   const [summary, setSummary] = useState<SummaryData>({
     total_condos: 0,
@@ -79,6 +81,11 @@ export default function CondominiumList({ user }: CondominiumListProps) {
   const [resetSuccessData, setResetSuccessData] = useState<{ user: Profile; tempPassword: string } | null>(null);
   const [copiedPassword, setCopiedPassword] = useState(false);
   const [showAddUserModal, setShowAddUserModal] = useState(false);
+  const [residentModalCondo, setResidentModalCondo] = useState<Condominium | null>(null);
+  // AJUSTE 2: Estado para o Modal de Escolha de Perfil (ADMIN / PORTARIA)
+  const [profileChoiceCondo, setProfileChoiceCondo] = useState<Condominium | null>(null);
+  const [residentForm, setResidentForm] = useState({ nome: '', telefone: '', unidade: '', unit_type: '', block: '', lote: '', street: '' });
+  const [residentLoading, setResidentLoading] = useState(false);
 
   // Portaria Access Code Regeneration State
   const [regenerateConfirmCondo, setRegenerateConfirmCondo] = useState<Condominium | null>(null);
@@ -167,9 +174,9 @@ export default function CondominiumList({ user }: CondominiumListProps) {
         if (refreshed) return refreshed;
       }
 
-      return { access_token: 'MOCK_TOKEN' } as any;
+      return null;
     } catch (err) {
-      return { access_token: 'MOCK_TOKEN' } as any;
+      return null;
     }
   };
 
@@ -395,7 +402,7 @@ export default function CondominiumList({ user }: CondominiumListProps) {
     setActionLoading(true);
 
     try {
-      const tempPassword = Math.random().toString(36).slice(-8) + Math.random().toString(36).slice(-4);
+      const tempPassword = generateSecureTempPassword(12);
       const res = await api.post(`/api/admin/users/${target.id}/reset-password`, { newPassword: tempPassword });
 
       if (!res.ok) throw new Error(res.error || 'Erro ao resetar senha');
@@ -420,14 +427,114 @@ export default function CondominiumList({ user }: CondominiumListProps) {
       const res = await api.delete(`/api/admin/users/${target.id}`);
       if (!res.ok) throw new Error(res.error || 'Erro ao excluir usuário');
 
-      toast.success(`Usuário ${target.full_name} excluído com sucesso!`);
-      setCondoUsers(prev => prev.filter(u => u.id !== target.id));
+      if (res.data?.softDeleted) {
+        toast.success(res.data.message || `Usuário ${target.full_name} inativado preservando histórico.`);
+        setCondoUsers(prev => prev.map(u => u.id === target.id ? { ...u, active: false } : u));
+      } else {
+        toast.success(`Usuário ${target.full_name} excluído com sucesso!`);
+        setCondoUsers(prev => prev.filter(u => u.id !== target.id));
+      }
       setUserToDelete(null);
       fetchCondominiums();
     } catch (error: any) {
       toast.error('Erro ao excluir usuário: ' + error.message);
     } finally {
       setActionLoading(false);
+    }
+  };
+
+  // AJUSTE 2: Executa o acesso com escolha explícita de perfil (ADMIN / PORTARIA)
+  const handleExecuteAccess = async (condo: Condominium, targetContext: 'admin' | 'portaria') => {
+    setActionLoading(true);
+    setProfileChoiceCondo(null);
+    try {
+      const res = await api.post('/api/profiles/select-condominium', { condominiumId: condo.id });
+      if (!res.ok) {
+        throw new Error(res.error || 'Erro ao selecionar condomínio');
+      }
+      
+      if (res.data?.profile && onUpdateUser) {
+        onUpdateUser(res.data.profile);
+      }
+
+      if (targetContext === 'admin') {
+        toast.success(`Acessando ${condo.name} como Administrador...`);
+        navigate('/dashboard');
+      } else {
+        toast.success(`Acessando ambiente da Portaria de ${condo.name}...`);
+        navigate('/portaria');
+      }
+    } catch (err: any) {
+      console.error('Erro ao acessar condomínio:', err);
+      toast.error('Erro ao acessar condomínio: ' + (err.message || 'Erro desconhecido'));
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleSaveResident = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!residentModalCondo) return;
+    if (!residentForm.nome.trim()) {
+      toast.error('O nome do morador é obrigatório.');
+      return;
+    }
+    if (!residentForm.unidade.trim()) {
+      toast.error('O número da unidade/casa é obrigatório.');
+      return;
+    }
+
+    setResidentLoading(true);
+    try {
+      const res = await api.post<{ morador?: any }>('/api/operational/moradores', {
+        nome: residentForm.nome.trim(),
+        telefone: residentForm.telefone.trim(),
+        unidade: residentForm.unidade.trim(),
+        unit_type: residentForm.unit_type.trim(),
+        block: residentForm.block.trim(),
+        lote: residentForm.lote.trim(),
+        street: residentForm.street.trim(),
+        condominium_id: residentModalCondo.id,
+        ativo: true
+      });
+
+      if (!res.ok || !res.data?.morador?.id) {
+        throw new Error(res.error || 'Erro ao cadastrar morador');
+      }
+      const newResident = res.data.morador;
+
+      if (user) {
+        await registrarAuditoria({
+          condominio_id: residentModalCondo.id,
+          usuario_id: user.id,
+          usuario_nome: user.full_name,
+          usuario_perfil: user.role,
+          tipo_evento: 'MORADOR_CRIADO',
+          acao: 'CREATE',
+          tabela_afetada: 'moradores',
+          registro_id: newResident.id,
+          descricao: `Morador criado: ${residentForm.nome} - Unidade ${residentForm.unidade} no condomínio ${residentModalCondo.name}`,
+          metodo: 'MANUAL'
+        });
+      }
+
+      toast.success(`Morador cadastrado com sucesso no condomínio ${residentModalCondo.name}!`);
+      setResidentModalCondo(null);
+      setResidentForm({
+        nome: '',
+        telefone: '',
+        unidade: '',
+        unit_type: '',
+        block: '',
+        lote: '',
+        street: ''
+      });
+      fetchCondominiums();
+    } catch (err: any) {
+      console.error('Erro ao cadastrar morador:', err);
+      toast.error('Erro ao cadastrar morador: ' + (err.message || 'Erro desconhecido'));
+    } finally {
+      setResidentLoading(false);
     }
   };
 
@@ -643,23 +750,25 @@ export default function CondominiumList({ user }: CondominiumListProps) {
   const filteredCondos = (condos || []).filter(c => {
     if (!c) return false;
 
-    const searchTermLower = (searchTerm || '').toLowerCase().trim();
-    const cityFilterLower = (cityFilter || '').toLowerCase().trim();
-    const cnpjFilterLower = (cnpjFilter || '').toLowerCase().trim();
+    const normalizeStr = (s?: string) => (s || '').toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
 
-    const nameStr = (c.name || '').toLowerCase();
-    const addressStr = (c.address || '').toLowerCase();
-    const cityStateStr = (c.city_state || c.city || '').toLowerCase();
+    const searchTermNorm = normalizeStr(searchTerm);
+    const cityFilterNorm = normalizeStr(cityFilter);
+    const cnpjFilterNorm = (cnpjFilter || '').toLowerCase().trim();
+
+    const nameNorm = normalizeStr(c.name);
+    const addressNorm = normalizeStr(c.address);
+    const cityStateNorm = normalizeStr(c.city_state || c.city);
     const cnpjStr = (c.cnpj || '').toLowerCase();
 
-    const matchesName = !searchTermLower ||
-                        nameStr.includes(searchTermLower) ||
-                        addressStr.includes(searchTermLower) ||
-                        cityStateStr.includes(searchTermLower) ||
-                        cnpjStr.includes(searchTermLower);
+    const matchesName = !searchTermNorm ||
+                        nameNorm.includes(searchTermNorm) ||
+                        addressNorm.includes(searchTermNorm) ||
+                        cityStateNorm.includes(searchTermNorm) ||
+                        cnpjStr.includes(searchTermNorm);
 
-    const matchesCity = !cityFilterLower || cityStateStr.includes(cityFilterLower);
-    const matchesCnpj = !cnpjFilterLower || cnpjStr.includes(cnpjFilterLower);
+    const matchesCity = !cityFilterNorm || cityStateNorm.includes(cityFilterNorm);
+    const matchesCnpj = !cnpjFilterNorm || cnpjStr.includes(cnpjFilterNorm);
     const matchesStatus = statusFilter === 'all' ? true :
                           statusFilter === 'active' ? c.active !== false :
                           c.active === false;
@@ -841,6 +950,15 @@ export default function CondominiumList({ user }: CondominiumListProps) {
                   </div>
 
                   <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setProfileChoiceCondo(condo)}
+                      className="px-3 py-1 bg-zinc-900 hover:bg-emerald-600 text-white rounded-full text-xs font-black tracking-wider uppercase transition-all shadow-sm hover:shadow-emerald-200 hover:scale-105 active:scale-95 flex items-center gap-1"
+                      title={'Acessar condomínio ' + condo.name}
+                    >
+                      <ArrowRight className="w-3 h-3" />
+                      <span>ACESSAR</span>
+                    </button>
                     <span className={`px-3 py-1 rounded-full text-xs font-bold border ${
                       condo.active !== false 
                         ? 'bg-emerald-50 text-emerald-700 border-emerald-200' 
@@ -900,10 +1018,30 @@ export default function CondominiumList({ user }: CondominiumListProps) {
               <div className="pt-4 border-t border-zinc-100 flex items-center justify-between gap-2">
                 <button
                   onClick={() => openCondoDetail(condo, 'details')}
-                  className="flex-1 px-3 py-2 bg-zinc-900 text-white rounded-xl text-xs font-bold hover:bg-zinc-800 transition-all flex items-center justify-center gap-1.5"
+                  className="px-3 py-2 bg-zinc-900 text-white rounded-xl text-xs font-bold hover:bg-zinc-800 transition-all flex items-center justify-center gap-1.5"
                 >
                   <Eye className="w-3.5 h-3.5" />
                   <span>Detalhes</span>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setResidentModalCondo(condo);
+                    setResidentForm({
+                      nome: '',
+                      telefone: '',
+                      unidade: '',
+                      unit_type: '',
+                      block: '',
+                      lote: '',
+                      street: ''
+                    });
+                  }}
+                  className="flex-1 px-3 py-2 bg-emerald-600 text-white rounded-xl text-xs font-bold hover:bg-emerald-700 transition-all flex items-center justify-center gap-1.5 shadow-sm shadow-emerald-200"
+                  title={`Cadastrar Morador em ${condo.name}`}
+                >
+                  <UserPlus className="w-3.5 h-3.5" />
+                  <span>ADD MORADORES</span>
                 </button>
 
                 <button
@@ -963,6 +1101,233 @@ export default function CondominiumList({ user }: CondominiumListProps) {
           >
             Limpar Filtros
           </button>
+        </div>
+      )}
+
+      {/* AJUSTE 2: MODAL DE ESCOLHA DE PERFIL (ADMIN / PORTARIA) */}
+      {profileChoiceCondo && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 md:p-8 shadow-2xl border border-zinc-100 relative">
+            <button
+              onClick={() => setProfileChoiceCondo(null)}
+              className="absolute top-6 right-6 p-2 text-zinc-400 hover:text-zinc-600 rounded-xl hover:bg-zinc-100 transition-colors"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="flex items-center gap-3 mb-6">
+              <div className="w-12 h-12 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center">
+                <Building2 className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-lg font-black text-zinc-900">Acessar Condomínio</h3>
+                <p className="text-xs font-bold text-emerald-700">{profileChoiceCondo.name}</p>
+              </div>
+            </div>
+
+            <p className="text-xs text-zinc-500 mb-6 font-medium">
+              Selecione o ambiente em que deseja operar neste condomínio:
+            </p>
+
+            <div className="space-y-3.5">
+              <button
+                type="button"
+                onClick={() => handleExecuteAccess(profileChoiceCondo, 'admin')}
+                className="w-full p-4 rounded-2xl border-2 border-zinc-200 hover:border-emerald-600 bg-zinc-50 hover:bg-emerald-50/50 transition-all text-left flex items-center justify-between group"
+              >
+                <div className="flex items-center gap-3.5">
+                  <div className="w-10 h-10 rounded-xl bg-white border border-zinc-200 text-zinc-800 flex items-center justify-center group-hover:bg-emerald-600 group-hover:text-white transition-colors">
+                    <Shield className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <span className="block text-sm font-black text-zinc-900 group-hover:text-emerald-900">ENTRAR COMO ADMIN</span>
+                    <span className="block text-[11px] text-zinc-500 font-medium">Painel gerencial, síndicos, relatórios e configurações</span>
+                  </div>
+                </div>
+                <ArrowRight className="w-5 h-5 text-zinc-400 group-hover:text-emerald-600 group-hover:translate-x-1 transition-all" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleExecuteAccess(profileChoiceCondo, 'portaria')}
+                className="w-full p-4 rounded-2xl border-2 border-zinc-200 hover:border-orange-500 bg-zinc-50 hover:bg-orange-50/50 transition-all text-left flex items-center justify-between group"
+              >
+                <div className="flex items-center gap-3.5">
+                  <div className="w-10 h-10 rounded-xl bg-white border border-zinc-200 text-zinc-800 flex items-center justify-center group-hover:bg-orange-600 group-hover:text-white transition-colors">
+                    <Package className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <span className="block text-sm font-black text-zinc-900 group-hover:text-orange-900">ENTRAR COMO PORTARIA</span>
+                    <span className="block text-[11px] text-zinc-500 font-medium">Registro de encomendas, retiradas, WhatsApp e avisos</span>
+                  </div>
+                </div>
+                <ArrowRight className="w-5 h-5 text-zinc-400 group-hover:text-orange-600 group-hover:translate-x-1 transition-all" />
+              </button>
+            </div>
+
+            <div className="mt-6 pt-4 border-t border-zinc-100 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setProfileChoiceCondo(null)}
+                className="px-5 py-2.5 text-zinc-600 hover:text-zinc-900 font-bold text-xs rounded-xl hover:bg-zinc-100 transition-colors"
+              >
+                Cancelar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL ADD MORADOR VINCULADO AO CONDOMÍNIO */}
+      {residentModalCondo && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 overflow-y-auto animate-in fade-in duration-200">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 md:p-8 shadow-2xl border border-zinc-100 my-8">
+            <div className="flex items-center justify-between pb-4 border-b border-zinc-100 mb-6">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center">
+                  <UserPlus className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-zinc-900">Novo Morador</h3>
+                  <p className="text-xs text-zinc-500 font-medium">
+                    Condomínio: <span className="font-bold text-emerald-700">{residentModalCondo.name}</span>
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setResidentModalCondo(null)}
+                className="p-2 text-zinc-400 hover:text-zinc-600 rounded-xl hover:bg-zinc-100 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveResident} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-zinc-700 uppercase tracking-wider mb-1.5">
+                  Nome Completo *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={residentForm.nome}
+                  onChange={(e) => setResidentForm({ ...residentForm, nome: e.target.value })}
+                  placeholder="Ex: João da Silva"
+                  className="w-full px-4 py-3 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 font-medium"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-bold text-zinc-700 uppercase tracking-wider mb-1.5">
+                    WhatsApp / Telefone
+                  </label>
+                  <input
+                    type="text"
+                    value={residentForm.telefone}
+                    onChange={(e) => setResidentForm({ ...residentForm, telefone: e.target.value })}
+                    placeholder="(00) 00000-0000"
+                    className="w-full px-4 py-3 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 font-medium"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-zinc-700 uppercase tracking-wider mb-1.5">
+                    Unidade / Casa *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={residentForm.unidade}
+                    onChange={(e) => setResidentForm({ ...residentForm, unidade: e.target.value })}
+                    placeholder="Ex: 102 ou Casa 15"
+                    className="w-full px-4 py-3 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 font-medium"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-1">
+                    Tipo
+                  </label>
+                  <select
+                    value={residentForm.unit_type}
+                    onChange={(e) => setResidentForm({ ...residentForm, unit_type: e.target.value })}
+                    className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-emerald-500 text-zinc-800"
+                  >
+                    <option value="">Selecione...</option>
+                    <option value="CASA">Casa</option>
+                    <option value="APTO">Apartamento / Ap</option>
+                    <option value="SOBRADO">Sobrado</option>
+                    <option value="LOTE">Lote</option>
+                    <option value="SALA">Sala Comercial</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-1">
+                    Bloco / Alameda
+                  </label>
+                  <input
+                    type="text"
+                    value={residentForm.block}
+                    onChange={(e) => setResidentForm({ ...residentForm, block: e.target.value })}
+                    placeholder="Ex: Bloco B"
+                    className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-1">
+                    Lote / Quadra
+                  </label>
+                  <input
+                    type="text"
+                    value={residentForm.lote}
+                    onChange={(e) => setResidentForm({ ...residentForm, lote: e.target.value })}
+                    placeholder="Ex: Qd 05 Lt 12"
+                    className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-zinc-700 uppercase tracking-wider mb-1.5">
+                  Rua / Logradouro (Opcional)
+                </label>
+                <input
+                  type="text"
+                  value={residentForm.street}
+                  onChange={(e) => setResidentForm({ ...residentForm, street: e.target.value })}
+                  placeholder="Ex: Rua das Flores"
+                  className="w-full px-4 py-3 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 font-medium"
+                />
+              </div>
+
+              <div className="p-3 bg-emerald-50/60 rounded-xl border border-emerald-100 text-xs text-emerald-800">
+                🔒 Este morador será vinculado estritamente ao condomínio <strong>{residentModalCondo.name}</strong>.
+              </div>
+
+              <div className="flex items-center justify-end gap-3 pt-4 border-t border-zinc-100">
+                <button
+                  type="button"
+                  onClick={() => setResidentModalCondo(null)}
+                  className="px-5 py-2.5 text-zinc-600 hover:text-zinc-900 font-bold text-sm rounded-xl hover:bg-zinc-100 transition-colors"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={residentLoading}
+                  className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm rounded-xl transition-all shadow-md shadow-emerald-200 flex items-center gap-2 disabled:opacity-50"
+                >
+                  {residentLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <UserPlus className="w-4 h-4" />}
+                  <span>Salvar Morador</span>
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
 
@@ -1137,25 +1502,29 @@ export default function CondominiumList({ user }: CondominiumListProps) {
                       <span>Editar Dados</span>
                     </button>
 
-                    <button
-                      onClick={() => handleToggleStatus(selectedCondo)}
-                      className={`px-5 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${
-                        selectedCondo.active !== false 
-                          ? 'bg-amber-100 text-amber-800 hover:bg-amber-200' 
-                          : 'bg-emerald-600 text-white hover:bg-emerald-700'
-                      }`}
-                    >
-                      <Power className="w-4 h-4" />
-                      <span>{selectedCondo.active !== false ? 'Inativar Condomínio' : 'Ativar Condomínio'}</span>
-                    </button>
+                    {normalizeRole(user?.role) === 'admin' && (
+                      <>
+                        <button
+                          onClick={() => handleToggleStatus(selectedCondo)}
+                          className={`px-5 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${
+                            selectedCondo.active !== false 
+                              ? 'bg-amber-100 text-amber-800 hover:bg-amber-200' 
+                              : 'bg-emerald-600 text-white hover:bg-emerald-700'
+                          }`}
+                        >
+                          <Power className="w-4 h-4" />
+                          <span>{selectedCondo.active !== false ? 'Inativar Condomínio' : 'Ativar Condomínio'}</span>
+                        </button>
 
-                    <button
-                      onClick={() => setDeleteCondoConfirm(selectedCondo)}
-                      className="px-5 py-2.5 bg-red-50 text-red-600 hover:bg-red-100 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ml-auto"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                      <span>Excluir Condomínio</span>
-                    </button>
+                        <button
+                          onClick={() => setDeleteCondoConfirm(selectedCondo)}
+                          className="px-5 py-2.5 bg-red-50 text-red-600 hover:bg-red-100 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ml-auto"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                          <span>Excluir Condomínio</span>
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
               ) : (
@@ -1223,41 +1592,44 @@ export default function CondominiumList({ user }: CondominiumListProps) {
                               </td>
 
                               <td className="px-4 py-3 text-right">
-                                <div className="flex items-center justify-end gap-1">
-                                  <button
-                                    onClick={() => openUserEditModal(u)}
-                                    className="p-1.5 hover:bg-zinc-100 rounded-lg text-zinc-600"
-                                    title="Editar Usuário"
-                                  >
-                                    <Edit2 className="w-3.5 h-3.5" />
-                                  </button>
-
-                                  <button
-                                    onClick={() => handleToggleUserStatus(u)}
-                                    className="p-1.5 hover:bg-amber-50 rounded-lg text-amber-600"
-                                    title={u.active !== false ? 'Inativar' : 'Ativar'}
-                                  >
-                                    <Power className="w-3.5 h-3.5" />
-                                  </button>
-
-                                  {normalizeRole(u.role) !== 'porteiro' && (
+                                {(normalizeRole(user?.role) === 'admin' ||
+                                  (normalizeRole(user?.role) === 'sindico' && normalizeRole(u.role) === 'porteiro')) && (
+                                  <div className="flex items-center justify-end gap-1">
                                     <button
-                                      onClick={() => setUserToReset(u)}
-                                      className="p-1.5 hover:bg-blue-50 rounded-lg text-blue-600"
-                                      title="Resetar Senha"
+                                      onClick={() => openUserEditModal(u)}
+                                      className="p-1.5 hover:bg-zinc-100 rounded-lg text-zinc-600"
+                                      title="Editar Usuário"
                                     >
-                                      <Key className="w-3.5 h-3.5" />
+                                      <Edit2 className="w-3.5 h-3.5" />
                                     </button>
-                                  )}
 
-                                  <button
-                                    onClick={() => setUserToDelete(u)}
-                                    className="p-1.5 hover:bg-red-50 rounded-lg text-red-600"
-                                    title="Excluir Usuário"
-                                  >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                  </button>
-                                </div>
+                                    <button
+                                      onClick={() => handleToggleUserStatus(u)}
+                                      className="p-1.5 hover:bg-amber-50 rounded-lg text-amber-600"
+                                      title={u.active !== false ? 'Inativar' : 'Ativar'}
+                                    >
+                                      <Power className="w-3.5 h-3.5" />
+                                    </button>
+
+                                    {normalizeRole(u.role) !== 'porteiro' && (
+                                      <button
+                                        onClick={() => setUserToReset(u)}
+                                        className="p-1.5 hover:bg-blue-50 rounded-lg text-blue-600"
+                                        title="Resetar Senha"
+                                      >
+                                        <Key className="w-3.5 h-3.5" />
+                                      </button>
+                                    )}
+
+                                    <button
+                                      onClick={() => setUserToDelete(u)}
+                                      className="p-1.5 hover:bg-red-50 rounded-lg text-red-600"
+                                      title="Excluir Usuário"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
+                                )}
                               </td>
                             </tr>
                           ))}
@@ -1430,17 +1802,19 @@ export default function CondominiumList({ user }: CondominiumListProps) {
                   />
                 </div>
 
-                <div className="flex items-center pt-6">
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={condoForm.active}
-                      onChange={(e) => setCondoForm({ ...condoForm, active: e.target.checked })}
-                      className="w-4 h-4 text-emerald-600 rounded border-zinc-300 focus:ring-emerald-500"
-                    />
-                    <span className="text-sm font-bold text-zinc-800">Condomínio Ativo</span>
-                  </label>
-                </div>
+                {normalizeRole(user?.role) === 'admin' && (
+                  <div className="flex items-center pt-6">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={condoForm.active}
+                        onChange={(e) => setCondoForm({ ...condoForm, active: e.target.checked })}
+                        className="w-4 h-4 text-emerald-600 rounded border-zinc-300 focus:ring-emerald-500"
+                      />
+                      <span className="text-sm font-bold text-zinc-800">Condomínio Ativo</span>
+                    </label>
+                  </div>
+                )}
 
                 {/* SEÇÃO USUÁRIOS DO CONDOMÍNIO (Criação de novos condomínios) */}
                 {!editingCondo && (

@@ -1,0 +1,952 @@
+IMPLEMENTAÇÃO COMPLETA — ENCOMENDAS INTELIGENTES
+CONDOMÍNIO BELLE VILLE + CONDOMÍNIO TESTE — HOMOLOGAÇÃO
+
+IMPORTANTE: este é um pedido de IMPLEMENTAÇÃO, não de auditoria.
+
+Você recebeu anteriormente uma auditoria técnica em modo estritamente leitura. A auditoria concluiu que os 8 itens abaixo são viáveis na arquitetura atual e identificou suas dependências.
+
+AGORA implemente TODOS os itens especificados neste prompt, de forma integrada e cuidadosa.
+
+======================================================================
+REGRA INEGOCIÁVEL DE ESCOPO — LEIA ANTES DE ALTERAR QUALQUER ARQUIVO
+======================================================================
+
+1. FAÇA SOMENTE AS ALTERAÇÕES EXPLICITAMENTE SOLICITADAS NESTE PROMPT.
+
+2. NÃO altere funcionalidades que já estão funcionando corretamente.
+
+3. NÃO faça refatorações gerais.
+
+4. NÃO faça "melhorias" de código, UI, arquitetura ou UX que não estejam relacionadas diretamente aos itens solicitados.
+
+5. NÃO substitua mecanismos existentes por mecanismos paralelos se o mecanismo atual puder ser reutilizado.
+
+6. NÃO altere o funcionamento atual do WhatsApp, do fluxo de portaria, da autenticação, das permissões ou das sessões, exceto nos pontos explicitamente solicitados.
+
+7. PRESERVE integralmente o comportamento existente sempre que a mudança solicitada não exigir alteração.
+
+8. NÃO exclua registros existentes.
+
+9. NÃO altere, corrija, migre ou apague dados históricos de encomendas já entregues.
+
+10. NUNCA altere encomendas com status "delivered" ao implementar agrupamento ou baixa.
+
+11. NÃO faça nenhuma alteração no banco de dados estruturalmente sem necessidade. Se não for necessária migration, não crie migration.
+
+12. NÃO altere o schema do banco apenas por conveniência.
+
+13. NÃO altere o CONDOMÍNIO BELLE VILLE para realizar testes destrutivos.
+
+14. Os testes funcionais que envolvam criação, agrupamento, lote e baixa devem ser realizados preferencialmente no:
+CONDOMÍNIO TESTE — HOMOLOGAÇÃO.
+
+15. NÃO execute commit.
+
+16. NÃO execute push.
+
+17. NÃO execute deploy.
+
+18. Ao terminar, apresente um relatório completo do que foi alterado, arquivos modificados, testes realizados, resultado do build e eventuais limitações.
+
+19. Se encontrar alguma necessidade que NÃO esteja prevista neste prompt, NÃO implemente essa necessidade por conta própria. Apenas informe no relatório final.
+
+======================================================================
+OBJETIVO GERAL
+======================================================================
+
+Implementar de forma integrada:
+
+1. ACESSAR como ADMIN em cada condomínio
+2. ALERTA DE ESQUECIMENTO no modo APÓS REGISTRO
+3. AGRUPAMENTO PERMANENTE de encomendas pendentes
+4. MORADORES ATIVOS/INATIVOS nas buscas
+5. NOTIFICAÇÃO conforme quantidade de encomendas
+6. FILTRO de usuários na lista geral ADMIN
+7. CONTAGENS corretas e em tempo real
+8. REGISTRO EM LOTE funcional
+
+Além disso:
+
+9. transformar o campo TIPO do cadastro de morador em seleção com opções existentes/adequadas, preservando os dados já existentes.
+
+Esses itens possuem dependências entre si. Não implemente cada um de forma isolada criando regras conflitantes.
+
+======================================================================
+ITEM 1 — BOTÃO "ACESSAR" COMO ADMIN
+======================================================================
+
+Na tela GESTÃO DE CONDOMÍNIOS, adicionar no card de cada condomínio:
+
+ACESSAR
+
+Posição:
+
+- canto superior direito do card;
+- imediatamente à esquerda do indicador/pílula ATIVO/INATIVO.
+
+Ao clicar:
+
+- o usuário deve continuar sendo ADMIN;
+- deve mudar apenas o condomínio ativo/contexto do ADMIN;
+- deve ser direcionado ao Dashboard/Painel daquele condomínio;
+- NÃO deve virar porteiro;
+- NÃO deve pedir código de portaria;
+- NÃO deve criar sessão operacional de portaria;
+- NÃO deve gravar nem alterar:
+  localStorage('encomendas_portaria_token');
+- NÃO deve interferir na sessão da portaria física daquele condomínio.
+
+Reutilizar a infraestrutura existente:
+
+/api/profiles/select-condominium
+
+e o fluxo existente de seleção de condomínio.
+
+O resultado esperado é equivalente ao ADMIN selecionar aquele condomínio em SelectCondominium, porém diretamente pelo botão ACESSAR.
+
+PRESERVAR:
+
+user.role === 'admin'
+
+Apenas atualizar o condominium_id/contexto necessário e navegar para o Dashboard.
+
+Não criar autenticação paralela.
+
+======================================================================
+ITEM 2 — ALERTA DE ESQUECIMENTO NO MODO "APÓS REGISTRO"
+======================================================================
+
+IMPORTANTE:
+
+NÃO alterar o mecanismo existente de envio de WhatsApp.
+
+NÃO substituir handleDirectNotify(), handleNotifyAll(), processNextInQueue(), wa.me, modal de envio ou qualquer mecanismo existente.
+
+Este item é SOMENTE um observador/alerta de inatividade.
+
+O comportamento deve ser:
+
+O recurso somente funciona quando:
+
+notifyAfter === true
+
+ou seja, somente no modo:
+
+APÓS REGISTRO.
+
+Depois que existirem moradores pendentes de notificação:
+
+- iniciar o acompanhamento da atividade de envio;
+- se o porteiro começar a enviar dentro de 5 minutos, NÃO mostrar alerta;
+- se passarem 5 minutos com moradores pendentes e o porteiro NÃO tiver iniciado/continuado os envios, mostrar o alerta.
+
+O alerta deve:
+
+1. emitir alerta sonoro perceptível;
+2. mostrar temporariamente um botão vermelho de destaque;
+3. texto:
+
+"Por favor, envie as notificações aos moradores!"
+
+4. mostrar também a quantidade atual de moradores ainda pendentes;
+5. ao clicar, levar o porteiro ao fluxo/lista EXISTENTE de notificações pendentes.
+
+IMPORTANTE:
+
+O botão NÃO desaparece simplesmente porque foi clicado.
+
+Ele permanece enquanto existirem moradores pendentes.
+
+Quando o porteiro efetivamente iniciar os envios:
+
+- parar o som;
+- encerrar o alerta atual;
+- registrar a atividade de envio.
+
+Se ele enviar alguns moradores e depois parar novamente:
+
+- havendo moradores pendentes;
+- iniciar uma NOVA janela de 5 minutos de inatividade.
+
+Se passar novamente 5 minutos sem retomada:
+
+- emitir novo alerta;
+- mostrar novamente o botão.
+
+Se continuar sem enviar:
+
+- repetir o alerta sonoro a cada 3 minutos.
+
+Quando todos os moradores pendentes forem notificados:
+
+- parar completamente o alerta;
+- esconder o botão;
+- encerrar o ciclo;
+- não deixar timers ativos.
+
+REGRA IMPORTANTE:
+
+O relógio deve medir INATIVIDADE DE ENVIO.
+
+Não usar simplesmente "5 minutos depois do cadastro" como regra permanente.
+
+Exemplo obrigatório:
+
+10:00 — cadastrou encomendas.
+10:02 — começou a enviar.
+Resultado: nenhum alerta.
+
+10:02 — enviou para alguns moradores.
+10:07 — parou de enviar.
+Resultado: nova janela de 5 minutos.
+
+10:12 — ainda existem pendentes.
+Resultado: alerta.
+
+10:12 — clicou para retomar os envios.
+Resultado: som para e novo período de acompanhamento começa.
+
+Se continuar parado depois do alerta:
+repetir a cada 3 minutos.
+
+A quantidade exibida no botão deve representar MORADORES distintos pendentes de notificação, e não simplesmente quantidade de linhas físicas da tabela packages.
+
+Evitar múltiplos timers simultâneos.
+
+Utilizar useRef/useEffect com cleanup adequado.
+
+O alerta deve desaparecer/encerrar imediatamente quando:
+pendingResidentsCount === 0
+
+Não executar esse mecanismo fora de APÓS REGISTRO.
+
+======================================================================
+ITEM 3 — AGRUPAMENTO PERMANENTE DE ENCOMENDAS PENDENTES
+======================================================================
+
+REGRA PRINCIPAL:
+
+Enquanto um morador possuir QUALQUER encomenda pendente de retirada, novas encomendas daquele mesmo morador devem permanecer no mesmo grupo de retirada.
+
+Isso vale independentemente de:
+
+- mesmo dia;
+- dia seguinte;
+- semana seguinte;
+- várias semanas depois.
+
+Exemplo:
+
+Dia 1:
+3 encomendas → código ABC
+
+Dia 5:
++1 → total 4 → código ABC
+
+Dia 12:
++3 → total 7 → código ABC
+
+Dia 20:
++3 → total 10 → código ABC
+
+Somente quando TODAS as encomendas pendentes daquele ciclo forem retiradas:
+
+- todas ficam delivered;
+- o código deixa de representar pendências;
+- uma nova chegada futura poderá iniciar um novo ciclo/código.
+
+NUNCA misturar encomendas já entregues com o novo agrupamento.
+
+Antes de gerar novo pickup_code:
+
+consultar encomendas do mesmo recipient_id com:
+
+status != 'delivered'
+e delivered_at IS NULL
+
+Se existir uma pendência:
+
+- reutilizar o mesmo pickup_code;
+- reutilizar o mesmo pickup_token.
+
+Se não existir nenhuma pendência:
+
+- gerar novo código/token.
+
+IMPORTANTE:
+
+Não alterar registros históricos já entregues.
+
+Não apagar registros.
+
+Não juntar fisicamente registros.
+
+Cada encomenda continua sendo um registro individual.
+
+Cada registro deve manter:
+
+- sua foto;
+- received_at;
+- histórico;
+- demais dados próprios.
+
+O agrupamento é lógico através do mesmo código/token e do mesmo morador.
+
+A baixa pelo código deve retirar todas as encomendas PENDENTES daquele grupo, sem atingir registros delivered.
+
+======================================================================
+ITEM 4 — MORADORES ATIVOS / INATIVOS
+======================================================================
+
+REGRA:
+
+Moradores inativos NÃO devem ser apagados.
+
+Eles permanecem no banco para:
+
+- histórico;
+- auditoria;
+- encomendas antigas;
+- administração.
+
+Nas buscas operacionais:
+
+PORTARIA:
+- buscar por nome → somente ativo === true;
+- buscar por unidade → somente ativo === true;
+- dropdowns/modais rápidos → somente ativo === true.
+
+CADASTRO DE ENCOMENDA:
+- somente moradores ativos.
+
+ADMIN / MORADORES:
+- listagem principal → moradores ativos;
+- pesquisa da lista ativa → somente ativos;
+- aba/lista de inativos → continua permitindo consultar os desativados.
+
+NÃO excluir duplicidades automaticamente.
+
+NÃO apagar moradores apenas porque existe outro morador com a mesma unidade.
+
+Se houver registros ativos e inativos da mesma unidade, preservar ambos e mostrar somente o ativo nas operações.
+
+Garantir especialmente que todas as consultas existentes em:
+
+- Portaria.tsx
+- residentSearchService.ts
+- PackageNew.tsx
+- demais buscas operacionais encontradas durante a implementação
+
+respeitem ativo === true.
+
+Não modificar a lógica histórica dos moradores inativos.
+
+======================================================================
+ITEM 4.1 — CAMPO "TIPO" NO CADASTRO DE MORADOR
+======================================================================
+
+No formulário ADD MORADORES / cadastro de morador:
+
+O campo TIPO não deve ser um campo de texto livre.
+
+Transformá-lo em seleção (select) utilizando as opções compatíveis já utilizadas pelo sistema.
+
+Exemplos esperados, conforme a modelagem existente:
+
+- CASA
+- APARTAMENTO / AP
+- SOBRADO
+- e demais opções que já existam no projeto.
+
+ANTES de criar novas opções, verificar quais valores/opções já são utilizados no projeto e preservar a nomenclatura existente.
+
+Não alterar os demais campos do cadastro.
+
+Não alterar a estrutura do banco se a coluna existente já suportar os valores.
+
+======================================================================
+ITEM 5 — MENSAGEM DE WHATSAPP CONFORME QUANTIDADE
+======================================================================
+
+Não alterar o mecanismo de WhatsApp.
+
+Alterar SOMENTE a montagem da mensagem para refletir corretamente a quantidade real de encomendas pendentes daquele morador/grupo.
+
+REGRAS:
+
+1 encomenda:
+
+📦 Sua encomenda chegou!
+
+2 ou mais:
+
+manter a mensagem de chegada e informar:
+
+Você tem X encomendas a serem retiradas.
+
+A quantidade X deve ser a quantidade REAL de encomendas pendentes naquele grupo.
+
+Quando:
+
+X >= 8
+
+adicionar ao corpo da mensagem:
+
+ATENÇÃO: Você tem inúmeras encomendas na portaria, por gentileza retire o quanto antes.
+
+A regra começa EXATAMENTE em 8.
+
+Não mostrar essa advertência para 7.
+
+Mostrar para:
+8, 9, 10, 11...
+
+Preservar:
+
+- link/imagem;
+- unidade;
+- código de retirada;
+- demais informações atuais;
+- emojis;
+- estrutura existente da mensagem;
+- mecanismo wa.me;
+- modo automático/manual existente.
+
+Não criar um novo sistema de WhatsApp.
+
+A quantidade deve ser derivada do novo modelo real de registros e do agrupamento, não de uma contagem incorreta causada pelo parsing de texto.
+
+======================================================================
+ITEM 6 — USUÁRIOS NO ADMIN
+======================================================================
+
+Na tela geral:
+
+/users
+
+mostrar somente:
+
+- ADMIN
+- SÍNDICO
+
+Não mostrar PORTEIROS nessa lista geral.
+
+IMPORTANTE:
+
+NÃO alterar o botão USUÁRIOS existente dentro do card de cada condomínio.
+
+Dentro do condomínio:
+
+USUÁRIOS deve continuar mostrando os usuários daquele condomínio, incluindo:
+
+- porteiros;
+- síndicos;
+- administradores;
+- demais perfis que atualmente já aparecem naquele contexto.
+
+A alteração deve ser restrita à LISTA GERAL ADMIN.
+
+Não retirar porteiros do banco.
+
+Não desativar porteiros.
+
+Não alterar suas permissões.
+
+======================================================================
+ITEM 7 — CONTAGENS EXATAS E EM TEMPO REAL
+======================================================================
+
+Corrigir e padronizar as contagens de:
+
+- PENDENTES
+- RETIRADAS
+- TODAS
+
+As contagens precisam:
+
+- representar os dados reais;
+- respeitar condominium_id;
+- não possuir teto artificial de 1.000;
+- atualizar corretamente quando houver novos registros;
+- atualizar quando houver baixa;
+- manter coerência entre Dashboard e Portaria.
+
+IMPORTANTE SOBRE REGISTRO EM LOTE:
+
+Depois da implementação do ITEM 8, cada encomenda física deverá ser contabilizada corretamente.
+
+Se um lote de 5 representar 5 encomendas reais, o sistema deve contabilizar 5.
+
+NÃO contar 1 linha como 5 e depois somar novamente 5 através de parsing em notes.
+
+Evitar DUPLA CONTAGEM.
+
+A solução deve ter UMA regra coerente de contagem.
+
+Verificar cuidadosamente:
+
+Dashboard.tsx
+Portaria.tsx
+SyndicPanel.tsx
+e qualquer outra rotina que exiba essas quantidades.
+
+Utilizar contagem exata do banco quando apropriado, por exemplo:
+
+count: 'exact', head: true
+
+sem carregar milhares de registros desnecessariamente.
+
+Também garantir atualização adequada quando ocorrer:
+
+INSERT
+UPDATE
+baixa/delivered
+
+Se o Supabase Realtime já estiver configurado/adequado, reutilizá-lo.
+
+Não criar múltiplos mecanismos concorrentes de atualização.
+
+As contagens devem ser consistentes entre as telas.
+
+======================================================================
+ITEM 8 — REGISTRO EM LOTE FUNCIONAL
+======================================================================
+
+Este é o item mais crítico e deve ser implementado com atenção especial.
+
+Na tela de cadastro de encomenda:
+
+já existe:
+
+TIRAR FOTO
+REGISTRO EM LOTE
+quantidade com +/-
+
+Agora deve funcionar de verdade.
+
+Exemplo:
+
+Morador:
+Casa 204
+
+Uma única foto mostra 5 encomendas.
+
+Porteiro seleciona:
+
+REGISTRO EM LOTE
+QUANTIDADE = 5
+
+O sistema deve registrar 5 encomendas reais.
+
+IMPORTANTE:
+
+Não criar 5 uploads da mesma foto.
+
+Fazer:
+
+1 único upload da imagem.
+
+Depois criar 5 registros em packages, todos compartilhando:
+
+- mesmo recipient_id;
+- mesmo pickup_code;
+- mesmo pickup_token;
+- mesma photo_url;
+
+mas cada registro continua sendo uma encomenda individual.
+
+Preferencialmente realizar UMA operação de INSERT em lote:
+
+packagesToInsert = [5 registros]
+
+e não cinco viagens de rede separadas.
+
+Cada registro pode ter uma identificação textual individual se necessário, mas NÃO utilizar notes como fonte primária da quantidade.
+
+O banco deve possuir 5 registros reais.
+
+Isso permitirá que:
+
+- contadores;
+- Dashboard;
+- Portaria;
+- agrupamento;
+- baixa;
+- histórico;
+- relatórios
+
+trabalhem com dados reais.
+
+REGRA:
+
+batchQuantity = 1
+→ fluxo atual normal.
+
+batchQuantity >= 2
+→ gerar quantidade correspondente de registros reais.
+
+A foto deve ser enviada apenas uma vez.
+
+======================================================================
+INTEGRAÇÃO ENTRE ITEM 8 + ITEM 3
+======================================================================
+
+Este ponto é OBRIGATÓRIO.
+
+Se o morador já possuir encomendas pendentes:
+
+o lote novo deve utilizar o mesmo:
+
+pickup_code
+pickup_token
+
+das encomendas pendentes existentes.
+
+Exemplo:
+
+Morador já possui:
+3 encomendas pendentes
+código ABC
+
+Agora registra lote de 5.
+
+Resultado no banco:
+
+8 registros pendentes
+
+todos com código ABC.
+
+Não gerar código novo.
+
+Se o morador NÃO possuir nenhuma pendência:
+
+gerar novo pickup_code/pickup_token e utilizar esse mesmo código nos 5 registros.
+
+======================================================================
+INTEGRAÇÃO COM BAIXA
+======================================================================
+
+Quando o morador retirar utilizando o código/grupo:
+
+todas as encomendas PENDENTES daquele grupo devem ser baixadas.
+
+Exemplo:
+
+8 registros pendentes
+mesmo recipient_id
+mesmo pickup_code
+
+Baixa:
+
+→ 8 passam para delivered.
+
+Nenhuma encomenda já delivered deve ser alterada.
+
+Não usar UPDATE sem filtro de pendência.
+
+Utilizar obrigatoriamente condições equivalentes a:
+
+recipient_id = morador
+AND status != 'delivered'
+AND delivered_at IS NULL
+
+quando aplicável à lógica atual.
+
+======================================================================
+INTEGRAÇÃO COM NOTIFICAÇÃO
+======================================================================
+
+Depois do lote de 5:
+
+a notificação deve informar 5.
+
+Se depois chegarem mais 3:
+
+total pendente = 8.
+
+A próxima notificação deve informar 8 e incluir:
+
+ATENÇÃO: Você tem inúmeras encomendas na portaria, por gentileza retire o quanto antes.
+
+Não contar somente o último lote.
+
+Contar o total pendente daquele grupo/morador.
+
+======================================================================
+INTEGRAÇÃO COM CONTAGENS
+======================================================================
+
+Exemplo:
+
+Antes:
+100 pendentes.
+
+Cadastrar lote de 5.
+
+Resultado:
+105 pendentes.
+
+Não:
+101 + parsing [QTD:5].
+
+Não pode haver dupla contagem.
+
+Após baixa dos 5:
+
+100 pendentes.
+
+As contagens devem refletir os registros físicos reais.
+
+======================================================================
+INTEGRAÇÃO COM ALERTA APÓS REGISTRO
+======================================================================
+
+Depois de cadastrar vários moradores/lotes no modo APÓS REGISTRO:
+
+o sistema deve identificar os moradores que ainda precisam ser notificados.
+
+O alerta deve contar MORADORES distintos pendentes.
+
+Exemplo:
+
+Morador A → 5 encomendas
+Morador B → 3 encomendas
+Morador C → 8 encomendas
+
+Quantidade de moradores pendentes:
+
+3
+
+Não:
+
+16.
+
+O alerta é sobre notificações pendentes, não sobre quantidade de pacotes.
+
+======================================================================
+TESTES OBRIGATÓRIOS
+======================================================================
+
+Após implementar, realizar build.
+
+Depois realizar testes funcionais preferencialmente em:
+
+CONDOMÍNIO TESTE — HOMOLOGAÇÃO
+
+Testar pelo menos:
+
+TESTE 1
+ADMIN clica ACESSAR em condomínio.
+
+Confirmar:
+- entra no condomínio;
+- continua ADMIN;
+- não pede código da portaria;
+- não cria token operacional.
+
+TESTE 2
+Adicionar morador ativo e verificar que aparece nas buscas.
+
+TESTE 3
+Desativar um morador.
+
+Confirmar:
+- continua no histórico/inativos;
+- não aparece na busca operacional;
+- não aparece na seleção de encomenda.
+
+TESTE 4
+Cadastrar 1 encomenda.
+
+Confirmar:
+- 1 registro;
+- código;
+- notificação normal;
+- contador +1.
+
+TESTE 5
+Cadastrar REGISTRO EM LOTE = 5.
+
+Confirmar no banco:
+- 5 registros;
+- mesmo recipient_id;
+- mesmo pickup_code;
+- mesmo pickup_token;
+- mesma photo_url;
+- apenas 1 upload da foto.
+
+TESTE 6
+Confirmar que o Dashboard contabiliza +5, e não +1 nem +10.
+
+TESTE 7
+Enviar notificação do lote de 5.
+
+Confirmar mensagem com quantidade 5.
+
+TESTE 8
+Cadastrar posteriormente mais 3 para o mesmo morador.
+
+Confirmar:
+- total pendente = 8;
+- mesmo pickup_code;
+- mensagem informa 8;
+- mensagem contém o alerta de inúmeras encomendas.
+
+TESTE 9
+Confirmar que 7 NÃO recebe o alerta de 8+.
+
+TESTE 10
+Fazer baixa pelo código com 8 encomendas.
+
+Confirmar:
+- as 8 passam para delivered;
+- nenhuma histórica já delivered é alterada;
+- pendentes diminuem corretamente;
+- retiradas aumentam corretamente.
+
+TESTE 11
+Cadastrar novo pacote para o mesmo morador depois que todas as anteriores foram retiradas.
+
+Confirmar:
+- novo ciclo;
+- novo pickup_code.
+
+TESTE 12
+Testar APÓS REGISTRO:
+
+- deixar pendentes;
+- aguardar/usar mecanismo de teste de tempo, se disponível;
+- confirmar alerta após 5 minutos sem envio;
+- confirmar botão vermelho;
+- confirmar quantidade de moradores pendentes;
+- clicar no botão;
+- confirmar que leva ao fluxo existente.
+
+TESTE 13
+Enviar alguns moradores e parar.
+
+Confirmar:
+- alerta/som para ao iniciar envio;
+- nova janela de 5 minutos começa se ainda houver pendentes;
+- novo alerta após nova inatividade;
+- repetição a cada 3 minutos enquanto continuar parado.
+
+TESTE 14
+Enviar todos.
+
+Confirmar:
+- botão desaparece;
+- som para;
+- timers são encerrados;
+- não ocorre novo alerta.
+
+TESTE 15
+Na tela geral /users:
+
+confirmar:
+- ADMIN aparece;
+- SÍNDICO aparece;
+- PORTEIRO não aparece.
+
+TESTE 16
+Dentro do card de condomínio:
+
+USUÁRIOS
+
+confirmar que porteiros continuam aparecendo normalmente.
+
+TESTE 17
+Testar contagens acima de 1.000 ou validar tecnicamente que não existe mais limite artificial de 1.000.
+
+Confirmar coerência entre:
+- Dashboard;
+- Portaria;
+- demais painéis.
+
+TESTE 18
+Verificar que novas inserções/baixas atualizam os números corretamente.
+
+======================================================================
+VALIDAÇÃO FINAL OBRIGATÓRIA
+======================================================================
+
+Antes de concluir:
+
+1. executar npm run build;
+
+2. confirmar se houve erro de TypeScript;
+
+3. confirmar se houve erro de build;
+
+4. verificar se existem imports quebrados;
+
+5. verificar se existem timers sem cleanup;
+
+6. verificar se existem consultas que ainda permitem moradores inativos nas buscas operacionais;
+
+7. verificar se existe algum ponto que ainda gera pickup_code novo quando já existe pendência;
+
+8. verificar se a baixa não altera delivered;
+
+9. verificar se registro em lote não gera uploads duplicados;
+
+10. verificar se registro em lote não gera dupla contagem;
+
+11. verificar se quantidade da mensagem corresponde ao total pendente real;
+
+12. verificar se o alerta considera moradores distintos;
+
+13. verificar se o botão ACESSAR não cria sessão de portaria;
+
+14. verificar se a lista geral de usuários não mostra porteiros;
+
+15. verificar se o botão USUÁRIOS dentro dos condomínios permanece funcionando como antes.
+
+======================================================================
+NÃO ALTERAR
+======================================================================
+
+Não alterar por iniciativa própria:
+
+- autenticação existente;
+- login;
+- código de portaria;
+- sessão operacional da portaria;
+- mecanismo WhatsApp;
+- wa.me;
+- fluxo atual de envio;
+- histórico;
+- fotos;
+- registros delivered;
+- permissões existentes;
+- RLS;
+- estrutura do banco, salvo se uma alteração estrutural for absolutamente necessária e estiver diretamente relacionada a este prompt;
+- layout de outras telas;
+- funcionalidades não mencionadas.
+
+======================================================================
+RELATÓRIO FINAL OBRIGATÓRIO
+======================================================================
+
+Ao terminar, NÃO faça commit, push ou deploy.
+
+Apresente:
+
+1. arquivos alterados;
+2. resumo exato de cada alteração;
+3. confirmação de que nenhuma funcionalidade fora do escopo foi alterada;
+4. resultado do npm run build;
+5. testes executados;
+6. resultados dos testes;
+7. eventuais limitações;
+8. eventuais pontos que ainda precisem de teste manual;
+9. confirmação explícita de que nenhum dado de BELLE VILLE foi alterado durante os testes;
+10. confirmação explícita de que nenhum commit/push/deploy foi executado.
+
+IMPORTANTE:
+
+Se alguma implementação exigir uma decisão diferente da descrita neste prompt, NÃO tome a decisão silenciosamente.
+
+Pare naquele ponto e informe exatamente o motivo.
+
+O objetivo é produzir uma implementação segura, integrada e sem regressões, preservando integralmente o que já funciona.

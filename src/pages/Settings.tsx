@@ -14,7 +14,7 @@ import {
   Check,
   Zap
 } from 'lucide-react';
-import { supabase } from '../lib/supabase';
+import { api } from '../lib/apiClient';
 import { Profile, CondominiumSettings } from '../types';
 import toast from 'react-hot-toast';
 import { motion } from 'motion/react';
@@ -64,13 +64,10 @@ export default function Settings({ user }: SettingsProps) {
       if (!user?.condominium_id) return;
       setLoading(true);
       try {
-        const { data, error } = await supabase
-          .from('condominium_settings')
-          .select('*')
-          .eq('condominium_id', user.condominium_id)
-          .maybeSingle();
-        
-        if (error) throw error;
+        const res = await api.get<{ settings?: any }>(
+          `/api/operational/context?condominiumId=${encodeURIComponent(user.condominium_id)}`
+        );
+        const data = res.ok ? res.data?.settings : null;
         if (data) {
           setSettings(prev => ({
             ...prev,
@@ -103,33 +100,19 @@ export default function Settings({ user }: SettingsProps) {
 
     setSaving(true);
     try {
-      const { data: existing } = await supabase
-        .from('condominium_settings')
-        .select('id')
-        .eq('condominium_id', user.condominium_id)
-        .maybeSingle();
-
-      let error;
-      if (existing) {
-        const { error: updateError } = await supabase
-          .from('condominium_settings')
-          .update({
-            ...settings,
-            updated_at: new Date().toISOString()
-          })
-          .eq('condominium_id', user.condominium_id);
-        error = updateError;
-      } else {
-        const { error: insertError } = await supabase
-          .from('condominium_settings')
-          .insert([{
-            ...settings,
-            condominium_id: user.condominium_id
-          }]);
-        error = insertError;
-      }
-
-      if (error) throw error;
+      const saveRes = await api.put('/api/operational/condominium-settings', {
+        condominiumId: user.condominium_id,
+        settings: {
+          notification_template: settings.notification_template,
+          whatsapp_mode: settings.whatsapp_mode,
+          whatsapp_provider: settings.whatsapp_provider,
+          instance_id: settings.instance_id,
+          api_token: settings.api_token,
+          api_url: settings.api_url,
+          modo_leve: settings.modo_leve
+        }
+      });
+      if (!saveRes.ok) throw new Error(saveRes.error || 'Erro ao salvar configurações');
       toast.success("Configurações salvas com sucesso!");
     } catch (err: any) {
       console.error("Erro ao salvar no banco:", err);

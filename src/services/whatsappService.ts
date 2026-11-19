@@ -1,5 +1,5 @@
 import { Morador } from '../types';
-import { supabase } from '../lib/supabase';
+import { api } from '../lib/apiClient';
 
 export interface WhatsAppVariables {
   saudacao: string;
@@ -52,19 +52,57 @@ export const formatUnit = (resident: Morador): string => {
 /**
  * Assembles the WhatsApp message from variables following the "Encomendas Inteligentes" standard
  */
+// Helper robusto para obter o link público absoluto de retirada da encomenda com foto e código
+export const getRetiradaPageLink = (pickupToken?: string, fallbackPhotoUrl?: string): string => {
+  if (pickupToken && pickupToken.trim().length > 0) {
+    const cleanToken = encodeURIComponent(pickupToken.trim());
+    
+    // 1. Obtém URL base configurada explicitamente por variável de ambiente ou localStorage
+    const configuredUrl = (typeof window !== 'undefined' && (localStorage.getItem('public_app_url') || localStorage.getItem('homologacao_app_url')))
+      || (typeof import.meta !== 'undefined' && (import.meta.env?.VITE_APP_URL || import.meta.env?.VITE_HOMOLOG_URL))
+      || (typeof process !== 'undefined' && (process.env?.VITE_APP_URL || process.env?.APP_URL))
+      || '';
+
+    if (configuredUrl) {
+      return `${configuredUrl.replace(/\/$/, '')}/retirada?token=${cleanToken}`;
+    }
+
+    // 2. Se estiver em ambiente de navegador
+    if (typeof window !== 'undefined' && window.location && window.location.origin) {
+      const origin = window.location.origin;
+      const isLocalhost = origin.includes('localhost') || origin.includes('127.0.0.1');
+      const isAiStudioDev = origin.includes('ais-dev-');
+
+      // Se estiver no sandbox de desenvolvimento do AI Studio (Cloud Run),
+      // converte para o Shared App URL (ais-pre-), que é público e acessível no celular sem login Google
+      if (isAiStudioDev) {
+        const sharedUrl = origin.replace('ais-dev-', 'ais-pre-');
+        return `${sharedUrl.replace(/\/$/, '')}/retirada?token=${cleanToken}`;
+      }
+
+      // Se for domínio público real (Vercel de homologação, domínio próprio, preview etc. não localhost)
+      if (!isLocalhost && !origin.includes('.run.app')) {
+        return `${origin.replace(/\/$/, '')}/retirada?token=${cleanToken}`;
+      }
+
+      // Se for localhost puro sem URL pública configurada, usa o origin local (nunca força produção silenciosamente)
+      return `${origin.replace(/\/$/, '')}/retirada?token=${cleanToken}`;
+    }
+
+    // 3. Fallback para execução sem window
+    return `/retirada?token=${cleanToken}`;
+  }
+  return fallbackPhotoUrl || '';
+};
+
 export const assembleWhatsAppMessage = (vars: WhatsAppVariables): string => {
   const isRetirada = vars.tipo_notificacao === 'retirada';
-  const qty = vars.quantidade_encomendas || 1;
-  const isPlural = qty > 1;
   
   if (isRetirada) {
-    const quantityText = `*(${qty} ${isPlural ? 'encomendas' : 'encomenda'})*`;
-    const statusLine = `📦 Sua${isPlural ? 's' : ''} encomenda${isPlural ? 's' : ''} ${isPlural ? 'foram' : 'foi'} retirada${isPlural ? 's' : ''} ${quantityText}`;
-
     return [
       `${vars.saudacao}, ${vars.nome_morador}!`,
       '',
-      statusLine,
+      `📦 Sua encomenda foi retirada`,
       '',
       `📍 ${vars.unidade}`,
       `🕒 ${vars.hora_retirada || vars.hora_recebimento}`,
@@ -77,17 +115,22 @@ export const assembleWhatsAppMessage = (vars: WhatsAppVariables): string => {
 
   // Modelo especial para ENCOMENDA GRANDE
   if (vars.is_large_package) {
+    const qty = (vars.quantidade_encomendas && vars.quantidade_encomendas > 0) ? vars.quantidade_encomendas : 1;
+    const packageDesc = qty > 1
+      ? `Recebemos *${qty} encomendas (incluindo volume grande)* para sua unidade (${vars.unidade}).`
+      : `Recebemos uma *ENCOMENDA GRANDE* para sua unidade (${vars.unidade}).`;
+
     return [
       `🔔 *AVISO IMPORTANTE – PORTARIA*`,
       '',
       `${vars.saudacao}, ${vars.nome_morador}.`,
       '',
-      `Recebemos uma *ENCOMENDA GRANDE* para sua unidade (${vars.unidade}).`,
+      packageDesc,
       '',
       `👉 Por gentileza, solicitamos retirada o mais breve possível devido ao volume.`,
       '',
-      `📦 Ver encomenda:`,
-      `${vars.photo_url || 'Foto não disponível'}`,
+      `📸 Clique no link para ver a foto da encomenda:`,
+      `${getRetiradaPageLink(vars.pickup_token, vars.photo_url) || 'Link não disponível'}`,
       '',
       `🔐 Código de retirada: ${vars.codigo_retirada}`,
       '',
@@ -96,23 +139,37 @@ export const assembleWhatsAppMessage = (vars: WhatsAppVariables): string => {
     ].join('\n');
   }
 
-  // Modelo padronizado solicitado pelo usuário para encomendas recebidas
+  // Modelo padronizado para encomendas recebidas (respeita singular/plural com quantitativo real canônico)
+  const qty = (vars.quantidade_encomendas && vars.quantidade_encomendas > 0)
+    ? vars.quantidade_encomendas
+    : 1;
+
+  const headerTitle = qty > 1
+    ? '📦 Suas encomendas chegaram!'
+    : '📦 Sua encomenda chegou!';
+
   const lines = [
     `${vars.saudacao}, ${vars.nome_morador}!`,
     '',
-    `📦 Sua encomenda chegou!`,
+    headerTitle,
     '',
     `📍 ${vars.unidade}`,
-    `📦 Código: *${vars.codigo_retirada}*`,
-    `🕒 ${vars.data_recebimento} às ${vars.hora_recebimento}`,
-    '',
-    `Por gentileza, apresente o código para retirada.`,
   ];
 
-  if (vars.photo_url) {
+  if (qty > 1) {
+    lines.push(`📦 Você possui *${qty} encomendas disponíveis* para retirada.`);
+  }
+
+  lines.push(`📦 Código: *${vars.codigo_retirada}*`);
+  lines.push(`🕒 ${vars.data_recebimento} às ${vars.hora_recebimento}`);
+  lines.push('');
+  lines.push('Por gentileza, apresente o código para retirada.');
+
+  const pageLink = getRetiradaPageLink(vars.pickup_token, vars.photo_url);
+  if (pageLink) {
     lines.push('');
-    lines.push(`📸 Foto: CLIQUE PARA VER SUA ENCOMENDA 👇`);
-    lines.push(vars.photo_url);
+    lines.push(`📸 Clique no link para ver a foto da encomenda:`);
+    lines.push(pageLink);
   }
 
   return lines.join('\n');
@@ -194,11 +251,12 @@ export async function sendWhatsAppMessage(
     photo_url?: string;
     isTestMode?: boolean;
     is_teste?: boolean;
+    timeoutMs?: number;
   }
 ) {
   if (!message || message.trim() === "") {
     console.warn('[WhatsApp Service] Mensagem vazia');
-    return { error: 'Mensagem vazia', httpStatus: 400 };
+    return { error: 'Mensagem vazia', httpStatus: 400, status_envio: 'erro' };
   }
 
   // Normalize phone number: remove all non-digits
@@ -211,7 +269,7 @@ export async function sendWhatsAppMessage(
 
   if (normalizedPhone.length < 12) { // 55 + DDD + 8 or 9 digits
     console.warn('[WhatsApp Service] Telefone inválido:', normalizedPhone);
-    return { error: 'Telefone inválido', httpStatus: 400 };
+    return { error: 'Telefone inválido', httpStatus: 400, status_envio: 'erro' };
   }
 
   // =========================================================================
@@ -222,15 +280,14 @@ export async function sendWhatsAppMessage(
     
     // Registra log da simulação sem fazer chamada externa HTTP
     try {
-      await supabase.from('message_logs').insert([{
+      await api.post('/api/operational/message-logs', {
         condominium_id: condominiumId,
         telefone: normalizedPhone,
+        mensagem: message,
+        status: 'sent',
         status_envio: 'simulado_teste',
-        tipo: 'whatsapp_teste',
-        conteudo: message,
-        data_envio: new Date().toISOString(),
-        detalhes: { modo: 'teste', simulacao: true }
-      }]);
+        data_envio: new Date().toISOString()
+      });
     } catch (e) {
       console.warn('[WhatsApp Service] Log de simulação local:', e);
     }
@@ -247,62 +304,82 @@ export async function sendWhatsAppMessage(
 
   console.log("Enviando mensagem para:", normalizedPhone);
 
-  // Use provided config or fallback to hardcoded
+  // Utilize estritamente as configurações fornecidas (sem credenciais hardcoded)
   let baseApiUrl = (config?.api_url || "https://api.z-api.io").replace(/\/$/, '');
-  const apiToken = (config?.api_token || "F3cec1a5aa2b14f0cbc667b86c75de2ebS").trim();
-  const instanceId = (config?.instance_id || "3F0CA22AFB9F62F46D76D268A7BECB03").trim();
+  const apiToken = (config?.api_token || "").trim();
+  const instanceId = (config?.instance_id || "").trim();
 
-  const hasImage = !!config?.photo_url;
-  let finalApiUrl = "";
-  
-  if (baseApiUrl.includes('/instances/')) {
-    finalApiUrl = baseApiUrl;
-  } else {
-    const endpoint = hasImage ? 'send-image' : 'send-text';
-    finalApiUrl = `${baseApiUrl}/instances/${instanceId}/token/${apiToken}/${endpoint}`;
+  if (!apiToken || !instanceId) {
+    console.warn('[WhatsApp Service] Instância ou Token da Z-API não configurados.');
+    return { error: 'Instância ou Token da Z-API não configurados', httpStatus: 400, status_envio: 'erro' };
   }
 
+  // Envio exclusivo como mensagem de texto (send-text)
+  // A foto da encomenda é acessada exclusivamente via link público de retirada
+  let finalApiUrl = "";
+  if (baseApiUrl.includes('/instances/')) {
+    finalApiUrl = baseApiUrl.replace(/\/send-image\/?$/, '/send-text');
+    if (!finalApiUrl.endsWith('/send-text')) {
+      finalApiUrl = `${finalApiUrl.replace(/\/$/, '')}/send-text`;
+    }
+  } else {
+    finalApiUrl = `${baseApiUrl}/instances/${instanceId}/token/${apiToken}/send-text`;
+  }
+
+  const timeoutMs = config?.timeoutMs ?? 15000;
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timeoutTimer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+
   try {
-    const body = hasImage 
-      ? {
-          phone: normalizedPhone,
-          image: config.photo_url,
-          caption: message.trim()
-        }
-      : {
-          phone: normalizedPhone,
-          message: message.trim()
-        };
+    const body = {
+      phone: normalizedPhone,
+      message: message.trim()
+    };
 
     const response = await fetch(finalApiUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
       },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      ...(controller ? { signal: controller.signal } : {})
     });
 
-    const data = await response.json();
+    if (timeoutTimer) clearTimeout(timeoutTimer);
+
+    const data = await response.json().catch(() => ({}));
     const status_envio = response.ok ? 'sucesso' : 'erro';
     
-    // Log no banco de dados
+    // Log no banco de dados via backend operacional
     try {
-      await supabase.from('message_logs').insert([{
+      await api.post('/api/operational/message-logs', {
         condominium_id: condominiumId,
         telefone: normalizedPhone,
+        mensagem: message.trim(),
         status_envio: status_envio,
         status: response.ok ? 'sent' : 'failed',
         erro_api: !response.ok ? JSON.stringify(data) : null,
         data_envio: new Date().toISOString()
-      }]);
+      });
     } catch (logErr) {
       console.error("Erro ao registrar log de mensagem:", logErr);
     }
     
-    return { ...data, httpStatus: response.status, status_envio };
-  } catch (error) {
+    return {
+      ...data,
+      httpStatus: response.status,
+      status_envio,
+      ...(response.ok ? {} : { error: data?.error || data?.message || `Erro HTTP ${response.status}` })
+    };
+  } catch (error: any) {
+    if (timeoutTimer) clearTimeout(timeoutTimer);
+    const isTimeout = error?.name === 'AbortError';
     console.error("Erro na API de WhatsApp:", error);
-    return { error: error instanceof Error ? error.message : String(error), httpStatus: 500, status_envio: 'erro' };
+    return {
+      error: isTimeout ? `Timeout ao aguardar resposta da API (${timeoutMs}ms)` : (error instanceof Error ? error.message : String(error)),
+      httpStatus: isTimeout ? 408 : 500,
+      status_envio: 'erro'
+    };
   }
 }
 

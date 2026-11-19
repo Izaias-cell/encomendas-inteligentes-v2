@@ -11,7 +11,7 @@ html, body {
 
 /* Evita auto-zoom indesejado do iOS Safari e Android ao focar em inputs */
 input, select, textarea {
-  font-size: 16px !important;
+  font-size: 16px;
 }
 
 #qr-reader video {

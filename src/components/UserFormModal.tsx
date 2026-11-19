@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
-import { api } from '../lib/apiClient';
+import { api, generateSecureTempPassword } from '../lib/apiClient';
 import { Profile, Role, Condominium } from '../types';
 import { 
   X, Loader2, Check, Copy, AlertTriangle, Send, Info, Key 
@@ -101,13 +101,6 @@ export default function UserFormModal({
         }
       }
       if (data?.session) return data.session;
-
-      if (currentUser && currentUser.id) {
-        return {
-          access_token: 'MOCK_TOKEN',
-          user: { id: currentUser.id, email: currentUser.email || 'demo@example.com' }
-        } as any;
-      }
 
       return null;
     } catch (err: any) {
@@ -253,7 +246,7 @@ export default function UserFormModal({
         onSuccess(updatedProfile, true);
         onClose();
       } else {
-        const tempPassword = Math.random().toString(36).slice(-8);
+        const tempPassword = generateSecureTempPassword(12);
 
         const response = await fetch('/api/admin/users', {
           method: 'POST',

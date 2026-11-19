@@ -147,5 +147,8 @@ export function runResidentImporterTests() {
 
 // Auto-run se executado diretamente via tsx
 if (import.meta.url === `file://${process.argv[1]}`) {
-  runResidentImporterTests();
+  const { allPassed } = runResidentImporterTests();
+  if (!allPassed) {
+    process.exit(1);
+  }
 }

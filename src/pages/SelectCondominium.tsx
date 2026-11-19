@@ -1,9 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { supabase } from '../lib/supabase';
 import { api } from '../lib/apiClient';
 import { Condominium, Profile } from '../types';
-import { Building, Loader2, Search, MapPin, CheckCircle } from 'lucide-react';
+import { Building, Loader2, Search, MapPin } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 
 import { clearActivePlantao } from '../lib/plantaoUtils';
@@ -22,19 +21,22 @@ export default function SelectCondominium({ user, onUpdateUser }: SelectCondomin
   const [selecting, setSelecting] = useState<string | null>(null);
   const navigate = useNavigate();
 
+  const isGlobalAdmin = normalizeRole(user.role) === 'admin';
+
   useEffect(() => {
     fetchCondos();
-  }, []);
+  }, [user.role]);
 
   const fetchCondos = async () => {
+    if (!isGlobalAdmin) {
+      setCondos([]);
+      setLoading(false);
+      return;
+    }
     try {
-      const { data, error } = await supabase
-        .from('condominiums')
-        .select('*')
-        .order('name');
-
-      if (error) throw error;
-      setCondos(data || []);
+      const res = await api.get<{ condominiums?: Condominium[] }>('/api/admin/condominiums');
+      if (!res.ok) throw new Error(res.error || 'Erro ao buscar condomínios');
+      setCondos(res.data?.condominiums || []);
     } catch (error) {
       console.error('Erro ao buscar condomínios:', error);
     } finally {
@@ -148,12 +150,31 @@ export default function SelectCondominium({ user, onUpdateUser }: SelectCondomin
           ))}
         </div>
       ) : (
-        <div className="bg-white rounded-3xl border border-zinc-100 p-20 text-center">
-          <div className="w-20 h-20 bg-zinc-50 text-zinc-300 rounded-full flex items-center justify-center mx-auto mb-6">
+        <div className="bg-white rounded-3xl border border-zinc-100 p-12 sm:p-20 text-center space-y-4">
+          <div className="w-20 h-20 bg-zinc-50 text-zinc-300 rounded-full flex items-center justify-center mx-auto mb-4">
             <Building className="w-10 h-10" />
           </div>
-          <h3 className="text-xl font-bold text-zinc-900 mb-2">Nenhum condomínio encontrado</h3>
-          <p className="text-zinc-500">Não encontrou seu condomínio? Entre em contato com o administrador.</p>
+          <h3 className="text-xl font-bold text-zinc-900">
+            {isGlobalAdmin ? 'Nenhum condomínio encontrado' : 'Nenhum condomínio vinculado ao seu usuário'}
+          </h3>
+          <p className="text-zinc-500 max-w-md mx-auto">
+            {isGlobalAdmin
+              ? 'Cadastre um novo condomínio ou ajuste o termo de busca.'
+              : normalizeRole(user.role) === 'sindico'
+              ? 'Seu perfil ainda não possui um condomínio vinculado. Cadastre um novo condomínio abaixo ou solicite o vínculo ao administrador.'
+              : 'Seu perfil ainda não possui um condomínio vinculado. Entre em contato com o administrador do sistema.'}
+          </p>
+          {normalizeRole(user.role) === 'sindico' && (
+            <div className="pt-2">
+              <button
+                onClick={() => navigate('/condominiums/new')}
+                className="px-6 py-3.5 bg-emerald-600 text-white rounded-2xl font-bold hover:bg-emerald-700 transition-all inline-flex items-center gap-2"
+              >
+                <Building className="w-5 h-5" />
+                Cadastrar Novo Condomínio
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>

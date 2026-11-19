@@ -42,6 +42,25 @@ import AuditLogs from '../pages/AuditLogs';
 
 // --- Shared UI Components ---
 
+const KNOWN_CARRIERS = [
+  'Shopee',
+  'Mercado Livre',
+  'Amazon',
+  'Correios',
+  'TikTok Shop',
+  'Shein',
+  'Magalu',
+  'Jadlog',
+  'Loggi'
+];
+
+const extractKnownCarrier = (notes?: string): string => {
+  if (!notes) return '';
+  const lower = notes.toLowerCase();
+  const found = KNOWN_CARRIERS.find(c => lower.includes(c.toLowerCase()));
+  return found || '';
+};
+
 const getDeliveryMethodLabel = (method?: string) => {
   switch (method) {
     case 'manual': return 'MANUAL';
@@ -131,6 +150,41 @@ const Modal = ({ isOpen, onClose, title, children }: any) => {
   );
 };
 
+const fetchAllOperationalPackages = async (condominiumId: string, status: string = 'all'): Promise<{ ok: boolean; error?: string; packages: any[] }> => {
+  const PAGE_SIZE = 1000;
+  const MAX_PAGES = 100;
+  const seen = new Map<string, any>();
+  const condoIdEnc = encodeURIComponent(condominiumId);
+  let offset = 0;
+
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const res = await api.get<{ packages?: any[]; totalCount?: number }>(
+      `/api/operational/packages?status=${encodeURIComponent(status)}&offset=${offset}&limit=${PAGE_SIZE}&condominiumId=${condoIdEnc}`
+    );
+
+    if (!res.ok) {
+      return { ok: false, error: res.error || 'Erro ao buscar encomendas', packages: [] };
+    }
+
+    const batch = Array.isArray(res.data?.packages) ? res.data.packages : [];
+    for (const pkg of batch) {
+      if (pkg?.id) {
+        seen.set(pkg.id, pkg);
+      } else {
+        seen.set(`${offset}-${seen.size}`, pkg);
+      }
+    }
+
+    const totalCount = typeof res.data?.totalCount === 'number' ? res.data.totalCount : undefined;
+    if (batch.length < PAGE_SIZE || (totalCount !== undefined && seen.size >= totalCount)) {
+      break;
+    }
+    offset += PAGE_SIZE;
+  }
+
+  return { ok: true, packages: Array.from(seen.values()) };
+};
+
 // --- Dashboard Component ---
 
 const Dashboard = ({ user, residents = [], logs = [], systemStatus }: any) => {
@@ -151,30 +205,63 @@ const Dashboard = ({ user, residents = [], logs = [], systemStatus }: any) => {
 
   useEffect(() => {
     fetchStats();
-  }, [user.condominium_id]);
+  }, [user.condominium_id, residents.length, logs.length]);
 
   const fetchStats = async () => {
+    if (!user?.condominium_id) {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     try {
       const today = formatDate(new Date(), 'yyyy-MM-dd');
-      
-      // Fetch all packages to calculate stats
-      const { data: packages, error } = await supabase
-        .from('packages')
-        .select(`
-          *, 
-          moradores(nome, unidade, block, street),
-          package_id:id, 
-          unit_label:unit_number
-        `)
-        .eq('condominium_id', user.condominium_id);
+      const condoIdEnc = encodeURIComponent(user.condominium_id);
+      const tzOffset = new Date().getTimezoneOffset();
 
-      if (error) {
-        console.error('Erro RPC stats:', error);
+      // Fetch authoritative untruncated dashboard aggregates via backend API
+      const dashRes = await api.get<any>(
+        `/api/operational/dashboard?condominiumId=${condoIdEnc}&tzOffset=${tzOffset}`
+      );
+
+      const syndicStats = dashRes.ok ? dashRes.data?.syndicStats : undefined;
+      const pendingExactCount = dashRes.ok ? dashRes.data?.counts?.pending : undefined;
+      const activeResidentsCount = (residents || []).filter((r: any) => r.ativo).length;
+      const computedUnitsCount = new Set(
+        (residents || []).filter((r: any) => r.ativo && r.unidade).map((r: any) => `${r.unidade}-${r.block || ''}-${r.street || ''}`)
+      ).size;
+
+      if (syndicStats) {
+        setStats({
+          receivedToday: syndicStats.receivedToday ?? 0,
+          pending: pendingExactCount ?? syndicStats.pending ?? 0,
+          deliveredToday: syndicStats.deliveredToday ?? 0,
+          notificationsSent: (logs || []).filter((l: any) => l.status_envio === 'sucesso' || l.status === 'sent').length,
+          failedWhatsApp: (logs || []).filter((l: any) => l.status_envio === 'erro' || l.status === 'failed').length,
+          residentsCount: activeResidentsCount || syndicStats.residentsCount || 0,
+          totalUnits: computedUnitsCount,
+          qrRetrievals: syndicStats.qrRetrievals ?? 0,
+          manualRetrievals: syndicStats.manualRetrievals ?? 0,
+          lastPackage: syndicStats.lastPackage ?? null
+        });
+
+        if (Array.isArray(syndicStats.chartData) && syndicStats.chartData.length > 0) {
+          setChartData(syndicStats.chartData.map((d: any) => ({
+            name: d.name,
+            recebidas: d.recebidas ?? 0,
+            retiradas: d.retiradas ?? 0
+          })));
+          return;
+        }
       }
 
-      const pkgs = packages || [];
-      
+      // Defensive fallback if syndicStats is unavailable: paginate all packages without 1,000 truncation
+      const pkgsRes = await fetchAllOperationalPackages(user.condominium_id, 'all');
+      if (!pkgsRes.ok) {
+        console.error('Erro API stats:', pkgsRes.error);
+      }
+
+      const pkgs = pkgsRes.packages || [];
+
       const statsData = {
         receivedToday: pkgs.filter((p: any) => {
           if (!p.received_at) return false;
@@ -182,21 +269,21 @@ const Dashboard = ({ user, residents = [], logs = [], systemStatus }: any) => {
             return formatDate(p.received_at, 'yyyy-MM-dd') === today;
           } catch { return false; }
         }).length,
-        pending: pkgs.filter((p: any) => !p.delivered_at || p.status !== 'delivered').length,
+        pending: pendingExactCount ?? pkgs.filter((p: any) => !p.delivered_at || p.status !== 'delivered').length,
         deliveredToday: pkgs.filter((p: any) => {
           if (!p.delivered_at) return false;
           try {
-            return (p.delivered_at || p.status === 'delivered') && 
+            return (p.delivered_at || p.status === 'delivered') &&
                    formatDate(p.delivered_at, 'yyyy-MM-dd') === today;
           } catch { return false; }
         }).length,
         notificationsSent: (logs || []).filter((l: any) => l.status_envio === 'sucesso' || l.status === 'sent').length,
         failedWhatsApp: (logs || []).filter((l: any) => l.status_envio === 'erro' || l.status === 'failed').length,
-        residentsCount: (residents || []).filter((r: any) => r.ativo).length,
-        totalUnits: new Set((residents || []).filter((r: any) => r.ativo && r.unidade).map((r: any) => `${r.unidade}-${r.block || ''}-${r.street || ''}`)).size,
+        residentsCount: activeResidentsCount,
+        totalUnits: computedUnitsCount,
         qrRetrievals: pkgs.filter((p: any) => p.delivery_method === 'qr_code').length,
-        manualRetrievals: pkgs.filter((p: any) => 
-          p.status === 'delivered' && 
+        manualRetrievals: pkgs.filter((p: any) =>
+          p.status === 'delivered' &&
           p.delivery_method !== 'qr_code'
         ).length,
         lastPackage: pkgs[0]
@@ -416,7 +503,21 @@ const Dashboard = ({ user, residents = [], logs = [], systemStatus }: any) => {
 
 // --- Packages Component ---
 
-const PackagesList = ({ user, counts: externalCounts }: any) => {
+const PackagesList = ({ user, counts: externalCounts, condoName: propCondoName }: any) => {
+  const [condoName, setCondoName] = useState<string>(propCondoName || '');
+
+  useEffect(() => {
+    if (propCondoName) {
+      setCondoName(propCondoName);
+    } else if (user?.condominium_id) {
+      api
+        .get(`/api/operational/context?condominiumId=${encodeURIComponent(user.condominium_id)}`)
+        .then((res) => {
+          if (res.ok && res.data?.condominium?.name) setCondoName(res.data.condominium.name);
+        });
+    }
+  }, [propCondoName, user?.condominium_id]);
+
   const [searchTerm, setSearchTerm] = useState('');
   const [filterStatus, setFilterStatus] = useState('all');
   const [packages, setPackages] = useState<any[]>([]);
@@ -448,23 +549,16 @@ const PackagesList = ({ user, counts: externalCounts }: any) => {
 
   const uploadDeliveryPhoto = async (base64: string) => {
     try {
-      const res = await fetch(base64);
-      const blob = await res.blob();
-      const file = new File([blob], `delivery_${Date.now()}.jpg`, { type: "image/jpeg" });
-      const fileName = `${Math.random()}.jpg`;
-      const filePath = `delivery-photos/${fileName}`;
+      const uploadRes = await api.post('/api/operational/upload-photo', {
+        imageBase64: base64,
+        folder: 'delivery-photos'
+      });
 
-      const { error: uploadError } = await supabase.storage
-        .from('packages')
-        .upload(filePath, file);
+      if (!uploadRes.ok || !uploadRes.data?.publicUrl) {
+        throw new Error(uploadRes.error || 'Erro ao enviar foto');
+      }
 
-      if (uploadError) throw uploadError;
-
-      const { data: { publicUrl } } = supabase.storage
-        .from('packages')
-        .getPublicUrl(filePath);
-
-      return publicUrl;
+      return uploadRes.data.publicUrl;
     } catch (err) {
       console.error("Erro no upload da foto:", err);
       throw err;
@@ -510,34 +604,31 @@ const isValidUuid = (id?: string | null): boolean => {
         finalMethod = 'CÓDIGO';
       }
 
-      const { data: { user: authUser } } = await supabase.auth.getUser();
-      const validDeliveredBy = (authUser?.id && isValidUuid(authUser.id)) 
-        ? authUser.id 
-        : (user?.id && isValidUuid(user.id) ? user.id : null);
+      const porterNameToSave = (getCurrentPorter() && getCurrentPorter() !== 'Selecione o Porteiro') ? getCurrentPorter() : user.full_name;
+      const deliverRes = await api.post('/api/operational/packages/deliver', {
+        packageId: targetId,
+        condominiumId: user.condominium_id,
+        pickupToken: pkgForDelivery.pickup_token,
+        pickupCode: pkgForDelivery.pickup_code,
+        recipientId: pkgForDelivery.recipient_id,
+        deliveryMethod: finalMethod,
+        deliveredToName: 'Morador (Confirmado)',
+        porterName: porterNameToSave,
+        deliveryPhotoUrl: deliveryPhoto ? finalPhotoUrl : undefined,
+      });
 
-      const { error } = await supabase
-        .from('packages')
-        .update({ 
-          status: 'delivered', 
-          delivered_at: new Date().toISOString(),
-          delivered_by: validDeliveredBy,
-          entregue_por: (getCurrentPorter() && getCurrentPorter() !== 'Selecione o Porteiro') ? getCurrentPorter() : user.full_name,
-          delivery_method: finalMethod,
-          delivery_photo_url: finalPhotoUrl
-        })
-        .eq('id', targetId);
-      
-      if (error) throw error;
+      if (!deliverRes.ok) throw new Error(deliverRes.error || 'Falha ao confirmar entrega');
       setIsDeliverySuccess(true);
-      
+
+      const updatedIds: string[] = deliverRes.data?.updatedIds || [targetId];
       // Update local state
-      setPackages(prev => prev.map(p => (p.package_id === targetId || p.id === targetId) ? { 
+      setPackages(prev => prev.map(p => (updatedIds.includes(p.id) || updatedIds.includes(p.package_id) || p.package_id === targetId || p.id === targetId) ? { 
         ...p, 
         status: 'delivered', 
-        delivered_at: new Date().toISOString(),
-        entregue_por: user.full_name,
-        delivery_method: finalMethod,
-        delivery_photo_url: finalPhotoUrl
+        delivered_at: deliverRes.data?.delivered_at || new Date().toISOString(),
+        entregue_por: deliverRes.data?.entregue_por || porterNameToSave,
+        delivery_method: deliverRes.data?.delivery_method || finalMethod,
+        delivery_photo_url: deliverRes.data?.delivery_photo_url || finalPhotoUrl
       } : p));
 
       fetchPackages();
@@ -570,26 +661,15 @@ const isValidUuid = (id?: string | null): boolean => {
     setLoading(true);
     setError(false);
     try {
-      const { data, error } = await supabase
-        .from('packages')
-        .select(`
-          *, 
-          moradores(nome, unidade, block, street),
-          registrar:received_by(full_name),
-          package_id:id, 
-          unit_label:unit_number
-        `)
-        .eq('condominium_id', user.condominium_id)
-        .order('received_at', { ascending: false });
+      const res = await fetchAllOperationalPackages(user.condominium_id, 'all');
 
-      if (error) {
-        // If it's a real error, log it and set error state
-        console.error('Erro Supabase ao buscar encomendas:', error);
+      if (!res.ok) {
+        console.error('Erro API ao buscar encomendas:', res.error);
         setError(true);
         return;
       }
 
-      const allData = data || [];
+      const allData = res.packages || [];
       const pendingData = allData.filter(p => !p.delivered_at || p.status !== 'delivered');
       const deliveredData = allData.filter(p => p.status === 'delivered' || p.delivered_at);
 
@@ -630,33 +710,26 @@ const isValidUuid = (id?: string | null): boolean => {
   const handleResendNotification = async (pkg: any) => {
     setActionLoading(true);
     try {
-      const { data: resident } = await supabase
-        .from('moradores')
-        .select('telefone, nome')
-        .eq('id', pkg.recipient_id)
-        .maybeSingle();
+      const morRes = await api.get(
+        `/api/operational/moradores?includeInactive=true&condominiumId=${encodeURIComponent(user.condominium_id)}`
+      );
+      const resident = morRes.ok
+        ? (morRes.data?.moradores || []).find((r: any) => r.id === pkg.recipient_id)
+        : null;
 
       if (!resident?.telefone) {
         throw new Error("Morador não encontrado ou sem telefone cadastrado");
       }
 
-      const { data: { session } } = await supabase.auth.getSession();
-      const response = await fetch('/api/notify-resident', {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session?.access_token}`
-        },
-        body: JSON.stringify({
-          phone: resident.telefone, 
-          residentName: pkg.recipient_name,
-          unitNumber: formatPackageUnit(pkg),
-          carrier: pkg.carrier,
-          packageId: pkg.package_id
-        })
+      const notifyRes = await api.post('/api/notify-resident', {
+        phone: resident.telefone, 
+        residentName: pkg.recipient_name || resident.nome,
+        unitNumber: formatPackageUnit(pkg),
+        carrier: pkg.carrier,
+        packageId: pkg.package_id || pkg.id
       });
 
-      if (!response.ok) throw new Error("Falha ao enviar notificação");
+      if (!notifyRes.ok) throw new Error(notifyRes.error || "Falha ao enviar notificação");
       
       toast.success("Notificação reenviada com sucesso!");
     } catch (err: any) {
@@ -722,19 +795,31 @@ const isValidUuid = (id?: string | null): boolean => {
 
     const doc = new jsPDF();
     
-    // Título do PDF
-    doc.setFontSize(18);
-    doc.text("Relatório de Encomendas", 14, 22);
+    // Título dinâmico contextualizado com o condomínio
+    doc.setFontSize(16);
+    const reportTitle = condoName ? `RELATÓRIO DE ENCOMENDAS — ${condoName.toUpperCase()}` : "RELATÓRIO DE ENCOMENDAS";
+    doc.text(reportTitle, 14, 22);
     
-    // Data de geração
+    // Período do relatório baseado nas encomendas filtradas
+    const dates = filtered
+      .map((p: any) => p.received_at ? new Date(p.received_at).getTime() : 0)
+      .filter((t: number) => t > 0)
+      .sort((a: number, b: number) => a - b);
+    const minDateStr = dates.length > 0 ? new Date(dates[0]).toLocaleDateString('pt-BR') : '';
+    const maxDateStr = dates.length > 0 ? new Date(dates[dates.length - 1]).toLocaleDateString('pt-BR') : '';
+    const periodText = minDateStr && maxDateStr 
+      ? `Período do relatório: ${minDateStr} a ${maxDateStr}` 
+      : 'Período do relatório: Geral';
+
     doc.setFontSize(10);
     doc.setTextColor(100);
-    doc.text(`Gerado em: ${formatSafeDateTime(new Date().toISOString())}`, 14, 30);
+    doc.text(periodText, 14, 30);
 
     // Tabela de dados
     const tableColumn = [
       "Morador",
       "Unidade",
+      "Transportadora",
       "Recebimento",
       "Retirada",
       "Registrado por",
@@ -745,6 +830,7 @@ const isValidUuid = (id?: string | null): boolean => {
     const tableRows = filtered.map(pkg => [
       pkg.recipient_name || "",
       formatPackageUnit(pkg) || "",
+      pkg.carrier || extractKnownCarrier(pkg.notes) || "-",
       formatSafeDateTime(pkg.received_at) || "",
       pkg.delivered_at ? formatSafeDateTime(pkg.delivered_at) : "Pendente",
       pkg.recebido_por || pkg.porter_name || pkg.registrar?.full_name || "-",
@@ -761,7 +847,8 @@ const isValidUuid = (id?: string | null): boolean => {
       alternateRowStyles: { fillColor: [244, 244, 245] } // Zinc-100
     });
 
-    doc.save("historico_encomendas.pdf");
+    const fileSlug = condoName ? condoName.toLowerCase().replace(/[^a-z0-9]/g, '_') : 'condominio';
+    doc.save(`relatorio_encomendas_${fileSlug}_${formatDate(new Date(), 'yyyy-MM-dd')}.pdf`);
     toast.success(`${filtered.length} encomendas exportadas para PDF!`);
   };
 
@@ -770,8 +857,11 @@ const isValidUuid = (id?: string | null): boolean => {
     
     setActionLoading(true);
     try {
-      const { error } = await supabase.from('packages').delete().eq('id', pkg.package_id);
-      if (error) throw error;
+      const targetId = pkg.package_id || pkg.id;
+      const delRes = await api.delete(
+        `/api/operational/packages/${encodeURIComponent(targetId)}?condominiumId=${encodeURIComponent(user.condominium_id)}`
+      );
+      if (!delRes.ok) throw new Error(delRes.error || "Erro ao excluir");
       toast.success("Registro excluído!");
       fetchPackages();
       setIsModalOpen(false);
@@ -875,11 +965,23 @@ const isValidUuid = (id?: string | null): boolean => {
               </div>
 
               {/* Linha 2: Unidade */}
-              <div className="mb-3">
+              <div className="mb-2">
                 <p className="text-sm text-zinc-500 font-medium">
                   {formatPackageUnit(pkg)}
                 </p>
               </div>
+
+              {/* Informação de Transportadora / Loja Entregadora */}
+              {(() => {
+                const carrierName = pkg.carrier || extractKnownCarrier(pkg.notes);
+                if (!carrierName) return null;
+                return (
+                  <div className="mb-3 inline-flex items-center gap-1.5 px-3 py-1 rounded-xl text-xs font-bold bg-blue-50 text-blue-700 border border-blue-100 shadow-xs w-fit">
+                    <Truck className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                    <span>{carrierName.toUpperCase()}</span>
+                  </div>
+                );
+              })()}
 
               {/* Linha 3: Código de retirada + Status (lado a lado) */}
               <div className="flex items-center justify-between mb-3 bg-zinc-50 p-2.5 rounded-xl">
@@ -911,6 +1013,23 @@ const isValidUuid = (id?: string | null): boolean => {
                   )}
                 </div>
               </div>
+
+              {/* Linha 5: Transportadora / Loja */}
+              {(() => {
+                const carrierName = pkg.carrier || extractKnownCarrier(pkg.notes);
+                if (!carrierName) return null;
+                return (
+                  <div className="mb-3 flex flex-col">
+                    <span className="text-[9px] font-bold text-zinc-400 uppercase tracking-widest">
+                      Transportadora / Loja
+                    </span>
+                    <p className="text-xs font-bold text-zinc-800 flex items-center gap-1.5 mt-0.5">
+                      <Truck className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                      <span>{carrierName.toUpperCase()}</span>
+                    </p>
+                  </div>
+                );
+              })()}
 
               {/* Linha 6: Forma de retirada (QR ou código) */}
               <div className="mt-auto pt-3 border-t border-zinc-100 flex items-center justify-between">
@@ -980,6 +1099,15 @@ const isValidUuid = (id?: string | null): boolean => {
               </div>
               <div>
                 <div className="space-y-2">
+                  {(selectedPackage.carrier || extractKnownCarrier(selectedPackage.notes)) && (
+                    <div className="flex flex-col">
+                      <span className="text-[9px] font-bold text-zinc-400 tracking-widest uppercase">Transportadora / Loja</span>
+                      <p className="text-xs font-bold text-zinc-800 flex items-center gap-1.5 mt-0.5">
+                        <Truck className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                        <span>{(selectedPackage.carrier || extractKnownCarrier(selectedPackage.notes)).toUpperCase()}</span>
+                      </p>
+                    </div>
+                  )}
                   {selectedPackage.tracking_code && (
                     <div className="flex flex-col">
                       <span className="text-[9px] font-bold text-zinc-400 tracking-widest uppercase">Código da etiqueta</span>
@@ -1272,7 +1400,21 @@ const isValidUuid = (id?: string | null): boolean => {
 
 // --- History Component ---
 
-const HistoryTab = ({ user }: any) => {
+const HistoryTab = ({ user, condoName: propCondoName }: any) => {
+  const [condoName, setCondoName] = useState<string>(propCondoName || '');
+
+  useEffect(() => {
+    if (propCondoName) {
+      setCondoName(propCondoName);
+    } else if (user?.condominium_id) {
+      api
+        .get(`/api/operational/context?condominiumId=${encodeURIComponent(user.condominium_id)}`)
+        .then((res) => {
+          if (res.ok && res.data?.condominium?.name) setCondoName(res.data.condominium.name);
+        });
+    }
+  }, [propCondoName, user?.condominium_id]);
+
   const [searchTerm, setSearchTerm] = useState('');
   const [packages, setPackages] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1286,27 +1428,15 @@ const HistoryTab = ({ user }: any) => {
     
     setLoading(true);
     try {
-      const { data, error } = await supabase
-        .from('packages')
-        .select(`
-          *, 
-          moradores(nome, unidade, block, street),
-          registrar:received_by(full_name),
-          package_id:id,
-          unit_label:unit_number
-        `)
-        .eq('condominium_id', user.condominium_id)
-        .order('received_at', { ascending: false });
+      const res = await fetchAllOperationalPackages(user.condominium_id, 'all');
 
-      if (error) {
-        console.error('Erro Supabase ao buscar histórico:', error);
-        // We don't throw here to avoid the toast error for now, 
-        // but we could set a local error state if needed.
+      if (!res.ok) {
+        console.error('Erro API ao buscar histórico:', res.error);
         setPackages([]);
         return;
       }
       
-      setPackages(data || []);
+      setPackages(res.packages || []);
     } catch (err) {
       console.error('Erro inesperado ao buscar histórico:', err);
       setPackages([]);
@@ -1390,17 +1520,45 @@ const HistoryTab = ({ user }: any) => {
 
     const doc = new jsPDF();
     
-    doc.setFontSize(18);
-    doc.text('Relatório de Histórico de Encomendas', 14, 22);
-    
-    doc.setFontSize(11);
+    // Título dinâmico contextualizado com o condomínio
+    doc.setFontSize(16);
+    const reportTitle = condoName ? `RELATÓRIO DE ENCOMENDAS — ${condoName.toUpperCase()}` : "RELATÓRIO DE ENCOMENDAS";
+    doc.text(reportTitle, 14, 22);
+
+    const formatDateToBR = (dateStr?: string) => {
+      if (!dateStr) return '';
+      const parts = dateStr.split('-');
+      if (parts.length === 3) return `${parts[2]}/${parts[1]}/${parts[0]}`;
+      const d = new Date(dateStr);
+      return !isNaN(d.getTime()) ? d.toLocaleDateString('pt-BR') : dateStr;
+    };
+
+    const dates = filtered
+      .map(p => p.received_at ? new Date(p.received_at).getTime() : 0)
+      .filter(t => t > 0)
+      .sort((a, b) => a - b);
+    const minDateStr = dates.length > 0 ? new Date(dates[0]).toLocaleDateString('pt-BR') : '';
+    const maxDateStr = dates.length > 0 ? new Date(dates[dates.length - 1]).toLocaleDateString('pt-BR') : '';
+
+    let periodText = 'Período do relatório: Geral';
+    if (dateRange.start && dateRange.end) {
+      periodText = `Período do relatório: ${formatDateToBR(dateRange.start)} a ${formatDateToBR(dateRange.end)}`;
+    } else if (dateRange.start) {
+      periodText = `Período do relatório: ${formatDateToBR(dateRange.start)} a ${maxDateStr || formatDateToBR(dateRange.start)}`;
+    } else if (dateRange.end) {
+      periodText = `Período do relatório: ${minDateStr || formatDateToBR(dateRange.end)} a ${formatDateToBR(dateRange.end)}`;
+    } else if (minDateStr && maxDateStr) {
+      periodText = `Período do relatório: ${minDateStr} a ${maxDateStr}`;
+    }
+
+    doc.setFontSize(10);
     doc.setTextColor(100);
-    doc.text(`Gerado em: ${formatSafeDateTime(new Date().toISOString())}`, 14, 30);
-    doc.text(`Total de registros: ${filtered.length}`, 14, 36);
+    doc.text(periodText, 14, 30);
 
     const tableData = filtered.map(pkg => [
       pkg.moradores?.nome || "",
       formatPackageUnit(pkg) || "",
+      pkg.carrier || extractKnownCarrier(pkg.notes) || "-",
       formatSafeDateTime(pkg.received_at) || "",
       pkg.delivered_at ? formatSafeDateTime(pkg.delivered_at) : "Pendente",
       pkg.recebido_por || pkg.porter_name || pkg.registrar?.full_name || "-",
@@ -1409,16 +1567,17 @@ const HistoryTab = ({ user }: any) => {
     ]);
 
     autoTable(doc, {
-      startY: 45,
-      head: [['Morador', 'Unidade', 'Recebimento', 'Retirada', 'Registrado por', 'Entregue por', 'Forma']],
+      startY: 36,
+      head: [['Morador', 'Unidade', 'Transportadora', 'Recebimento', 'Retirada', 'Registrado por', 'Entregue por', 'Forma']],
       body: tableData,
       styles: { fontSize: 8, cellPadding: 2 },
       headStyles: { fillColor: [16, 185, 129], textColor: 255 },
       alternateRowStyles: { fillColor: [249, 250, 251] },
-      margin: { top: 45 },
+      margin: { top: 36 },
     });
 
-    doc.save(`relatorio_historico_${formatDate(new Date(), 'yyyy-MM-dd')}.pdf`);
+    const fileSlug = condoName ? condoName.toLowerCase().replace(/[^a-z0-9]/g, '_') : 'condominio';
+    doc.save(`relatorio_historico_${fileSlug}_${formatDate(new Date(), 'yyyy-MM-dd')}.pdf`);
   };
 
   return (
@@ -1564,17 +1723,18 @@ const ResidentsList = ({ user, residents = [], onUpdate }: any) => {
     setLoading(true);
     try {
       if (editingResident) {
-        const { error } = await supabase
-          .from('moradores')
-          .update(formData)
-          .eq('id', editingResident.id);
-        if (error) throw error;
+        const res = await api.patch(`/api/operational/moradores/${editingResident.id}`, {
+          ...formData,
+          condominiumId: user.condominium_id
+        });
+        if (!res.ok) throw new Error(res.error || 'Erro ao atualizar morador');
         toast.success("Morador atualizado!");
       } else {
-        const { error } = await supabase
-          .from('moradores')
-          .insert([{ ...formData, condominium_id: user.condominium_id }]);
-        if (error) throw error;
+        const res = await api.post('/api/operational/moradores', {
+          ...formData,
+          condominium_id: user.condominium_id
+        });
+        if (!res.ok) throw new Error(res.error || 'Erro ao cadastrar morador');
         toast.success("Morador cadastrado!");
       }
       onUpdate();
@@ -1593,19 +1753,13 @@ const ResidentsList = ({ user, residents = [], onUpdate }: any) => {
     try {
       const newStatus = !resident.ativo;
       
-      // Update moradores table
-      const { error: moradorError } = await supabase
-        .from('moradores')
-        .update({ ativo: newStatus })
-        .eq('id', resident.id);
+      // Update moradores table (and linked profile on server)
+      const statusRes = await api.patch(`/api/operational/moradores/${resident.id}`, {
+        ativo: newStatus,
+        condominiumId: user.condominium_id
+      });
 
-      if (moradorError) throw moradorError;
-
-      // Also update profiles table if it exists
-      await supabase
-        .from('profiles')
-        .update({ active: newStatus })
-        .eq('id', resident.id);
+      if (!statusRes.ok) throw new Error(statusRes.error || 'Erro ao alterar status');
 
       toast.success(`Morador ${newStatus ? 'ativado' : 'desativado'} com sucesso!`);
       
@@ -2145,23 +2299,20 @@ const SettingsPanel = ({ user, systemStatus, onUpdateUser }: any) => {
 
   const fetchData = async () => {
     if (!user.condominium_id) return;
-    const { data: condoData } = await supabase.from('condominiums').select('*').eq('id', user.condominium_id).single();
-    setCondo(condoData);
-
-    const { data: settingsData } = await supabase.from('condominium_settings').select('*').eq('condominium_id', user.condominium_id).maybeSingle();
-    if (settingsData) {
-      setSettings(settingsData);
-    } else {
-      // Default settings
-      setSettings({
-        id: '',
-        condominium_id: user.condominium_id,
-        notification_template: '📦 Nova encomenda recebida\n\nOlá, {{name}}\n\nUma encomenda chegou para sua unidade {{unit}}.\n\nVocê já pode retirar na portaria.',
-        reminder_48h_enabled: true,
-        reminder_72h_enabled: true,
-        contact_phone: '',
-        whatsapp_mode: 'manual_assistido'
-      });
+    const res = await api.get(`/api/operational/context?condominiumId=${encodeURIComponent(user.condominium_id)}`);
+    if (res.ok && res.data) {
+      setCondo(res.data.condominium || { id: user.condominium_id, name: '', address: '' });
+      if (res.data.settings) {
+        setSettings(res.data.settings);
+      } else {
+        setSettings({
+          id: '',
+          condominium_id: user.condominium_id,
+          notification_template: '📦 Nova encomenda recebida\n\nOlá, {{name}}\n\nUma encomenda chegou para sua unidade {{unit}}.\n\nVocê já pode retirar na portaria.',
+          contact_phone: '',
+          whatsapp_mode: 'manual_assistido'
+        } as any);
+      }
     }
   };
 
@@ -2190,16 +2341,14 @@ const SettingsPanel = ({ user, systemStatus, onUpdateUser }: any) => {
     e.preventDefault();
     setLoading(true);
     try {
-      // Update condo name/address
-      await supabase.from('condominiums').update({ name: condo.name, address: condo.address }).eq('id', condo.id);
+      const saveRes = await api.put('/api/operational/condominium-settings', {
+        condominiumId: user.condominium_id,
+        condoName: condo.name,
+        condoAddress: condo.address,
+        settings
+      });
 
-      // Upsert settings
-      const { error } = await supabase.from('condominium_settings').upsert({
-        ...settings,
-        condominium_id: user.condominium_id
-      }, { onConflict: 'condominium_id' });
-
-      if (error) throw error;
+      if (!saveRes.ok) throw new Error(saveRes.error || 'Erro ao salvar');
       toast.success("Configurações salvas!");
     } catch (err) {
       toast.error("Erro ao salvar");
@@ -2234,38 +2383,18 @@ const SettingsPanel = ({ user, systemStatus, onUpdateUser }: any) => {
   const handleClearTestData = async () => {
     setClearingData(true);
     try {
-      // Identificar registros de teste: nome contendo "teste", "demo", "test"
-      const { data: testPackages, error: fetchError } = await supabase
-        .from('packages')
-        .select('id')
-        .eq('condominium_id', user.condominium_id)
-        .or('notes.ilike.%teste%,notes.ilike.%demo%,notes.ilike.%test%');
-
-      if (fetchError) throw fetchError;
-
-      if (!testPackages || testPackages.length === 0) {
+      const res = await api.post('/api/operational/packages/clear', {
+        condominiumId: user.condominium_id,
+        mode: 'test'
+      });
+      if (!res.ok) throw new Error(res.error || 'Erro ao limpar dados');
+      const rep = res.data?.report || { packages: 0, residents: 0, porters: 0 };
+      const totalRemoved = (rep.packages || 0) + (rep.residents || 0) + (rep.porters || 0);
+      if (totalRemoved === 0) {
         toast.success("Nenhum registro de teste encontrado.");
-        setShowClearDataModal(false);
-        return;
+      } else {
+        toast.success(`${totalRemoved} registros de teste removidos com sucesso!`);
       }
-
-      const testIds = testPackages.map(p => p.id);
-
-      // 1. Apagar logs de retirada relacionados
-      await supabase
-        .from('retrieval_logs')
-        .delete()
-        .in('package_id', testIds);
-
-      // 2. Apagar os pacotes
-      const { error: deleteError } = await supabase
-        .from('packages')
-        .delete()
-        .in('id', testIds);
-
-      if (deleteError) throw deleteError;
-
-      toast.success(`${testIds.length} registros de teste removidos com sucesso!`);
       setShowClearDataModal(false);
     } catch (err: any) {
       toast.error("Erro ao limpar dados: " + err.message);
@@ -2439,26 +2568,6 @@ const SettingsPanel = ({ user, systemStatus, onUpdateUser }: any) => {
             />
             <p className="text-[10px] text-zinc-400 mt-1 uppercase font-bold">Variáveis: {"{{name}}"}, {"{{unit}}"}, {"{{carrier}}"}</p>
           </div>
-          <div className="flex flex-col gap-3">
-            <label className="flex items-center gap-3 cursor-pointer group">
-              <input 
-                type="checkbox" 
-                checked={settings.reminder_48h_enabled}
-                onChange={(e) => setSettings({...settings, reminder_48h_enabled: e.target.checked})}
-                className="w-5 h-5 rounded-lg border-zinc-300 text-emerald-600 focus:ring-emerald-500" 
-              />
-              <span className="text-sm text-zinc-700 group-hover:text-zinc-900 transition-colors">Ativar lembrete automático após 48h</span>
-            </label>
-            <label className="flex items-center gap-3 cursor-pointer group">
-              <input 
-                type="checkbox" 
-                checked={settings.reminder_72h_enabled}
-                onChange={(e) => setSettings({...settings, reminder_72h_enabled: e.target.checked})}
-                className="w-5 h-5 rounded-lg border-zinc-300 text-emerald-600 focus:ring-emerald-500" 
-              />
-              <span className="text-sm text-zinc-700 group-hover:text-zinc-900 transition-colors">Ativar lembrete automático após 72h</span>
-            </label>
-          </div>
         </div>
 
         {user.role === 'admin' && (
@@ -2602,36 +2711,40 @@ export default function SyndicPanel({ user, onLogout, onUpdateUser }: { user: Pr
     if (!user?.condominium_id) return;
 
     const fetchCounts = async () => {
-      const { data, error } = await supabase
-        .from('packages')
-        .select('status, delivered_at')
-        .eq('condominium_id', user.condominium_id);
-
-      if (data) {
-        const all = data.length;
-        const pending = data.filter(p => !p.delivered_at || p.status !== 'delivered').length;
-        const delivered = data.filter(p => p.status === 'delivered' || p.delivered_at).length;
-        setPackageCounts({ all, pending, delivered });
+      try {
+        const res = await api.get(`/api/operational/dashboard?condominiumId=${encodeURIComponent(user.condominium_id)}`);
+        if (res.ok && res.data?.counts) {
+          setPackageCounts(res.data.counts);
+        }
+      } catch {
+        // ignore transient refresh failure
       }
     };
 
     fetchCounts();
 
     // Subscribe to changes
-    const channel = supabase
-      .channel('package-counts-syndic')
-      .on('postgres_changes', { 
-        event: '*', 
-        schema: 'public', 
-        table: 'packages',
-        filter: `condominium_id=eq.${user.condominium_id}`
-      }, () => {
-        fetchCounts();
-      })
-      .subscribe();
+    let channel: any = null;
+    try {
+      channel = supabase
+        .channel('package-counts-syndic')
+        .on('postgres_changes', { 
+          event: '*', 
+          schema: 'public', 
+          table: 'packages',
+          filter: `condominium_id=eq.${user.condominium_id}`
+        }, () => {
+          fetchCounts();
+        })
+        .subscribe();
+    } catch {
+      // ignore if realtime unavailable
+    }
 
     return () => {
-      supabase.removeChannel(channel);
+      if (channel) {
+        try { supabase.removeChannel(channel); } catch {}
+      }
     };
   }, [user?.condominium_id]);
 
@@ -2646,29 +2759,26 @@ export default function SyndicPanel({ user, onLogout, onUpdateUser }: { user: Pr
   };
 
   const fetchInitialData = async () => {
+    if (!user?.condominium_id) {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     try {
-      // Fetch Condo Name
-      const { data: condo } = await supabase.from('condominiums').select('name').eq('id', user.condominium_id).single();
-      if (condo) setCondoName(condo.name);
+      const condoIdEnc = encodeURIComponent(user.condominium_id);
+      const [ctxRes, dashRes] = await Promise.all([
+        api.get(`/api/operational/context?includeInactive=true&condominiumId=${condoIdEnc}`),
+        api.get(`/api/operational/dashboard?condominiumId=${condoIdEnc}`)
+      ]);
 
-      // Fetch Residents
-      const { data: res } = await supabase
-        .from('moradores')
-        .select('*')
-        .eq('condominium_id', user.condominium_id)
-        .order('nome');
-      if (res) setResidents(res);
+      if (ctxRes.ok && ctxRes.data) {
+        if (ctxRes.data.condominium?.name) setCondoName(ctxRes.data.condominium.name);
+        if (ctxRes.data.moradores) setResidents(ctxRes.data.moradores);
+      }
 
-      // Fetch Logs
-      const { data: messageLogs } = await supabase
-        .from('message_logs')
-        .select('*')
-        .eq('condominium_id', user.condominium_id)
-        .order('data_envio', { ascending: false })
-        .limit(100);
-      if (messageLogs) setLogs(messageLogs);
-
+      if (dashRes.ok && dashRes.data?.messageLogs) {
+        setLogs(dashRes.data.messageLogs);
+      }
     } catch (err) {
       console.error("Erro ao carregar dados do síndico:", err);
     } finally {
@@ -2697,9 +2807,9 @@ export default function SyndicPanel({ user, onLogout, onUpdateUser }: { user: Pr
       case 'dashboard':
         return <Dashboard user={user} residents={residents} logs={logs} systemStatus={systemStatus} />;
       case 'encomendas':
-        return <PackagesList user={user} counts={packageCounts} />;
+        return <PackagesList user={user} counts={packageCounts} condoName={condoName} />;
       case 'historico':
-        return <HistoryTab user={user} />;
+        return <HistoryTab user={user} condoName={condoName} />;
       case 'moradores':
         return <ResidentsList user={user} residents={residents} onUpdate={fetchInitialData} />;
       case 'moradores_desativados':

@@ -1,8 +1,28 @@
+import { canShowResendButton, getPackageItemCount, isPackageNotificationConfirmed } from '../../lib/packageUtils';
 import React from 'react';
-import { Package as PackageIcon, Home, Clock, CheckCircle, ArrowRight, Camera, Hash, Layers, MessageSquare, MessageCircle, AlertCircle, Send, User } from 'lucide-react';
+import { Package as PackageIcon, Home, Clock, CheckCircle, ArrowRight, Camera, Hash, Layers, MessageSquare, MessageCircle, AlertCircle, Send, User, Truck } from 'lucide-react';
 import { Package } from '../../types';
 import { formatSafeDateTime } from '../../lib/dateUtils';
 import { formatPackageUnit } from '../../lib/residentUtils';
+
+const KNOWN_CARRIERS = [
+  'Shopee',
+  'Mercado Livre',
+  'Amazon',
+  'Correios',
+  'TikTok Shop',
+  'Shein',
+  'Magalu',
+  'Jadlog',
+  'Loggi'
+];
+
+const extractKnownCarrier = (notes?: string): string => {
+  if (!notes) return '';
+  const lower = notes.toLowerCase();
+  const found = KNOWN_CARRIERS.find(c => lower.includes(c.toLowerCase()));
+  return found || '';
+};
 
 interface PackageItemProps {
   pkg: any;
@@ -14,6 +34,8 @@ interface PackageItemProps {
   onViewPhotos?: (pkg: any) => void;
   onViewLabel?: (pkg: any) => void;
   onNotify?: (pkg: any) => void;
+  onResend?: (pkg: any) => void;
+  isResending?: boolean;
   handleDeliver: (id: string, method: any, photo?: string, data?: any) => void;
   setQrPackage: (pkg: any) => void;
 }
@@ -28,43 +50,64 @@ const PackageItem: React.FC<PackageItemProps> = ({
   onViewPhotos,
   onViewLabel,
   onNotify,
+  onResend,
+  isResending = false,
   handleDeliver,
   setQrPackage
 }) => {
-  const isNotified = pkg.whatsapp_sent === true || pkg.whatsapp_notified === true;
+  const isNotified = isPackageNotificationConfirmed(pkg);
+  const showResend = canShowResendButton(pkg) && Boolean(onResend);
   const elementId = `package-${pkg.package_id || pkg.id}`;
   
   return (
     <div id={elementId} className="bg-white rounded-3xl border border-zinc-100 shadow-sm p-6 hover:shadow-md transition-all group">
-      <div className="flex justify-between items-start mb-4">
-        <div className={`w-14 h-14 rounded-2xl flex items-center justify-center relative transition-colors shrink-0 ${pkg.status === 'delivered' ? 'bg-emerald-50' : 'bg-zinc-100 group-hover:bg-zinc-200'}`}>
-          <div className="relative">
-            <svg viewBox="0 0 24 24" fill="none" className="w-10 h-10 drop-shadow-sm">
-              <rect x="2" y="5" width="20" height="16" rx="2" fill="#FBBF24" />
-              <rect x="10" y="5" width="4" height="8" fill="#FFFFFF" fillOpacity="0.9" />
-              <rect x="5" y="15" width="6" height="1" rx="0.5" fill="#4B5563" fillOpacity="0.7" />
-              <rect x="5" y="17" width="6" height="1" rx="0.5" fill="#4B5563" fillOpacity="0.7" />
-              <rect x="5" y="19" width="6" height="1" rx="0.5" fill="#4B5563" fillOpacity="0.7" />
-            </svg>
-            {pkg.status === 'delivered' && (
-              <div className="absolute -bottom-1 -right-1 bg-emerald-500 rounded-full w-6 h-6 flex items-center justify-center border-2 border-white shadow-sm scale-110">
-                <CheckCircle className="w-4 h-4 text-white" />
-              </div>
-            )}
+      <div className="flex justify-between items-start gap-2 mb-4">
+        <div className="flex items-center gap-4 min-w-0">
+          <div className={`w-14 h-14 rounded-2xl flex items-center justify-center relative transition-colors shrink-0 ${pkg.status === 'delivered' ? 'bg-emerald-50' : 'bg-zinc-100 group-hover:bg-zinc-200'}`}>
+            <div className="relative">
+              <svg viewBox="0 0 24 24" fill="none" className="w-10 h-10 drop-shadow-sm">
+                <rect x="2" y="5" width="20" height="16" rx="2" fill="#FBBF24" />
+                <rect x="10" y="5" width="4" height="8" fill="#FFFFFF" fillOpacity="0.9" />
+                <rect x="5" y="15" width="6" height="1" rx="0.5" fill="#4B5563" fillOpacity="0.7" />
+                <rect x="5" y="17" width="6" height="1" rx="0.5" fill="#4B5563" fillOpacity="0.7" />
+                <rect x="5" y="19" width="6" height="1" rx="0.5" fill="#4B5563" fillOpacity="0.7" />
+              </svg>
+              {pkg.status === 'delivered' && (
+                <div className="absolute -bottom-1 -right-1 bg-emerald-500 rounded-full w-6 h-6 flex items-center justify-center border-2 border-white shadow-sm scale-110">
+                  <CheckCircle className="w-4 h-4 text-white" />
+                </div>
+              )}
+            </div>
+            <span className={`absolute -top-3 -right-3 text-white text-sm font-bold w-9 h-9 rounded-full flex items-center justify-center border-2 border-white shadow-lg z-10 group-hover:scale-110 transition-transform ${pkg.status === 'delivered' ? 'bg-emerald-500 shadow-[0_4px_12px_rgba(16,185,129,0.3)]' : 'bg-red-500 shadow-[0_4px_12px_rgba(239,68,68,0.3)]'}`}>
+              {pkg.isGroup ? pkg.count : getPackageItemCount(pkg)}
+            </span>
           </div>
-          <span className={`absolute -top-3 -right-3 text-white text-sm font-bold w-9 h-9 rounded-full flex items-center justify-center border-2 border-white shadow-lg z-10 group-hover:scale-110 transition-transform ${pkg.status === 'delivered' ? 'bg-emerald-500 shadow-[0_4px_12px_rgba(16,185,129,0.3)]' : 'bg-red-500 shadow-[0_4px_12px_rgba(239,68,68,0.3)]'}`}>
-            {pkg.isGroup ? pkg.count : 1}
+          <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider whitespace-nowrap ${pkg.status === 'delivered' ? 'bg-zinc-100 text-zinc-600' : 'bg-amber-100 text-amber-700'}`}>
+            {pkg.status === 'delivered' 
+              ? ((pkg.isGroup ? pkg.count : getPackageItemCount(pkg)) > 1 ? `${pkg.isGroup ? pkg.count : getPackageItemCount(pkg)} Retiradas` : 'Retirada') 
+              : ((pkg.isGroup ? pkg.count : getPackageItemCount(pkg)) > 1 ? `${pkg.isGroup ? pkg.count : getPackageItemCount(pkg)} Pendentes` : 'Pendente')}
           </span>
         </div>
-        <div className="flex flex-col items-end gap-1">
-          <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider ${pkg.status === 'delivered' ? 'bg-zinc-100 text-zinc-600' : 'bg-amber-100 text-amber-700'}`}>
-            {pkg.status === 'delivered' 
-              ? (pkg.isGroup ? `${pkg.count} Retiradas` : 'Retirada') 
-              : (pkg.isGroup ? `${pkg.count} Pendentes` : 'Pendente')}
-          </span>
+        <div className="flex flex-col items-end gap-1 shrink-0">
+          {showResend && (
+            <button
+              type="button"
+              disabled={isResending}
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                onResend?.(pkg);
+              }}
+              title="Reenviar notificação ao morador"
+              className="flex items-center gap-2 px-5 py-0.5 text-white bg-red-600 hover:bg-red-700 active:scale-95 transition-all cursor-pointer rounded-full border border-red-600 disabled:opacity-60 whitespace-nowrap"
+            >
+              <span className="text-[12px] font-black uppercase tracking-wide">
+                {isResending ? 'Enviando...' : 'Reenviar'}
+              </span>
+            </button>
+          )}
         </div>
       </div>
-      
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-xl font-bold text-zinc-900 truncate pr-2" title={pkg.moradores?.nome}>
           {pkg.moradores?.nome || 'Morador não identificado'}
@@ -77,6 +120,35 @@ const PackageItem: React.FC<PackageItemProps> = ({
           <Home className="w-4 h-4 flex-shrink-0" />
           <p className="font-medium">{formatPackageUnit(pkg)}</p>
         </div>
+
+        {/* Informação de Transportadora / Loja Entregadora */}
+        {(() => {
+          if (!pkg.isGroup) {
+            const carrierName = pkg.carrier || extractKnownCarrier(pkg.notes);
+            if (!carrierName) return null;
+            return (
+              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl text-xs font-bold bg-blue-50 text-blue-700 border border-blue-100 shadow-xs">
+                <Truck className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                <span>{carrierName.toUpperCase()}</span>
+              </div>
+            );
+          } else {
+            const carriers = Array.from(new Set(
+              (pkg.packages || []).map((p: any) => p.carrier || extractKnownCarrier(p.notes)).filter(Boolean)
+            ));
+            if (carriers.length === 0) return null;
+            return (
+              <div className="flex flex-wrap gap-1.5 pt-0.5">
+                {carriers.map((cName: any, idx: number) => (
+                  <span key={idx} className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg text-[11px] font-bold bg-blue-50 text-blue-700 border border-blue-100 shadow-xs">
+                    <Truck className="w-3 h-3 text-blue-600 shrink-0" />
+                    <span>{String(cName).toUpperCase()}</span>
+                  </span>
+                ))}
+              </div>
+            );
+          }
+        })()}
         
         <div className="mt-4 pt-4 border-t border-zinc-50 space-y-3">
           <div className="flex flex-col">
@@ -99,6 +171,18 @@ const PackageItem: React.FC<PackageItemProps> = ({
               {pkg.pickup_code || '-'}
             </button>
           </div>
+
+          {!pkg.isGroup && (pkg.carrier || extractKnownCarrier(pkg.notes)) && (
+            <div className="flex flex-col">
+              <span className="text-[10px] font-bold text-zinc-400 tracking-widest uppercase">
+                Transportadora / Loja
+              </span>
+              <p className="text-sm font-bold text-zinc-800 flex items-center gap-1.5 mt-0.5">
+                <Truck className="w-4 h-4 text-blue-600 shrink-0" />
+                <span>{pkg.carrier || extractKnownCarrier(pkg.notes)}</span>
+              </p>
+            </div>
+          )}
 
           {!pkg.isGroup && pkg.tracking_code && (
             <div className="flex flex-col">

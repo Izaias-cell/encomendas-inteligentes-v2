@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { supabase } from '../lib/supabase';
+import { api } from '../lib/apiClient';
 import { Profile, Role } from '../types';
 import { UserPlus, ArrowLeft, Loader2, User, Phone, Home, Shield } from 'lucide-react';
 import { toast } from 'react-hot-toast';
@@ -27,23 +27,21 @@ export default function ProfileNew({ user }: ProfileNewProps) {
     setLoading(true);
 
     try {
-      const { data: newResident, error } = await supabase
-        .from('moradores')
-        .insert([{
-          nome: fullName,
-          telefone: phone,
-          unidade: unitNumber,
-          unit_type: unitType,
-          block: block,
-          lote: lote,
-          street: street,
-          condominium_id: user.condominium_id,
-          ativo: true
-        }])
-        .select()
-        .single();
-
-      if (error) throw error;
+      const res = await api.post<{ morador?: any }>('/api/operational/moradores', {
+        nome: fullName,
+        telefone: phone,
+        unidade: unitNumber,
+        unit_type: unitType,
+        block: block,
+        lote: lote,
+        street: street,
+        condominium_id: user.condominium_id,
+        ativo: true
+      });
+      if (!res.ok || !res.data?.morador?.id) {
+        throw new Error(res.error || 'Falha ao confirmar cadastro do morador.');
+      }
+      const newResident = res.data.morador;
       
       await registrarAuditoria({
         condominio_id: user.condominium_id || '',

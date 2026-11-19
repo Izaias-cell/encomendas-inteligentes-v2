@@ -1,4 +1,5 @@
 import { supabase } from '../lib/supabase';
+import { api, getValidAuthToken } from '../lib/apiClient';
 
 export interface AuditParams {
   condominio_id: string;
@@ -38,25 +39,9 @@ export const registrarAuditoria = async (params: AuditParams) => {
     const usuarioId = sanitizeUuid(params.usuario_id);
     const registroId = sanitizeUuid(params.registro_id);
 
-    const { error } = await supabase.rpc('registrar_auditoria', {
-      p_condominio_id: condominioId,
-      p_usuario_id: usuarioId,
-      p_usuario_nome: params.usuario_nome || 'Usuário',
-      p_usuario_perfil: params.usuario_perfil || 'porteiro',
-      p_tipo_evento: params.tipo_evento,
-      p_acao: params.acao,
-      p_tabela_afetada: params.tabela_afetada,
-      p_registro_id: registroId,
-      p_descricao: params.descricao,
-      p_metodo: params.metodo,
-      p_dados_antes: params.dados_antes,
-      p_dados_depois: params.dados_depois
-    });
-
-    if (error) {
-      console.warn('Aviso no RPC registrar_auditoria (tentando fallback):', error.message || error);
-      // Fallback para inserção direta se a função RPC falhar
-      await supabase.from('auditoria_eventos').insert({
+    const token = await getValidAuthToken();
+    if (token) {
+      await api.post('/api/operational/audit', {
         condominio_id: condominioId,
         usuario_id: usuarioId,
         usuario_nome: params.usuario_nome || 'Usuário',
@@ -68,8 +53,9 @@ export const registrarAuditoria = async (params: AuditParams) => {
         descricao: params.descricao,
         metodo: params.metodo,
         dados_antes: params.dados_antes,
-        dados_depois: params.dados_depois
+        dados_depois: params.dados_depois,
       });
+      return;
     }
   } catch (err) {
     console.warn('Aviso na auditoria (ignorado com segurança):', err);
@@ -89,12 +75,17 @@ export const logAction = async (
   oldValue?: any,
   newValue?: any
 ) => {
-  // Try to determine the name and role from the profile
-  const { data: profile } = await supabase
-    .from('profiles')
-    .select('full_name, role')
-    .eq('id', userId)
-    .single();
+  let profile: { full_name?: string; role?: string } | null = null;
+  try {
+    const { data } = await supabase
+      .from('profiles')
+      .select('full_name, role')
+      .eq('id', userId)
+      .maybeSingle();
+    profile = data;
+  } catch {
+    profile = null;
+  }
 
   return registrarAuditoria({
     condominio_id: condominiumId,

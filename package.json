@@ -5,13 +5,21 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "vite build && esbuild server.ts --bundle --platform=node --format=esm --packages=external --outfile=api/index.js",
+    "build:api": "esbuild server.ts --bundle --platform=node --format=esm --packages=external --outfile=api/index.js",
+    "build:client": "vite build",
+    "build": "node --input-type=commonjs -e \"const { execSync } = require('child_process'); const fs = require('fs'); if (!process.env.VERCEL || !fs.existsSync('api/index.js')) { execSync('npm run build:api', { stdio: 'inherit' }); } execSync('npm run build:client', { stdio: 'inherit' });\"",
     "start": "node dist/server.cjs",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
-    "test": "tsx src/tests/condominiums.test.ts && tsx src/tests/persistence-integrity.test.ts",
+    "test": "tsx src/tests/condominiums.test.ts && tsx src/tests/persistence-integrity.test.ts && tsx src/tests/plantao.test.ts && tsx src/tests/whatsapp-confirmation.test.ts && tsx src/tests/query_profiles.test.ts && tsx src/tests/resident-importer.test.ts && tsx src/tests/portaria-auth-security.test.ts && tsx src/tests/production-hardening.test.ts && tsx src/tests/regression-fixes.test.ts",
     "test:condos": "tsx src/tests/condominiums.test.ts",
-    "test:persistence": "tsx src/tests/persistence-integrity.test.ts"
+    "test:persistence": "tsx src/tests/persistence-integrity.test.ts",
+    "test:plantao": "tsx src/tests/plantao.test.ts",
+    "test:whatsapp": "tsx src/tests/whatsapp-confirmation.test.ts",
+    "test:profiles": "tsx src/tests/query_profiles.test.ts",
+    "test:residents": "tsx src/tests/resident-importer.test.ts",
+    "test:portaria-auth": "tsx src/tests/portaria-auth-security.test.ts",
+    "test:hardening": "tsx src/tests/production-hardening.test.ts"
   },
   "dependencies": {
     "@google/genai": "^1.29.0",

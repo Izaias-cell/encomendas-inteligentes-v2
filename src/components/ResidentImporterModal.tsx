@@ -26,7 +26,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { Profile, Morador } from '../types';
-import { supabase } from '../lib/supabase';
+import { api } from '../lib/apiClient';
 import {
   readSpreadsheetFile,
   detectColumnMapping,
@@ -103,13 +103,12 @@ export default function ResidentImporterModal({
 
   const fetchExistingResidents = async () => {
     try {
-      const { data, error } = await supabase
-        .from('moradores')
-        .select('id, nome, unidade, telefone, ativo, observacoes, created_at, condominium_id')
-        .eq('condominium_id', user.condominium_id);
-
-      if (!error && data) {
-        setExistingResidents(data as Morador[]);
+      const qs = user.condominium_id
+        ? `?includeInactive=true&condominiumId=${encodeURIComponent(user.condominium_id)}`
+        : '?includeInactive=true';
+      const res = await api.get<{ moradores?: Morador[] }>(`/api/operational/moradores${qs}`);
+      if (res.ok && res.data?.moradores) {
+        setExistingResidents(res.data.moradores);
       }
     } catch (err) {
       console.warn('Erro ao carregar moradores existentes para checagem de duplicidade:', err);

@@ -1,0 +1,793 @@
+# ENCOMENDAS INTELIGENTES — PROMPT COMPLETO DE AUDITORIA E IMPLEMENTAÇÃO CONTROLADA
+
+## PRESERVAÇÃO DO SISTEMA, MELHORIAS OPERACIONAIS E EVOLUÇÃO POR ONDAS
+
+### OBJETIVO PRINCIPAL
+
+Precisamos evoluir o ENCOMENDAS INTELIGENTES com melhorias que tragam mais agilidade, segurança, clareza operacional e qualidade de experiência para porteiros e moradores.
+
+Entretanto, existe uma condição fundamental:
+
+**O sistema já possui funcionalidades importantes em produção e homologadas. Não queremos perder, modificar indevidamente ou comprometer nada que esteja funcionando.**
+
+Por isso, todas as melhorias deverão ser analisadas e implementadas de maneira controlada, com auditoria prévia, escopo definido, testes e homologação.
+
+Não queremos uma reestruturação geral do projeto.
+
+Queremos melhorias pontuais, tecnicamente seguras e integradas à arquitetura existente.
+
+A implementação será dividida em ondas independentes.
+
+A autorização inicial contempla exclusivamente:
+
+1. Auditoria do estado atual.
+2. Implementação da Onda 1.
+
+As demais ondas deverão aguardar autorização expressa do usuário.
+
+---
+
+# PARTE 1 — FUNCIONALIDADES HOMOLOGADAS QUE DEVEM SER PRESERVADAS
+
+As seguintes funcionalidades já foram testadas e estão funcionando:
+
+1. Acesso à Portaria por link/token operacional.
+2. Cadastro individual de encomendas.
+3. Baixa individual de encomendas.
+4. Dispositivo QUANTIDADE DE ENCOMENDAS.
+5. Contagem de volumes na página pública do morador.
+6. QR Code apresentado na página pública.
+7. Isolamento dos dados por condomínio.
+8. Integração atual com Supabase.
+9. Funcionamento do sistema publicado em produção.
+
+Essas funcionalidades são consideradas homologadas.
+
+### Proteções obrigatórias
+
+- Não substituir a autenticação operacional da Portaria por Supabase Auth.
+- Preservar apiClient e token operacional.
+- Não reintroduzir chamadas diretas do cliente anônimo às tabelas operacionais.
+- Preservar o isolamento multi-tenant por condominium_id.
+- Preservar as validações de destinatário e residência.
+- Preservar a geração e o reaproveitamento de pickup_code e pickup_token.
+- Preservar a exigência de notificação prévia para permitir a baixa.
+- Preservar retrieval_logs e auditoria_eventos.
+- Preservar o formato atual do QR Code público: JSON { id, code, token }.
+- Não alterar os mecanismos de cadastro e baixa individual sem necessidade comprovada.
+
+### QUANTIDADE DE ENCOMENDAS
+
+Esse mecanismo funciona corretamente e deverá permanecer disponível para todos os perfis autorizados, inclusive o porteiro.
+
+Seu funcionamento deverá permanecer exatamente como está:
+
+- Uma foto.
+- Um registro no banco.
+- Quantidade de volumes representada por [QTD: X].
+- Soma correta dos volumes nos totalizadores.
+- Compatibilidade com a página pública do morador.
+
+Não confundir QUANTIDADE DE ENCOMENDAS com ADICIONAR VÁRIAS.
+
+### ADICIONAR VÁRIAS
+
+O usuário decidiu que não deseja utilizar esse mecanismo no trabalho operacional da Portaria.
+
+Portanto:
+
+- Não remover a funcionalidade do projeto.
+- Não reescrever seu funcionamento.
+- Não tentar corrigir seus bugs internos nesta implementação.
+- Não alterar QUANTIDADE DE ENCOMENDAS.
+- Apenas impedir que o perfil porteiro tenha acesso a ADICIONAR VÁRIAS.
+- Preservar o acesso administrativo existente.
+- Verificar botões, menus, atalhos, rotas e eventuais chamadas diretas.
+
+Não basta esconder o botão visualmente: verificar também se existe algum caminho que permita ao porteiro executar a funcionalidade diretamente.
+
+A restrição deverá respeitar os mecanismos atuais de autorização.
+
+---
+
+# PARTE 2 — AUDITORIA PONTUAL OBRIGATÓRIA
+
+Antes de realizar qualquer modificação, auditar o código atual.
+
+A auditoria anterior identificou estes arquivos como relevantes:
+
+- server.ts
+- src/pages/Dashboard.tsx
+- src/pages/Portaria.tsx
+- src/pages/PackageNew.tsx
+- src/components/SyndicPanel.tsx
+- src/services/activitySyncService.ts
+- src/services/whatsappService.ts
+- src/lib/packageUtils.ts
+- src/components/portaria/PackageItem.tsx
+- src/pages/Retirada.tsx
+
+Não presumir que esses arquivos continuam iguais à auditoria anterior. Conferir o estado atual do repositório.
+
+A auditoria deverá verificar:
+
+1. Implementação atual de cada funcionalidade solicitada.
+2. Arquivos, componentes, serviços e funções envolvidos.
+3. Dependências entre os fluxos.
+4. Comportamento atual do QR Code público.
+5. Funcionamento atual da baixa individual.
+6. Origem dos dados de residência e nome do morador.
+7. Como o sistema identifica o tipo de unidade do condomínio.
+8. Como a página pública recebe atualizações de status.
+9. Como a confirmação visual de retirada poderá ser apresentada na página do morador.
+10. Como a confirmação sonora poderá funcionar na Portaria.
+11. Possíveis conflitos entre as melhorias.
+12. Riscos de regressão.
+13. Testes existentes que podem ser aproveitados.
+
+### Regra obrigatória
+
+A primeira auditoria deverá ser somente leitura.
+
+Não editar, criar, excluir ou substituir arquivos durante essa primeira análise.
+
+Apresentar o diagnóstico e identificar os riscos antes de qualquer implementação.
+
+Depois da auditoria, executar exclusivamente a Onda 1, desde que não existam impedimentos técnicos relevantes.
+
+---
+
+# PARTE 3 — ONDA 1: CONTAGEM REAL NO DASHBOARD E BLOQUEIO DE ADICIONAR VÁRIAS
+
+Esta é a única onda autorizada inicialmente.
+
+## 3.1 Corrigir os totalizadores do Dashboard
+
+A auditoria anterior identificou que GET /api/operational/dashboard utiliza select('*') sem paginação e pode sofrer o limite padrão de 1.000 linhas do Supabase/PostgREST.
+
+Precisamos garantir que o Dashboard apresente os números reais e completos, sem truncamento.
+
+Considerar:
+
+- Total de encomendas.
+- Total de pendentes.
+- Total de retiradas.
+- Registros antigos.
+- Registros recentes.
+- Registros que representam múltiplos volumes por meio de [QTD: X].
+
+### Regra de contagem
+
+Uma linha contendo [QTD: 5] representa cinco volumes na contagem operacional.
+
+Não contar apenas linhas do banco.
+
+### Estratégia técnica
+
+Avaliar:
+
+A. Paginação interna no servidor, usando .range() em blocos e selecionando somente as colunas necessárias.
+
+B. Função SQL/RPC que calcule os totais diretamente no PostgreSQL, caso seja comprovadamente mais eficiente e segura.
+
+Não utilizar select('*') para calcular os totais.
+
+Não baixar milhares de registros e imagens para o navegador apenas para calcular números.
+
+Não utilizar count: 'exact' como substituto da soma de volumes quando existir [QTD: X].
+
+### Escopo
+
+O foco desta onda é o Dashboard e suas estatísticas.
+
+Verificar se o endpoint também alimenta a Portaria ou o painel do síndico.
+
+Não alterar automaticamente os contadores desses outros ambientes. Se houver dependência compartilhada, apresentar o impacto antes de modificar.
+
+### Critérios de aprovação
+
+- Mais de 1.000 registros.
+- Total completo e correto.
+- Pendentes corretos.
+- Retiradas corretas.
+- [QTD: X] somado corretamente.
+- Registros históricos incluídos.
+- Imagens não utilizadas para calcular números.
+- Cadastro e baixa preservados.
+
+## 3.2 Bloquear ADICIONAR VÁRIAS para porteiro
+
+Implementar somente a restrição definida.
+
+O perfil porteiro não poderá abrir nem executar ADICIONAR VÁRIAS.
+
+O perfil administrativo deverá continuar com o acesso atual.
+
+Não remover o código nem modificar seu mecanismo interno.
+
+Preservar QUANTIDADE DE ENCOMENDAS.
+
+### Critérios de aprovação
+
+- Porteiro sem acesso a ADICIONAR VÁRIAS.
+- Acesso direto também protegido, quando aplicável.
+- Administrador preservado.
+- QUANTIDADE DE ENCOMENDAS continua funcionando.
+- Cadastro individual continua funcionando.
+
+---
+
+# PARTE 4 — ONDA 2: QR CODE AUTOMÁTICO, BAIXA, IDENTIFICAÇÃO DA RESIDÊNCIA E CONFIRMAÇÕES
+
+Esta onda deverá aguardar autorização específica.
+
+Esta etapa reúne melhorias que fazem parte do mesmo fluxo operacional de leitura e retirada.
+
+O objetivo é tornar a baixa mais rápida, segura, clara e profissional.
+
+## 4.1 Ativação automática da câmera
+
+Quando o porteiro clicar em CÓDIGO DE RETIRADA:
+
+1. Abrir o modal atual.
+2. Ativar automaticamente a câmera traseira.
+3. Não exigir um segundo clique no ícone de QR Code.
+4. Exibir o leitor de QR Code.
+5. Manter o campo numérico de quatro dígitos visível simultaneamente.
+
+O porteiro poderá escolher entre apontar a câmera ou digitar o código.
+
+Reaproveitar o mecanismo Html5Qrcode e o parser existentes, caso estejam tecnicamente adequados.
+
+Não criar leitores duplicados ou mecanismos independentes desnecessários.
+
+## 4.2 Campo de digitação simultâneo
+
+O campo numérico de quatro dígitos deverá permanecer visível durante a leitura.
+
+Regras:
+
+- Digitação manual disponível a qualquer momento.
+- Não exigir outra tela.
+- Não exigir fechamento da câmera.
+- Não aplicar autofocus que faça o teclado cobrir o leitor.
+- Se a câmera estiver indisponível ou a permissão for negada, a digitação deverá continuar funcionando.
+
+## 4.3 Validação do QR Code
+
+Quando o leitor reconhecer um QR Code, interpretar o formato atual:
+
+{ id, code, token }
+
+Validar integralmente:
+
+- Identificação da encomenda.
+- Código.
+- Token.
+- Condomínio correto.
+- Residência correta.
+- Situação da encomenda.
+- Status pendente.
+- Notificação prévia.
+- Todas as regras atuais de autorização para baixa.
+
+A baixa deverá acontecer automaticamente após a validação integral.
+
+Não solicitar confirmação adicional do porteiro depois de um QR Code válido.
+
+A digitação manual deverá seguir exatamente as mesmas regras.
+
+## 4.4 Proteção contra duplicidade
+
+Implementar proteção no frontend e no backend.
+
+- Trava síncrona contra leituras repetidas.
+- Impedir que QR e digitação processem a mesma encomenda simultaneamente.
+- Atualização condicional e atômica no banco.
+- Não permitir nova baixa de encomenda já retirada.
+- Não duplicar registros de auditoria.
+- Não duplicar notificações de sucesso.
+- Não apresentar sucesso se o servidor não confirmar a baixa.
+
+A câmera deverá ser desligada e todas as tracks liberadas ao fechar o modal ou sair da tela.
+
+Não modificar o QR Code público já existente.
+
+---
+
+## 4.5 CONFIRMAÇÃO VISUAL DA BAIXA PARA O PORTEIRO
+
+Atualmente, quando uma encomenda é baixada, o sistema apresenta uma mensagem de confirmação.
+
+Entretanto, essa mensagem não informa claramente qual residência teve a encomenda baixada.
+
+Queremos melhorar isso.
+
+A confirmação deverá apresentar obrigatoriamente a identificação da residência.
+
+Quando disponível, apresentar também o nome do morador.
+
+### Exemplo ilustrativo
+
+ENCOMENDA BAIXADA COM SUCESSO!
+
+Casa 125
+
+Morador: João da Silva
+
+### Regras
+
+- A residência é obrigatória na mensagem.
+- O nome do morador é complementar.
+- Se o nome não estiver disponível, apresentar somente a residência.
+- Nunca apresentar campo vazio ou informação indefinida.
+- Não inventar nomes.
+- Utilizar o tipo de unidade cadastrado para o condomínio.
+
+Exemplos:
+
+- Casa 125.
+- Apartamento 302 — Bloco B.
+- Sobrado 18.
+
+Não presumir que todos os condomínios utilizam casas ou apartamentos.
+
+A identificação deverá utilizar os dados reais já disponíveis no cadastro.
+
+### Sugestão de apresentação
+
+A mensagem deverá ser clara, legível e destacada, sem ocupar desnecessariamente a tela.
+
+Manter o padrão visual atual do sistema, aprimorando a informação.
+
+A confirmação deverá aparecer somente após o servidor confirmar a baixa.
+
+Se houver erro, não apresentar mensagem de sucesso.
+
+---
+
+## 4.6 CONFIRMAÇÃO SONORA PROFISSIONAL NA PORTARIA
+
+Queremos acrescentar uma confirmação sonora profissional ao processo de leitura do QR Code.
+
+Essa confirmação é destinada ao porteiro, no computador ou dispositivo utilizado na Portaria.
+
+O objetivo é que o porteiro perceba imediatamente que o QR Code foi reconhecido e, depois, saiba que a baixa foi concluída.
+
+### Dois momentos sonoros distintos
+
+**Primeiro som — QR Code reconhecido**
+
+Assim que o leitor identificar corretamente um QR Code, emitir um sinal curto, nítido e profissional, indicando reconhecimento da leitura.
+
+Esse primeiro sinal não significa que a baixa foi autorizada.
+
+**Segundo som — Baixa concluída**
+
+Somente depois que o servidor confirmar a baixa com sucesso, emitir um segundo sinal sonoro de confirmação.
+
+Esse segundo som deverá transmitir claramente a ideia de operação concluída.
+
+### Identidade sonora
+
+Queremos um som:
+
+- Profissional.
+- Curto.
+- Limpo.
+- Agradável.
+- Discreto, mas perceptível.
+- Com característica de reconhecimento de equipamento profissional de leitura.
+- Sem aparência de alerta de erro.
+- Sem excesso de efeitos ou sons infantis.
+
+Os dois sinais deverão pertencer à mesma identidade sonora.
+
+Não utilizar sons longos que prejudiquem o trabalho da Portaria.
+
+Não utilizar mensagens faladas.
+
+### Regras de segurança
+
+- Som de reconhecimento somente após leitura válida pelo leitor.
+- Som de baixa concluída somente após confirmação do servidor.
+- Não emitir som de sucesso em código inválido.
+- Não emitir som de baixa concluída se a encomenda já estiver retirada.
+- Não emitir som de sucesso em falha de rede.
+- Não repetir sons por leituras duplicadas.
+- Não emitir confirmação de baixa quando a operação não foi efetivamente concluída.
+
+Considerar as políticas de autoplay dos navegadores.
+
+Se necessário, desbloquear o áudio por meio de gesto real do porteiro, sem criar interrupções desnecessárias no fluxo.
+
+Não deixar que uma restrição do navegador comprometa a baixa. A confirmação visual deverá continuar funcionando normalmente caso o áudio esteja indisponível.
+
+---
+
+## 4.7 CONFIRMAÇÃO VISUAL NA TELA DO MORADOR
+
+Esta melhoria é muito importante.
+
+A página pública do morador já possui uma identidade visual, incluindo um espaço VERDE localizado acima do nome da marca.
+
+Queremos aproveitar exatamente esse espaço.
+
+Quando o morador apresentar seu QR Code e a encomenda for efetivamente baixada na Portaria, a página pública deverá mostrar uma confirmação visual de retirada.
+
+### Mensagem principal
+
+RETIRADA
+
+A palavra deverá aparecer em tamanho bom, com destaque visual e excelente legibilidade sobre o fundo verde.
+
+### Exemplo ilustrativo
+
+RETIRADA
+
+Encomenda retirada com sucesso!
+
+Casa 125
+
+João da Silva
+
+ENCOMENDAS INTELIGENTES
+
+### Posicionamento
+
+- Utilizar o espaço verde que já existe acima do nome da marca.
+- Não criar um novo espaço desnecessário.
+- Não reorganizar toda a página pública.
+- Não prejudicar a identidade visual existente.
+- Utilizar letras grandes e destacadas.
+- Garantir contraste adequado com o fundo verde.
+- Manter a marca visível.
+
+A palavra RETIRADA deverá ser o elemento de maior destaque.
+
+A identificação da residência deverá aparecer abaixo, e o nome do morador poderá ser apresentado quando estiver disponível.
+
+### Comportamento
+
+1. O morador apresenta seu QR Code.
+2. O leitor da Portaria reconhece o código.
+3. O sistema realiza as validações.
+4. O servidor confirma a baixa.
+5. A página pública do morador identifica que a encomenda foi retirada.
+6. O espaço verde passa temporariamente a exibir RETIRADA em destaque.
+7. Abaixo aparecem a residência e o nome do morador, quando disponíveis.
+8. Depois de alguns segundos, a página retorna à apresentação visual normal.
+
+### Comunicação entre Portaria e página pública
+
+Investigar a melhor maneira de transmitir o status atualizado para a página pública.
+
+Reaproveitar os mecanismos de sincronização, atualização e consulta já existentes.
+
+Se já existir Supabase Realtime ou outro mecanismo adequado, verificar sua utilização antes de criar um novo.
+
+Não implementar um sistema paralelo desnecessário.
+
+A confirmação deverá aparecer somente quando houver evidência de que a baixa foi concluída no servidor.
+
+Se a leitura do QR Code ocorrer, mas a baixa falhar, a página do morador NÃO deverá apresentar RETIRADA.
+
+Se houver atraso de comunicação, não apresentar uma confirmação falsa.
+
+### Som no dispositivo do morador
+
+IMPORTANTE:
+
+O morador NÃO precisa receber confirmação sonora.
+
+Não reproduzir nenhum som no celular do morador.
+
+A confirmação para ele será exclusivamente visual.
+
+A confirmação sonora será destinada somente ao ambiente da Portaria.
+
+### Privacidade
+
+Apresentar apenas informações necessárias à confirmação.
+
+Não expor dados de outras encomendas, moradores ou unidades.
+
+Não exibir informações pessoais desnecessárias na página pública.
+
+### Critérios de aprovação da confirmação do morador
+
+- QR Code reconhecido.
+- Baixa confirmada no servidor.
+- Palavra RETIRADA exibida no espaço verde.
+- Residência identificada corretamente.
+- Nome apresentado somente quando disponível.
+- Nenhum som reproduzido no celular.
+- Nenhuma confirmação exibida em caso de erro.
+- Página retorna ao estado visual normal após o período definido.
+- QR Code público continua funcionando normalmente.
+
+---
+
+# PARTE 5 — ONDA 3: ALERTA SONORO DE TRÊS MINUTOS
+
+Esta onda deverá aguardar autorização posterior.
+
+Objetivo: lembrar o porteiro de enviar notificações pendentes no modo APÓS REGISTRO.
+
+### Regra fundamental
+
+O alerta deverá funcionar exclusivamente no modo APÓS REGISTRO.
+
+No modo de envio imediato, deverá permanecer completamente desligado.
+
+### Comportamento desejado
+
+1. Porteiro ativa APÓS REGISTRO.
+2. Começa a cadastrar encomendas normalmente.
+3. Pode cadastrar várias encomendas sem interrupções.
+4. O sistema identifica que a etapa de cadastramento terminou.
+5. Ao retornar à Portaria, se houver notificações pendentes, começa a contagem de três minutos.
+6. Depois de 180 segundos, emitir alerta visual e sonoro.
+7. Repetir a cada três minutos enquanto houver notificações pendentes.
+8. Quando todas forem enviadas, interromper imediatamente o alerta.
+
+Não iniciar o cronômetro durante captura de fotos, OCR, identificação de moradores ou salvamento.
+
+### Áudio
+
+Reaproveitar o mecanismo existente.
+
+Verificar as políticas de autoplay.
+
+Considerar retorno da aba ao primeiro plano e desbloqueio da tela.
+
+Recalcular o tempo com timestamps reais, sem depender exclusivamente de setInterval.
+
+Preservar o sininho de silenciar e o controle de volume existentes.
+
+Corrigir textos residuais de cinco minutos para três minutos quando se referirem a esse alerta.
+
+Não confundir os sons de alerta de notificações pendentes com os dois sinais sonoros específicos da leitura e baixa do QR Code.
+
+---
+
+# PARTE 6 — ONDA 4: REMOVER A CONFIRMAÇÃO REPETITIVA DO WHATSAPP
+
+Esta onda deverá aguardar autorização posterior.
+
+### Situação atual
+
+O sistema NÃO utiliza atualmente uma API de envio de mensagens pelo WhatsApp.
+
+Existe estrutura preparada para eventual uso futuro, mas o fluxo atual é manual, por meio de links wa.me.
+
+### Decisão operacional do usuário
+
+O sistema deverá considerar a notificação como enviada automaticamente quando o porteiro clicar no botão que abre o WhatsApp.
+
+Essa é uma regra operacional provisória, escolhida expressamente pelo usuário.
+
+### Comportamento desejado
+
+1. Porteiro clica no botão que abre o WhatsApp.
+2. O sistema registra a notificação como enviada.
+3. A atualização é persistida usando os mecanismos existentes.
+4. A encomenda passa a cumprir a condição operacional de notificação exigida para a baixa.
+5. O WhatsApp é aberto normalmente pelo link wa.me.
+6. Nenhuma pergunta adicional aparece.
+7. O porteiro pode continuar imediatamente o trabalho.
+
+### Momento da marcação
+
+A marcação só deverá ocorrer no evento de clique explícito que dispara a abertura do WhatsApp.
+
+Não marcar como enviado quando:
+
+- A tela carregar.
+- O modal abrir.
+- O link for preparado.
+- A encomenda for cadastrada.
+- O texto da mensagem for montado.
+
+### Remoção da confirmação repetitiva
+
+Investigar os estados atuais, incluindo:
+
+- isWaitingForReturn em PackageNew.tsx.
+- pendingWhatsAppConfirm em Portaria.tsx.
+
+Confirmar se esses estados ainda são responsáveis pelas interrupções.
+
+Remover os modais repetitivos que perguntam se a mensagem foi enviada.
+
+Não exigir confirmação posterior.
+
+Não bloquear câmera, cadastro ou fila.
+
+### Preservações
+
+- Não alterar os textos das mensagens.
+- Não alterar os destinatários.
+- Não alterar a geração dos links wa.me.
+- Não ativar Z-API.
+- Não configurar credenciais de API.
+- Não implementar envio automático por API.
+- Não criar dependências externas.
+- Preservar os registros de auditoria aplicáveis.
+- Evitar atualizações duplicadas em cliques repetidos.
+
+### Limitação técnica importante
+
+O sistema poderá registrar que o porteiro clicou para abrir o WhatsApp, conforme a regra operacional escolhida.
+
+Isso não significa que o sistema consiga confirmar tecnicamente que o porteiro apertou ENVIAR ou que a mensagem foi entregue.
+
+Essa limitação deverá ser respeitada tecnicamente, sem contrariar a decisão operacional do usuário.
+
+O usuário poderá definir futuramente um mecanismo adicional de segurança.
+
+---
+
+# PARTE 7 — PUBLICIDADE: FORA DO ESCOPO
+
+A criação de publicidade comercial na página pública será tratada em uma etapa futura e independente.
+
+Não criar agora:
+
+- Tabela de anúncios.
+- Bucket de publicidade.
+- Banners.
+- Espaços publicitários.
+- Modificações em Retirada.tsx para anúncios.
+- Publicidade nas mensagens do WhatsApp.
+
+Não misturar publicidade com as melhorias operacionais deste projeto.
+
+---
+
+# PARTE 8 — REGRAS OBRIGATÓRIAS DE IMPLEMENTAÇÃO
+
+1. Trabalhar exclusivamente sobre o código atual.
+2. Não utilizar versões antigas como base.
+3. Não reescrever funcionalidades homologadas.
+4. Não fazer refatorações não solicitadas.
+5. Não modificar arquivos fora do escopo autorizado.
+6. Não remover funcionalidades existentes.
+7. Não alterar autenticação operacional.
+8. Não comprometer isolamento multi-tenant.
+9. Não alterar tabelas, políticas RLS ou migrations sem justificativa e autorização.
+10. Não instalar ou atualizar dependências sem necessidade comprovada.
+11. Não utilizar dados de produção para testes destrutivos.
+12. Não apagar registros ou arquivos de produção.
+13. Não realizar commit, push ou deploy sem autorização expressa.
+14. Não declarar sucesso sem evidências de testes.
+15. Não avançar automaticamente de uma onda para outra.
+
+### Regra especial sobre o QR Code
+
+Toda confirmação de baixa deverá depender da confirmação real do servidor.
+
+O reconhecimento visual ou sonoro do QR Code, isoladamente, não representa autorização nem conclusão da baixa.
+
+### Regra especial sobre a página pública
+
+Não alterar o funcionamento atual da página pública, seu QR Code, seus dados ou sua identidade visual além do necessário para apresentar a confirmação temporária RETIRADA.
+
+---
+
+# PARTE 9 — TESTES E HOMOLOGAÇÃO
+
+## 9.1 Testes obrigatórios da Onda 1
+
+Executar os testes técnicos aplicáveis:
+
+- Build de produção.
+- TypeScript / verificação de tipos.
+- Testes automatizados existentes.
+- Testes dos endpoints alterados.
+- Testes de autorização por perfil.
+- Teste de contagem com mais de 1.000 registros em ambiente seguro.
+- Testes com registros [QTD: X].
+- Testes de isolamento por condomínio.
+
+### Checklist da Onda 1
+
+| Teste | Resultado esperado |
+|---|---|
+| Dashboard com mais de 1.000 registros | Total completo |
+| Registros com [QTD: X] | Soma correta |
+| Pendentes | Total correto |
+| Retiradas | Total correto |
+| Porteiro acessando ADICIONAR VÁRIAS | Bloqueado |
+| Administrador acessando ADICIONAR VÁRIAS | Preservado |
+| QUANTIDADE DE ENCOMENDAS | Funcionando |
+| Cadastro individual | Sem regressão |
+| Baixa individual | Sem regressão |
+| Página pública | Sem regressão |
+| QR Code público | Preservado |
+| Token operacional | Funcionando |
+| Isolamento entre condomínios | Preservado |
+
+## 9.2 Planejamento de homologação das ondas futuras
+
+Antes de executar cada onda, apresentar um checklist específico com:
+
+- Cenário normal.
+- Código inválido.
+- Código duplicado.
+- Encomenda já retirada.
+- Falha de rede.
+- Falha de autorização.
+- Atualização simultânea.
+- Retorno da página ao estado normal.
+- Comportamento em dispositivos diferentes.
+- Possíveis efeitos colaterais.
+
+Para a Onda 2, incluir também:
+
+- Câmera traseira ativada automaticamente.
+- Digitação simultânea.
+- QR reconhecido.
+- Baixa efetivamente concluída.
+- Som de reconhecimento.
+- Som de conclusão.
+- Mensagem da Portaria com residência.
+- Mensagem com nome quando disponível.
+- Página pública exibindo RETIRADA.
+- Nenhum som no dispositivo do morador.
+- Ausência de confirmação falsa em caso de falha.
+- Liberação correta da câmera ao fechar o modal.
+
+Não declarar homologação apenas porque o build foi concluído.
+
+Distinguir:
+
+- Teste automatizado aprovado.
+- Teste técnico de integração aprovado.
+- Teste manual realizado.
+- Teste pendente de validação do usuário.
+
+---
+
+# PARTE 10 — RELATÓRIO FINAL OBRIGATÓRIO
+
+Ao concluir a auditoria e a Onda 1, apresentar:
+
+1. Diagnóstico do código antes das alterações.
+2. Arquivos modificados.
+3. Funções alteradas.
+4. Descrição exata das mudanças.
+5. Justificativa técnica.
+6. Testes executados.
+7. Resultados de cada teste.
+8. Testes pendentes.
+9. Riscos identificados.
+10. Confirmação de preservação das funcionalidades homologadas.
+11. Checklist de homologação.
+12. Confirmação de que nenhuma onda seguinte foi executada.
+13. Recomendação para a próxima etapa.
+
+Se algum item não puder ser concluído com segurança, interromper somente a parte afetada, explicar o motivo e apresentar a alternativa.
+
+Não declarar sucesso sem evidências.
+
+---
+
+# INSTRUÇÃO FINAL — AUTORIZAÇÃO INICIAL
+
+Comece pela auditoria pontual, em modo somente leitura.
+
+Depois, se não houver impedimentos técnicos relevantes, implemente exclusivamente a ONDA 1:
+
+1. Correção da contagem real do Dashboard.
+2. Bloqueio de acesso do perfil porteiro a ADICIONAR VÁRIAS.
+
+Preserve integralmente QUANTIDADE DE ENCOMENDAS e todas as funcionalidades homologadas.
+
+Ao terminar a Onda 1, apresente o relatório completo e aguarde autorização.
+
+**NÃO EXECUTE A ONDA 2, A ONDA 3 OU A ONDA 4 NESTA AUTORIZAÇÃO INICIAL.**
+
+As melhorias de QR Code, identificação da residência, confirmação sonora na Portaria e confirmação visual RETIRADA na página pública do morador estão especificadas para a futura Onda 2, mas ainda dependem de autorização expressa.
+
+Não realizar commit, push ou deploy sem autorização do usuário.

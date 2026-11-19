@@ -1,10 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { supabase } from '../lib/supabase';
+import { api } from '../lib/apiClient';
+import { normalizeRole } from '../lib/authUtils';
 import { Package, Profile } from '../types';
-import { Package as PackageIcon, Plus, Loader2, Search, User, Home, Truck, Calendar, CheckCircle, Clock, QrCode, Hash, MessageSquare, MessageCircle, AlertCircle, ArrowRight } from 'lucide-react';
+import { Package as PackageIcon, Plus, Loader2, Search, User, Home, Truck, Calendar, CheckCircle, Clock, QrCode, Hash, MessageSquare, MessageCircle, AlertCircle, ArrowRight, ChevronLeft, ChevronRight } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { formatDate, formatSafeDateTime } from '../lib/dateUtils';
+import { getPackageItemCount, sumPackageItems, isPackageNotificationConfirmed, getPackageNotificationBadgeState } from '../lib/packageUtils';
 import { formatResidentAddress, formatPackageUnit } from '../lib/residentUtils';
 import { ptBR } from 'date-fns/locale';
 import { motion } from 'motion/react';
@@ -12,6 +14,25 @@ import { motion } from 'motion/react';
 interface PackageListProps {
   user: Profile;
 }
+
+const KNOWN_CARRIERS = [
+  'Shopee',
+  'Mercado Livre',
+  'Amazon',
+  'Correios',
+  'TikTok Shop',
+  'Shein',
+  'Magalu',
+  'Jadlog',
+  'Loggi'
+];
+
+const extractKnownCarrier = (notes?: string): string => {
+  if (!notes) return '';
+  const lower = notes.toLowerCase();
+  const found = KNOWN_CARRIERS.find(c => lower.includes(c.toLowerCase()));
+  return found || '';
+};
 
 export default function PackageList({ user }: PackageListProps) {
   const [packages, setPackages] = useState<Package[]>([]);
@@ -22,32 +43,32 @@ export default function PackageList({ user }: PackageListProps) {
   const [selectedPkg, setSelectedPkg] = useState<Package | null>(null);
   const [viewPhotoUrl, setViewPhotoUrl] = useState<string | null>(null);
 
+  const [currentPage, setCurrentPage] = useState(1);
+  const pageSize = 50;
+  const [totalCount, setTotalCount] = useState(0);
+
   useEffect(() => {
-    fetchPackages();
-  }, [user.condominium_id, user.id]);
+    fetchPackages(currentPage);
+  }, [user.condominium_id, user.id, currentPage]);
 
-  const fetchPackages = async () => {
-    if (!user.condominium_id) return;
+  const fetchPackages = async (targetPage = currentPage) => {
+    const isResident = normalizeRole(user.role) === 'resident';
+    if (!user.condominium_id && !isResident) return;
+    setLoading(true);
     try {
-      const { data, error } = await supabase
-        .from('packages')
-        .select('*, moradores(nome, unidade, unit_type, block, street), package_id:id, unit_label:unit_number')
-        .eq('condominium_id', user.condominium_id)
-        .order('received_at', { ascending: false });
+      const from = (targetPage - 1) * pageSize;
+      const endpoint = isResident
+        ? `/api/portal/my-packages?offset=${from}&limit=${pageSize}`
+        : `/api/operational/packages?status=all&offset=${from}&limit=${pageSize}${user.condominium_id ? `&condominiumId=${encodeURIComponent(user.condominium_id)}` : ''}`;
 
-      if (error) throw error;
-      
-      let pkgs = data || [];
-      
-      if (user.role === 'resident') {
-        // Filter by recipient_id or unit
-        pkgs = pkgs.filter((p: any) => 
-          p.recipient_id === user.id || 
-          p.unit_label === (user.unit || user.unidade || '')
-        );
+      const res = await api.get<{ packages?: Package[]; totalCount?: number }>(endpoint);
+      if (!res.ok) {
+        throw new Error(res.error || 'Erro ao carregar encomendas');
       }
-
-      setPackages(pkgs);
+      setPackages(res.data?.packages || []);
+      if (typeof res.data?.totalCount === 'number') {
+        setTotalCount(res.data.totalCount);
+      }
     } catch (error) {
       console.error('Erro ao buscar encomendas:', error);
     } finally {
@@ -69,7 +90,7 @@ export default function PackageList({ user }: PackageListProps) {
 
     const groups: { [key: string]: any[] } = {};
     pending.forEach(pkg => {
-      const key = pkg.pickup_token || pkg.pickup_code || pkg.id;
+      const key = pkg.pickup_token ? `tok_${pkg.pickup_token}` : (pkg.recipient_id ? `rec_${pkg.recipient_id}_${pkg.pickup_code || 'pend'}` : (pkg.pickup_code ? `code_${pkg.pickup_code}` : pkg.id));
       if (!groups[key]) groups[key] = [];
       groups[key].push(pkg);
     });
@@ -80,7 +101,7 @@ export default function PackageList({ user }: PackageListProps) {
         ...group[0],
         isGroup: true,
         packages: group,
-        count: group.length
+        count: sumPackageItems(group)
       };
     });
 
@@ -88,6 +109,7 @@ export default function PackageList({ user }: PackageListProps) {
   };
 
   const filteredPackages = getFilteredPackages();
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
 
   const getStatusBadge = (status: string) => {
     const variants: any = {
@@ -108,33 +130,38 @@ export default function PackageList({ user }: PackageListProps) {
   };
 
   const getWhatsAppBadge = (status: string, pkg?: any) => {
-    // Check if was notified by flag or by status string
-    const isActuallySent = (pkg?.whatsapp_sent || pkg?.whatsapp_notified) || 
-      ['sent', 'enviado', 'delivered', 'read'].includes((status || '').toLowerCase());
-    
-    if (isActuallySent) {
+    const notifyAfter = localStorage.getItem('notify_after_registration') === 'true';
+    const badgeState = getPackageNotificationBadgeState(pkg, {
+      notifyAfter,
+      interactive: false,
+      rawStatus: status
+    });
+
+    if (badgeState.kind === 'confirmed') {
       return (
         <div className="flex items-center gap-2 px-5 py-0.5 text-emerald-600 font-black opacity-90 hover:opacity-100 bg-emerald-50/50 rounded-full border border-emerald-100" title="Avisado">
-          <span className="text-[12px] uppercase tracking-wide">💬 Avisado</span>
+          <span className="text-[12px] uppercase tracking-wide">{badgeState.label}</span>
         </div>
       );
     }
 
+    if (badgeState.kind === 'delivered_unnotified' || !badgeState.label) {
+      return null;
+    }
+
+    const displayLabel = badgeState.kind === 'notify_after_pending'
+      ? (badgeState.summary.isMixed
+          ? `Aguardando aviso (${badgeState.summary.pendingItems}/${badgeState.summary.totalItems})`
+          : 'Aguardando aviso')
+      : badgeState.label;
+
     return (
-      <motion.div 
-        animate={{ 
-          scale: [1, 1.05, 1],
-        }}
-        transition={{ 
-          duration: 1.5, 
-          repeat: Infinity,
-          ease: "easeInOut"
-        }}
-        className="flex items-center gap-1.5 px-3 py-1 bg-red-50 text-red-600 font-bold rounded-full border border-red-200 shadow-sm"
-        title="Clique para avisar o morador"
+      <div
+        className="flex items-center gap-1.5 px-3 py-1 bg-zinc-100 text-zinc-600 font-bold rounded-full border border-zinc-200"
+        title={displayLabel}
       >
-        <span className="text-[10px] uppercase tracking-tight">💬 Avisar Morador</span>
-      </motion.div>
+        <span className="text-[10px] uppercase tracking-tight">{displayLabel}</span>
+      </div>
     );
   };
 
@@ -185,6 +212,7 @@ export default function PackageList({ user }: PackageListProps) {
           <Loader2 className="w-10 h-10 animate-spin text-emerald-600" />
         </div>
       ) : filteredPackages.length > 0 ? (
+        <>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {filteredPackages.map((pkg: any) => (
             <div 
@@ -209,7 +237,7 @@ export default function PackageList({ user }: PackageListProps) {
                     )}
                   </div>
                   <span className={`absolute -top-3 -right-3 text-white text-sm font-bold w-9 h-9 rounded-full flex items-center justify-center border-2 border-white shadow-lg z-10 group-hover:scale-110 transition-transform ${pkg.status === 'delivered' ? 'bg-emerald-500 shadow-[0_4px_12px_rgba(16,185,129,0.3)]' : 'bg-red-500 shadow-[0_4px_12px_rgba(239,68,68,0.3)]'}`}>
-                    {pkg.isGroup ? pkg.count : 1}
+                    {pkg.isGroup ? pkg.count : getPackageItemCount(pkg)}
                   </span>
                 </div>
                 <div className="flex items-center gap-2">
@@ -234,6 +262,36 @@ export default function PackageList({ user }: PackageListProps) {
                   <Home className="w-4 h-4 flex-shrink-0" />
                   <p className="font-medium">{formatPackageUnit(pkg)}</p>
                 </div>
+
+                {/* Informação de Transportadora / Loja Entregadora */}
+                {(() => {
+                  if (!pkg.isGroup) {
+                    const carrierName = pkg.carrier || extractKnownCarrier(pkg.notes);
+                    if (!carrierName) return null;
+                    return (
+                      <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl text-xs font-bold bg-blue-50 text-blue-700 border border-blue-100 shadow-xs">
+                        <Truck className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                        <span>{carrierName.toUpperCase()}</span>
+                      </div>
+                    );
+                  } else {
+                    const carriers = Array.from(new Set(
+                      (pkg.packages || []).map((p: any) => p.carrier || extractKnownCarrier(p.notes)).filter(Boolean)
+                    ));
+                    if (carriers.length === 0) return null;
+                    return (
+                      <div className="flex flex-wrap gap-1.5 pt-0.5">
+                        {carriers.map((cName: any, idx: number) => (
+                          <span key={idx} className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg text-[11px] font-bold bg-blue-50 text-blue-700 border border-blue-100 shadow-xs">
+                            <Truck className="w-3 h-3 text-blue-600 shrink-0" />
+                            <span>{String(cName).toUpperCase()}</span>
+                          </span>
+                        ))}
+                      </div>
+                    );
+                  }
+                })()}
+
                 <div className="mt-4 pt-4 border-t border-zinc-50 space-y-3">
                   <div className="flex flex-col">
                     <span className="text-[10px] font-bold text-zinc-400 tracking-widest uppercase">
@@ -241,6 +299,18 @@ export default function PackageList({ user }: PackageListProps) {
                     </span>
                     <p className={`font-mono text-sm font-bold ${pkg.status === 'delivered' ? 'text-emerald-600' : 'text-red-600'}`}>{pkg.pickup_code || '-'}</p>
                   </div>
+
+                  {!pkg.isGroup && (pkg.carrier || extractKnownCarrier(pkg.notes)) && (
+                    <div className="flex flex-col">
+                      <span className="text-[10px] font-bold text-zinc-400 tracking-widest uppercase">
+                        Transportadora / Loja
+                      </span>
+                      <p className="text-sm font-bold text-zinc-800 flex items-center gap-1.5 mt-0.5">
+                        <Truck className="w-4 h-4 text-blue-600 shrink-0" />
+                        <span>{pkg.carrier || extractKnownCarrier(pkg.notes)}</span>
+                      </p>
+                    </div>
+                  )}
 
                   {!pkg.isGroup && pkg.tracking_code && (
                     <div className="flex flex-col">
@@ -286,6 +356,38 @@ export default function PackageList({ user }: PackageListProps) {
             </div>
           ))}
         </div>
+
+        {totalCount > pageSize && (
+          <div className="flex flex-col sm:flex-row items-center justify-between gap-4 mt-8 pt-6 border-t border-zinc-200">
+            <p className="text-sm text-zinc-500 font-medium">
+              Exibindo {Math.min((currentPage - 1) * pageSize + 1, totalCount)} a {Math.min(currentPage * pageSize, totalCount)} de {totalCount} encomendas
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                disabled={currentPage <= 1 || loading}
+                className="px-4 py-2 rounded-xl border border-zinc-200 text-zinc-700 font-semibold text-sm hover:bg-zinc-50 disabled:opacity-40 disabled:cursor-not-allowed transition-all flex items-center gap-1.5"
+              >
+                <ChevronLeft className="w-4 h-4" />
+                Anterior
+              </button>
+              <span className="px-3.5 py-1.5 bg-zinc-100 rounded-xl text-xs font-bold text-zinc-700">
+                Página {currentPage} de {totalPages}
+              </span>
+              <button
+                type="button"
+                onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                disabled={currentPage >= totalPages || loading}
+                className="px-4 py-2 rounded-xl border border-zinc-200 text-zinc-700 font-semibold text-sm hover:bg-zinc-50 disabled:opacity-40 disabled:cursor-not-allowed transition-all flex items-center gap-1.5"
+              >
+                Próxima
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        )}
+        </>
       ) : (
         <div className="bg-white rounded-3xl border border-zinc-100 p-20 text-center">
           <div className="w-20 h-20 bg-zinc-50 text-zinc-300 rounded-full flex items-center justify-center mx-auto mb-6">

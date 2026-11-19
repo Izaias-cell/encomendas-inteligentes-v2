@@ -410,3 +410,24 @@ BEGIN
   RETURN v_audit_id;
 END;
 $ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- ==========================================
+-- ÍNDICES DE PERFORMANCE E ESCALABILIDADE (ETAPA 5)
+-- ==========================================
+
+-- 1. Busca rápida de encomendas pendentes e entregues por condomínio (Portaria e Listagem)
+CREATE INDEX IF NOT EXISTS idx_packages_condo_status_received 
+  ON packages (condominium_id, status, received_at DESC);
+
+-- 2. Busca O(1) de encomendas pelo link público do WhatsApp /retirada?token=...
+CREATE INDEX IF NOT EXISTS idx_packages_pickup_token 
+  ON packages (pickup_token);
+
+-- 3. Validação instantânea de código numérico de 6 dígitos e QR Code na portaria
+CREATE INDEX IF NOT EXISTS idx_packages_pickup_code 
+  ON packages (pickup_code);
+
+-- 4. Agrupamento ágil de encomendas do mesmo morador e visão do morador
+CREATE INDEX IF NOT EXISTS idx_packages_recipient_status 
+  ON packages (recipient_id, status);
+
